@@ -1,0 +1,21 @@
+python:
+  - "**/*.py"
+  - "requirements.txt"
+  - "pipeline.py"
+  - "utils.py"
+  - "app.py"
+
+frontend:
+  - "frontend/**"
+  - "package.json"
+  - "**/*.js"
+  - "**/*.ts"
+  - "**/*.tsx"
+
+docker:
+  - "docker-compose.yml"
+  - "**/*.yml"
+  - "**/*.yaml"
+
+ci:
+  - ".github/workflows/**"
