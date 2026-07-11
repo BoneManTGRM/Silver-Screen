@@ -1,0 +1,15 @@
+services:
+  silver-screen:
+    build: .
+    ports:
+      - "7860:7860"
+    volumes:
+      - .:/app
+    command: python app.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
