@@ -1,16 +1,9 @@
-streamlit
 gradio
-huggingface_hub
-diffusers
-torch --index-url https://download.pytorch.org/whl/cu121
-torchvision
-torchaudio
 moviepy
-Pillow
-opencv-python
-langchain
+requests
+pillow
+openai
 ollama
 ffmpeg-python
-requests
-pydantic
-openai # optional for API
+numpy
+pandas
