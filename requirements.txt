@@ -1,9 +1,8 @@
-gradio
+gradio>=5.0
 moviepy
-requests
 pillow
-openai
+requests
 ollama
-ffmpeg-python
 numpy
-pandas
+# For local AI: add torch, diffusers, transformers if GPU available
+# ComfyUI separate install for pro video
