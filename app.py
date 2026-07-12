@@ -1,36 +1,38 @@
 import gradio as gr
 import os
 from moviepy.editor import *
-# Mock for now, in real add diffusers, etc.
+from voice_clone import VoiceCloner
 
-def generate_scene(prompt, model='flux'):
-    # Placeholder - in full version integrate HF or local
-    return f'Generated video clip for: {prompt} using {model}'
+# Placeholder for pipeline
+class SilverScreenPipeline:
+    def generate_scene(self, prompt, model='flux'):
+        return f'Generated clip for: {prompt}'
 
-def break_script(script):
-    # Simple breakdown
-    scenes = script.split('\n\n')
-    return [f'Scene {i+1}: {s[:100]}...' for i,s in enumerate(scenes)]
+pipe = SilverScreenPipeline()
+cloner = VoiceCloner()
 
-def create_movie(script, style='cinematic'):
-    scenes = break_script(script)
-    clips = []
-    for s in scenes:
-        clip_info = generate_scene(s)
-        # Mock clip
-        clips.append(clip_info)
-    return '\n'.join(clips) + '\n\nMovie assembled! Export ready.'
-
-with gr.Blocks(title='Silver-Screen - AI Movie Maker') as demo:
-    gr.Markdown('# 🎥 Silver-Screen
-## AI Movie Maker - Better than Pixel Bunny')
+with gr.Blocks(title='Silver-Screen - AI Movie & Trailer Maker') as demo:
+    gr.Markdown('# 🎥 Silver-Screen\n## AI Movie Maker with ElevenLabs Voice Cloning')
+    with gr.Tab('Voice Clone'):
+        ref_audio = gr.Audio(type='filepath', label='Upload voice sample (6+ sec)')
+        voice_name = gr.Textbox(value='Narrator', label='Voice Name')
+        clone_btn = gr.Button('Clone Voice', variant='primary')
+        voice_id_out = gr.Textbox(label='Voice ID')
+        clone_btn.click(cloner.clone_voice, inputs=[ref_audio, voice_name], outputs=voice_id_out)
+    with gr.Tab('Trailer Maker'):
+        title = gr.Textbox(label='Movie Title')
+        logline = gr.Textbox(label='Logline')
+        scenes = gr.Textbox(label='Scenes (one per line)', lines=5)
+        voice_sample = gr.Audio(type='filepath', label='Voice Sample')
+        generate_btn = gr.Button('Generate Trailer with Voice', variant='primary')
+        output = gr.Textbox(label='Status')
+        # Placeholder
+        generate_btn.click(lambda *args: 'Trailer generation placeholder - voice cloned!', inputs=[], outputs=output)
     with gr.Tab('Script to Movie'):
-        script_input = gr.Textbox(label='Full Script or Scene Description', lines=10, placeholder='Write your 80 min movie script here...')
-        style = gr.Dropdown(['cinematic', 'anime', 'realistic', 'nft art'], label='Style', value='cinematic')
-        generate_btn = gr.Button('Generate Full Movie Pipeline', variant='primary')
-        output = gr.Textbox(label='Output Log')
-        generate_btn.click(create_movie, inputs=[script_input, style], outputs=output)
-    # Add more tabs for model picker, timeline, etc.
-    gr.Markdown('## Next steps: Install ComfyUI for pro video gen, Ollama for LLM script help.')
+        script_input = gr.Textbox(label='Script', lines=10)
+        style = gr.Dropdown(['cinematic', 'anime', 'realistic'], value='cinematic')
+        generate_btn2 = gr.Button('Generate Movie')
+        output2 = gr.Textbox()
+        generate_btn2.click(pipe.generate_scene, inputs=[script_input], outputs=output2)
 
 demo.launch()
