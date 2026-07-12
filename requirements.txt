@@ -4,5 +4,7 @@ pillow
 requests
 ollama
 numpy
-# For local AI: add torch, diffusers, transformers if GPU available
-# ComfyUI separate install for pro video
+elevenlabs
+pydub
+# For voice cloning and audio
+# ComfyUI, torch etc for advanced video separate
