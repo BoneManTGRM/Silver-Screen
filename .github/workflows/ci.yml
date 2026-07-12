@@ -1,10 +1,13 @@
-name: CI - Python + Next.js (Fixed)
+name: CI - Python + Next.js
 
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -24,7 +27,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt flake8 black
           flake8 . --count --exit-zero --statistics || true
-          python -c 'import app, pipeline, utils; print("✅ Python OK")'
+          python -c 'import app, pipeline, utils; print("Python OK")'
 
       # === Frontend ===
       - name: Set up Node.js
@@ -37,16 +40,12 @@ jobs:
         run: |
           npm install
           npm run build --if-present || echo 'Build warnings ok'
-          echo '✅ Frontend processed'
+          echo 'Frontend processed'
 
       # === Security ===
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
 
-permissions:
-  contents: read
-
-  # Separate CodeQL job kept simple
   codeql:
     runs-on: ubuntu-latest
     permissions:
