@@ -1,6 +1,5 @@
 import gradio as gr
-import os
-from moviepy.editor import *
+
 from voice_clone import VoiceCloner
 
 # Placeholder for pipeline
