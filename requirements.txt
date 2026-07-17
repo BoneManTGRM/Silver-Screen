@@ -1,14 +1,4 @@
 gradio>=5.0
 pillow
 requests
-ollama
 numpy
-elevenlabs
-pydub
-python-dotenv
-moviepy
-replicate
-# moviepy for video editing (use v1.x compatible if issues)
-# replicate for AI image/video generation
-# For voice cloning and audio
-# ComfyUI, torch etc for advanced video separate
