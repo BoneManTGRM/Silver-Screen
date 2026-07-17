@@ -1,4 +1,9 @@
 gradio>=5.0
+moviepy
 pillow
-requests
 numpy
+requests
+soundfile
+pydub
+opencv-python
+ffmpeg-python
