@@ -1,9 +1,10 @@
 gradio>=5.0
-moviepy
 pillow
-numpy
 requests
-soundfile
-pydub
-opencv-python
-ffmpeg-python
+numpy
+elevenlabs
+moviepy
+python-dotenv
+ollama
+replicate
+imageio[ffmpeg]
