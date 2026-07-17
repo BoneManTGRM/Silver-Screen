@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,6 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # === System deps for video/audio ===
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       # === Python ===
       - name: Set up Python
@@ -27,8 +34,8 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt flake8 black
           flake8 . --count --exit-zero --statistics || true
-          black --check --diff *.py || true  # added quick Black check
-          python -c 'import app, pipeline, utils, voice_clone; print("✅ All modules OK")'  # expanded import test
+          black --check --diff *.py || true
+          python -c 'import app, pipeline, utils, voice_clone; print("✅ All modules OK")'
 
       # === Frontend ===
       - name: Set up Node.js
