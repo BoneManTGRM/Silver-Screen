@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -26,8 +27,12 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt flake8 black
+          echo "=== Running Black check (non-blocking for now) ==="
+          black --check . || echo "Black would make changes (run 'black .' locally to format)"
+          echo "=== Running Flake8 (non-blocking) ==="
           flake8 . --count --exit-zero --statistics || true
-          python -c 'import app, pipeline, utils; print("Python OK")'
+          echo "=== Testing imports ==="
+          python -c 'import app, pipeline, utils, voice_clone; print("Python imports OK")'
 
       # === Frontend ===
       - name: Set up Node.js

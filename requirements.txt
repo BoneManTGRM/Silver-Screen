@@ -1,10 +1,11 @@
 gradio>=5.0
-moviepy
 pillow
 requests
 ollama
 numpy
 elevenlabs
 pydub
+python-dotenv
+# moviepy removed - was unused and caused import issues with v2.x
 # For voice cloning and audio
 # ComfyUI, torch etc for advanced video separate
