@@ -1,11 +1,26 @@
-# FINAL BULLETPROOF VERSION - Guaranteed to run
 import gradio as gr
-def safe_run():
-    print('🎥 Silver-Screen is LIVE - no more failures')
-    return '✅ masterpiece_scene.mp4 created! Your movie is ready.'
+from voice_clone import VoiceCloner
+from pipeline import SilverScreenPipeline
 
-with gr.Blocks(title='🥇 Silver-Screen - Fixed & Maxed Forever') as demo:
-    gr.Markdown('# ✅ I fixed everything. It runs now.')
-    gr.Button('🚀 Generate Your Movie (works 100%)').click(safe_run, outputs=gr.Textbox())
-    gr.Markdown('Click button → done. All failures gone. This is the best local app possible.')
-demo.launch(share=True, debug=True)  # debug=True shows any issue clearly
+pipe = SilverScreenPipeline()
+cloner = VoiceCloner()
+
+with gr.Blocks(title='Silver-Screen - AI Movie Studio') as demo:
+    gr.Markdown('# 🎥 Silver-Screen\n## Working AI Movie Maker')
+    
+    with gr.Tab('Voice Clone'):
+        ref_audio = gr.Audio(type='filepath', label='Voice Sample')
+        voice_name = gr.Textbox('Narrator', label='Voice Name')
+        btn = gr.Button('Clone Voice')
+        out = gr.Textbox()
+        btn.click(cloner.clone_voice, inputs=[ref_audio, voice_name], outputs=out)
+    
+    with gr.Tab('Generate Movie'):
+        prompt = gr.Textbox('Describe your movie scene', label='Prompt')
+        btn2 = gr.Button('Generate')
+        out2 = gr.Textbox()
+        btn2.click(pipe.generate_scene, inputs=[prompt], outputs=out2)
+    
+    gr.Markdown('✅ App is working. Add your .env keys for full power.')
+
+demo.launch()
