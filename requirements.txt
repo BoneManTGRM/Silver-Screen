@@ -1,10 +1,8 @@
 gradio>=5.0
-pillow
-requests
-numpy
-elevenlabs
 moviepy
+pillow
+numpy
+requests
 python-dotenv
 ollama
-replicate
-imageio[ffmpeg]
+pydub
