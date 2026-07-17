@@ -1,8 +1,1 @@
-gradio>=5.0
-moviepy
-pillow
-numpy
-requests
-python-dotenv
-ollama
-pydub
+gradio
