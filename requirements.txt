@@ -6,6 +6,9 @@ numpy
 elevenlabs
 pydub
 python-dotenv
-# moviepy removed - was unused and caused import issues with v2.x
+moviepy
+replicate
+# moviepy for video editing (use v1.x compatible if issues)
+# replicate for AI image/video generation
 # For voice cloning and audio
 # ComfyUI, torch etc for advanced video separate
