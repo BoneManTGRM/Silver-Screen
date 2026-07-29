@@ -14,15 +14,27 @@ Full-length AI movie studio built on the open science of **Reparodynamics** — 
 
 Founder: **Cody Ryan Jenkins** ([@Reparodynamics](https://x.com/Reparodynamics)) · GitHub: [BoneManTGRM](https://github.com/BoneManTGRM)
 
-## What it does
+---
+
+## Quick start (Streamlit — primary)
+
+```bash
+pip install -r requirements.txt
+streamlit run streamlit_app.py
+```
+
+Open the local URL Streamlit prints (usually http://localhost:8501).
+
+### What you can do
 
 1. **Brief** — premise, genre, tone, **format** (trailer → 90m feature)
-2. **TGRM script** — multi-act / multi-chapter screenplay with fracture detection and scar memory
-3. **Cast** — character bible with arcs
-4. **Storyboard** — painted cinematic frames
-5. **Cut** — full shot timeline
-6. **Render** — hero reel + **chapter reels** for full-length assembly (WebM)
-7. **NFT** — OpenSea-style metadata with RYE / MSIL / TGRM traits
+2. **Your Images & Voices** — upload character portraits and voice samples
+3. **Run TGRM Pipeline** — multi-act screenplay with fracture detection + scar memory, then chapter frames/reels using *your* media
+4. **NFT metadata** — OpenSea-style attributes for RYE / MSIL / TGRM
+
+Full-length formats render **chapter by chapter** so a 90-minute project stays practical.
+
+---
 
 ## Science references
 
@@ -32,18 +44,7 @@ Founder: **Cody Ryan Jenkins** ([@Reparodynamics](https://x.com/Reparodynamics))
 - Corpus: https://bonemantgrm.github.io/reparodynamics-corpus/
 - Related engines: [Autonomous-research-agent](https://github.com/BoneManTGRM/Autonomous-research-agent), [Reparodynamics-TGRM-Automation](https://github.com/BoneManTGRM/Reparodynamics-TGRM-Automation)
 
-## Local development
-
-```bash
-npm install
-npm run dev      # http://localhost:8080
-npm run build
-npm run typecheck
-```
-
-Stack: React 19 · TanStack Start · Tailwind v4 · Zustand · Vite.
-
-## TGRM narrative loop
+### TGRM narrative loop
 
 ```text
 DETECT     → plot holes, character drift, timeline breaks, theme noise, act imbalance
@@ -54,7 +55,33 @@ MSIL       → stability index, collapse risk, verdict (stable | repairing | uns
 RYE        → total ΔR / total energy
 ```
 
+---
+
+## Project layout
+
+```text
+streamlit_app.py          # primary UI
+silver_screen/
+  science.py              # τ, RYE, MSIL, five laws, formats
+  tgrm.py                 # Detect → Minimal → Verify → Reinforce
+  script_engine.py        # multi-act / multi-chapter screenplay
+  media.py                # your images + voices → frames / chapter reels
+  pipeline.py             # end-to-end runner
+requirements.txt
+src/                      # optional TanStack web studio (secondary)
+archive/legacy-gradio/    # archived Gradio stubs
+```
+
+### Optional web studio
+
+```bash
+npm install
+npm run dev      # http://localhost:8080
+```
+
+---
+
 ## License
 
-Project code for Silver-Screen as published in this repository.
+Project code for Silver-Screen as published in this repository.  
 Reparodynamics theory remains attributed to Cody Ryan Jenkins / BoneManTGRM.
