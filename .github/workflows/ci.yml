@@ -1,76 +1,19 @@
-name: CI - Python + Next.js
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  test:
+  typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # === System deps for video/audio ===
-      - name: Install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      # === Python ===
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Python deps + Lint
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt flake8 black
-          flake8 . --count --exit-zero --statistics || true
-          black --check --diff *.py || true
-          python -c '
-try:
-    import app
-    import pipeline
-    import utils
-    import voice_clone
-    print("✅ All modules OK")
-except Exception as e:
-    print("Import warning (optional deps):", e)
-    exit(0)  # Do not fail CI for optional deps
-' || true
-
-      # === Frontend ===
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install & Build Next.js
-        run: |
-          npm ci || npm install || true
-          npm run build --if-present || echo 'Build warnings ok'
-          echo '✅ Frontend processed'
-
-      # === Security ===
-      - name: Dependency Review
-        uses: actions/dependency-review-action@v4
-
-  codeql:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
-        with:
-          languages: 'python,javascript'
-      - uses: github/codeql-action/analyze@v3
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck

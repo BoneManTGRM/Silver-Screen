@@ -1,0 +1,23 @@
+{
+  "name": "silver-screen",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "15.0.0",
+    "react": "19.0.0-rc",
+    "react-dom": "19.0.0-rc",
+    "tailwindcss": "^3.4.0",
+    "@radix-ui/react": "*",
+    "zustand": "^5.0.0",
+    "replicate": "^0.32.0",
+    "axios": "^1.7.0",
+    "react-hot-toast": "^2.4.1",
+    "framer-motion": "^11.0.0"
+  }
+}
