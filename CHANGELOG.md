@@ -11,5 +11,6 @@
 - Added CLI run, validate, health, and list operations.
 - Added safe media degradation, PNG cards, optional chapter videos, and hero reels.
 - Added runtime health diagnostics, Streamlit production controls, Docker, Compose, and configuration.
-- Added an 18-test regression suite and GitHub Actions verification.
+- Constrained persisted output to an allowlisted `./runs` mount so user input cannot control filesystem paths.
+- Added a 19-test regression suite and GitHub Actions verification.
 - Clarified the current boundary between production blueprints and finished generative films.
