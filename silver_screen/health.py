@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .media import media_capabilities
-from .runtime import DEFAULT_RUNS_DIR, utc_now
+from .runtime import resolve_runs_root, utc_now
 from .science import APP_VERSION
 
 
@@ -41,9 +41,7 @@ def _check_output_root(root: Path) -> tuple[bool, str | None]:
 
 
 def health_report(output_root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-    root = Path(
-        output_root or os.getenv("SILVER_SCREEN_RUNS_DIR") or DEFAULT_RUNS_DIR
-    ).expanduser()
+    root = resolve_runs_root(output_root)
     writable, write_error = _check_output_root(root)
     capabilities = media_capabilities()
     ffmpeg = _ffmpeg_path()
