@@ -6,40 +6,52 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  python-streamlit:
+  python:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install dependencies
+      - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Import package + TGRM smoke test
+          python -m pip install -r requirements-dev.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+      - name: Compile
+        run: python -m compileall -q silver_screen streamlit_app.py
+      - name: Test
+        run: python -m pytest -q
+      - name: Health
+        run: python -m silver_screen health --json
+      - name: Headless smoke run
         run: |
+          python -m silver_screen run \
+            --premise "A technician discovers that repaired machines remember their failures." \
+            --genre scifi \
+            --format short \
+            --media off \
+            --no-persist \
+            --json > smoke-result.json
           python - <<'PY'
-          from silver_screen.science import SCIENCE
-          from silver_screen.script_engine import generate_and_repair
-          assert SCIENCE["tau"] == 0.6
-          result = generate_and_repair(
-              title="CI Smoke",
-              premise="A repair agent detects drift in a city grid and must choose minimal correction over collapse.",
-              genre="noir",
-              format_key="trailer",
-          )
-          assert result["state"]["script"]
-          assert result["metrics"].energy >= 1
-          assert result["msil"].verdict in ("stable", "repairing", "unstable")
-          print("TGRM OK", result["metrics"].rye, result["msil"].verdict)
-          PY
-      - name: Streamlit importable
-        run: python -c "import streamlit; import silver_screen; print('streamlit', streamlit.__version__)"
+          import json
+          from pathlib import Path
 
-  typecheck:
+          result = json.loads(Path("smoke-result.json").read_text())
+          assert result["status"] == "complete"
+          assert result["metrics"]["finalScore"] >= result["metrics"]["initialScore"]
+          PY
+
+  frontend-typecheck:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
