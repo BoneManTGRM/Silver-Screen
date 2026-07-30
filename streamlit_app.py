@@ -146,9 +146,11 @@ with st.sidebar:
         )
 
     with st.expander("Operations", expanded=False):
-        output_root = st.text_input(
-            "Run workspace root",
-            value=os.getenv("SILVER_SCREEN_RUNS_DIR", "runs"),
+        output_root = "runs"
+        st.code("runs/", language=None)
+        st.caption(
+            "Run storage is fixed to the allowlisted ./runs directory. Mount that directory "
+            "to durable storage in production."
         )
         st.caption("Each run receives a durable manifest, screenplay, JSON state, TGRM audit, and ZIP bundle.")
 
