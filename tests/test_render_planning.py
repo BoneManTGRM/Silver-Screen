@@ -62,6 +62,10 @@ def test_only_continuous_multi_clip_work_requires_extra_confirmation() -> None:
     assert requires_continuous_confirmation(preview_plan, continuous=True) is False
 
 
-def test_full_blueprint_streamlit_page_compiles() -> None:
-    page = Path("pages/1_Full_Blueprint_Production.py")
-    compile(page.read_text(encoding="utf-8"), str(page), "exec")
+def test_blueprint_streamlit_pages_compile() -> None:
+    for name in (
+        "pages/1_Full_Blueprint_Production.py",
+        "pages/2_Extend_Existing_Production.py",
+    ):
+        page = Path(name)
+        compile(page.read_text(encoding="utf-8"), str(page), "exec")
