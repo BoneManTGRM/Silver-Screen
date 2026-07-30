@@ -1,4 +1,4 @@
-"""Media rendering for chapter cards, local previews, and real AI video."""
+"""Media rendering for static cards, honest local previews, and real AI video."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-from .ai_video import VideoGenerationError, generate_ai_video
+from .ai_video import generate_ai_video
 
 HAS_PIL = False
 HAS_VIDEO = False
@@ -26,7 +26,6 @@ except Exception:
 
 try:
     import numpy as np
-
     try:
         from moviepy import ImageClip, concatenate_videoclips
     except Exception:
@@ -50,27 +49,10 @@ def media_capabilities() -> dict[str, Any]:
     }
 
 
-def _genre_color(genre: str) -> tuple[int, int, int]:
-    return {
-        "scifi": (18, 36, 72),
-        "noir": (24, 24, 28),
-        "drama": (58, 40, 48),
-        "thriller": (56, 20, 26),
-        "fantasy": (42, 30, 72),
-        "horror": (28, 12, 18),
-        "romance": (66, 38, 58),
-        "western": (76, 52, 30),
-    }.get((genre or "drama").lower().replace("-", ""), (30, 30, 50))
-
-
 def _font(size: int, bold: bool = False):
     candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if bold
-        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
-        if bold
-        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ]
     for candidate in candidates:
         try:
@@ -78,6 +60,14 @@ def _font(size: int, bold: bool = False):
         except Exception:
             continue
     return ImageFont.load_default()
+
+
+def _genre_color(genre: str) -> tuple[int, int, int]:
+    return {
+        "scifi": (18, 36, 72), "noir": (24, 24, 28), "drama": (58, 40, 48),
+        "thriller": (56, 20, 26), "fantasy": (42, 30, 72), "horror": (28, 12, 18),
+        "romance": (66, 38, 58), "western": (76, 52, 30),
+    }.get((genre or "drama").lower().replace("-", ""), (30, 30, 50))
 
 
 def _read_upload(upload: Any) -> bytes:
@@ -89,6 +79,8 @@ def _read_upload(upload: Any) -> bytes:
     size = getattr(upload, "size", None)
     if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
         raise ValueError("Image exceeds 20 MB")
+    if not hasattr(upload, "read"):
+        raise TypeError("Unsupported image input")
     data = upload.read(MAX_UPLOAD_BYTES + 1)
     if hasattr(upload, "seek"):
         upload.seek(0)
@@ -130,6 +122,14 @@ def _draw_wrapped(draw, text: str, xy: tuple[int, int], font, width: int, max_li
         y += 40
 
 
+def _chapter_summary(state: dict[str, Any], chapter_number: int) -> str:
+    scenes = [
+        scene for scene in state.get("scenes") or []
+        if isinstance(scene, dict) and int(scene.get("chapter", 1)) == chapter_number
+    ]
+    return " ".join(str(scene.get("summary") or "") for scene in scenes[:3]) or str(state.get("premise") or "")
+
+
 def _make_card(state: dict[str, Any], chapter: dict[str, Any], summary: str, portrait=None):
     size = (1280, 720)
     if portrait is not None:
@@ -146,15 +146,6 @@ def _make_card(state: dict[str, Any], chapter: dict[str, Any], summary: str, por
     _draw_wrapped(draw, summary, (72, 245), _font(28), size[0] - 150, 8)
     draw.text((72, 650), "SILVER-SCREEN | REPARODYNAMICS | TGRM", font=_font(20, True), fill=accent)
     return card
-
-
-def _chapter_summary(state: dict[str, Any], chapter_number: int) -> str:
-    scenes = [
-        scene
-        for scene in state.get("scenes") or []
-        if isinstance(scene, dict) and int(scene.get("chapter", 1)) == chapter_number
-    ]
-    return " ".join(str(scene.get("summary") or "") for scene in scenes[:3]) or str(state.get("premise") or "")
 
 
 def _with_duration(clip, seconds: float):
@@ -183,11 +174,10 @@ def process_media(
     max_chapters: int = 4,
     video_mode: str = "cards",
 ) -> dict[str, Any]:
-    """Create requested media.
+    """Create requested media without mislabeling local previews as AI footage.
 
-    ``preview`` and ``preview-film`` animate static chapter cards locally.
-    ``ai-video`` calls a real generative model and fails explicitly when the
-    provider is not configured; it never disguises a card animation as AI video.
+    AI mode is transactional: provider or verification failures propagate to the
+    pipeline so the run is recorded as failed instead of completed with a card.
     """
 
     state = state or {}
@@ -196,59 +186,30 @@ def process_media(
     output.mkdir(parents=True, exist_ok=True)
 
     if mode == "ai-video":
-        try:
-            result = generate_ai_video(
-                state,
-                output,
-                scene_limit=max_chapters,
-                duration=int(os.getenv("SILVER_SCREEN_VIDEO_DURATION", "8")),
-            )
-            result.update(
-                {
-                    "mode": mode,
-                    "card_paths": [],
-                    "out_dir": str(output.resolve()),
-                    "portraits_used": 0,
-                    "voices_count": len(voices or []),
-                    "capabilities": media_capabilities(),
-                }
-            )
-            return result
-        except VideoGenerationError as exc:
-            return {
-                "ok": False,
-                "status": "failed",
-                "mode": mode,
-                "chapter_paths": [],
-                "card_paths": [],
-                "video_paths": [],
-                "hero_path": None,
-                "final_video_path": None,
-                "out_dir": str(output.resolve()),
-                "portraits_used": 0,
-                "voices_count": len(voices or []),
-                "warnings": [],
-                "error": str(exc),
-                "note": "AI video was requested but no real video was produced.",
-                "capabilities": media_capabilities(),
-            }
+        result = generate_ai_video(
+            state,
+            output,
+            scene_limit=max_chapters,
+            duration=int(os.getenv("SILVER_SCREEN_VIDEO_DURATION", "8")),
+        )
+        result.update({
+            "mode": mode,
+            "card_paths": [],
+            "out_dir": str(output.resolve()),
+            "portraits_used": 0,
+            "voices_count": len(voices or []),
+            "capabilities": media_capabilities(),
+        })
+        return result
 
     warnings: list[str] = []
     result: dict[str, Any] = {
-        "ok": False,
-        "status": "initializing",
-        "mode": mode,
-        "chapter_paths": [],
-        "card_paths": [],
-        "video_paths": [],
-        "hero_path": None,
-        "final_video_path": None,
-        "out_dir": str(output.resolve()),
-        "portraits_used": 0,
-        "voices_count": len(voices or []),
-        "warnings": warnings,
-        "error": None,
-        "capabilities": media_capabilities(),
+        "ok": False, "status": "initializing", "mode": mode,
+        "chapter_paths": [], "card_paths": [], "video_paths": [],
+        "hero_path": None, "final_video_path": None,
+        "out_dir": str(output.resolve()), "portraits_used": 0,
+        "voices_count": len(voices or []), "warnings": warnings,
+        "error": None, "capabilities": media_capabilities(),
     }
     if voices:
         warnings.append("Voice files were inventoried but not synthesized.")
@@ -263,6 +224,7 @@ def process_media(
         except Exception as exc:
             warnings.append(f"Portrait {index + 1} was skipped: {exc}")
     result["portraits_used"] = len(portraits)
+
     chapters = [item for item in state.get("chapters") or [] if isinstance(item, dict)] or [{"number": 1, "title": "Chapter 1"}]
     limit = max(1, min(int(max_chapters), len(chapters), 12))
     clips = []
@@ -276,7 +238,8 @@ def process_media(
         result["chapter_paths"].append(str(card_path.resolve()))
         if mode in {"preview", "preview-film"}:
             if not HAS_VIDEO or ImageClip is None or np is None:
-                warnings.append("MoviePy is unavailable; static cards were retained.")
+                if "MoviePy is unavailable; static cards were retained." not in warnings:
+                    warnings.append("MoviePy is unavailable; static cards were retained.")
                 continue
             clip = _with_duration(ImageClip(np.array(card)), 2.8)
             video_path = output / f"preview_{number:02d}.mp4"
