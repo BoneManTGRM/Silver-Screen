@@ -19,6 +19,7 @@ from .pipeline import (
 )
 from .runtime import list_resumable_runs, list_runs
 from .science import FORMATS, GENRES, TONES
+from .voice_studio import VoiceStudioError, attach_voice_to_run
 
 
 def _load_json(path: str | None) -> dict[str, Any]:
@@ -74,12 +75,12 @@ def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--video-max-retries",
         type=int,
-        help="TGRM repair retries per shot",
+        help="TGRM repair retries per video shot",
     )
     parser.add_argument(
         "--video-max-provider-calls",
         type=int,
-        help="Whole-production provider-call budget; 0 derives a safe limit",
+        help="Whole-production video-provider call budget",
     )
     parser.add_argument(
         "--video-max-spend-usd",
@@ -89,7 +90,7 @@ def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--video-cost-per-second-usd",
         type=float,
-        help="Operator-supplied provider price used for spend estimates",
+        help="Operator-supplied provider price used for estimates",
     )
     parser.add_argument(
         "--video-continuous",
@@ -103,12 +104,76 @@ def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_voice_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--enable-voices",
+        action="store_true",
+        help="Generate or mix voices for verified AI-video clips",
+    )
+    parser.add_argument(
+        "--voice-provider",
+        choices=["openai", "elevenlabs", "manual"],
+        default="openai",
+    )
+    parser.add_argument(
+        "--voice-mode",
+        choices=["dialogue+narration", "dialogue", "narration"],
+        default="dialogue+narration",
+    )
+    parser.add_argument("--voice-model")
+    parser.add_argument("--lead-voice", default="coral")
+    parser.add_argument("--supporting-voice", default="onyx")
+    parser.add_argument("--narrator-voice", default="cedar")
+    parser.add_argument(
+        "--voice-instructions",
+        default=(
+            "Deliver an expressive cinematic performance with clear diction."
+        ),
+    )
+    parser.add_argument(
+        "--voice-speed", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--voice-max-retries", type=int, default=1
+    )
+    parser.add_argument(
+        "--preserve-source-audio",
+        action="store_true",
+        help="Mix generated ambience quietly beneath dialogue",
+    )
+    parser.add_argument(
+        "--no-subtitles",
+        action="store_true",
+        help="Disable SRT subtitle generation",
+    )
+    parser.add_argument(
+        "--voice-track",
+        "--voice",
+        dest="voice_tracks",
+        action="append",
+        default=[],
+        help=(
+            "Authorized finished voice track; repeatable. "
+            "Use names such as shot_0001.wav for exact matching."
+        ),
+    )
+    parser.add_argument(
+        "--voice-authorized",
+        action="store_true",
+        help="Confirm authorization for uploaded/custom voice material",
+    )
+    parser.add_argument("--custom-voice-id")
+    parser.add_argument("--custom-voice-name")
+    parser.add_argument("--voice-sample")
+    parser.add_argument("--voice-consent")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="silver-screen",
         description=(
-            "Deterministic story production with TGRM narrative repair "
-            "and resumable long-form AI video."
+            "Deterministic story production with TGRM narrative repair, "
+            "resumable AI video, authorized voices, subtitles, and final assembly."
         ),
     )
     subparsers = parser.add_subparsers(
@@ -124,12 +189,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         help="Authorized portrait/reference image path; repeatable",
-    )
-    run_parser.add_argument(
-        "--voice",
-        action="append",
-        default=[],
-        help="Voice file path to inventory; repeatable",
     )
     run_parser.add_argument(
         "--output",
@@ -155,6 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--max-cycles", type=int)
     run_parser.add_argument("--energy-budget", type=int)
     _add_video_arguments(run_parser)
+    _add_voice_arguments(run_parser)
     run_parser.add_argument(
         "--no-persist", action="store_true"
     )
@@ -166,14 +226,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume_parser = subparsers.add_parser(
         "resume-video",
-        help="Continue a checkpointed AI-film production",
+        help="Continue a checkpointed AI-film and its persisted voice plan",
     )
     resume_parser.add_argument("run_id")
     resume_parser.add_argument(
         "--output", choices=["runs"], default="runs"
     )
     _add_video_arguments(resume_parser)
+    _add_voice_arguments(resume_parser)
     resume_parser.add_argument(
+        "--json", action="store_true"
+    )
+
+    voice_parser = subparsers.add_parser(
+        "voice-run",
+        help="Add, replace, or resume voices on an existing AI-film run",
+    )
+    voice_parser.add_argument("run_id")
+    voice_parser.add_argument(
+        "--output", choices=["runs"], default="runs"
+    )
+    _add_voice_arguments(voice_parser)
+    voice_parser.add_argument(
         "--json", action="store_true"
     )
 
@@ -239,6 +313,69 @@ def _brief_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return brief
 
 
+def _voice_request(
+    args: argparse.Namespace,
+) -> list[dict[str, Any]] | None:
+    if not bool(getattr(args, "enable_voices", False)):
+        return None
+    provider = str(getattr(args, "voice_provider", "openai"))
+    tracks = list(getattr(args, "voice_tracks", []) or [])
+    request: dict[str, Any] = {
+        "enabled": True,
+        "provider": provider,
+        "mode": getattr(
+            args, "voice_mode", "dialogue+narration"
+        ),
+        "model": getattr(args, "voice_model", None),
+        "lead_voice": (
+            getattr(args, "custom_voice_id", None)
+            or getattr(args, "lead_voice", "coral")
+        ),
+        "supporting_voice": getattr(
+            args, "supporting_voice", "onyx"
+        ),
+        "narrator_voice": getattr(
+            args, "narrator_voice", "cedar"
+        ),
+        "instructions": getattr(
+            args, "voice_instructions", ""
+        ),
+        "speed": getattr(args, "voice_speed", 1.0),
+        "max_retries_per_line": getattr(
+            args, "voice_max_retries", 1
+        ),
+        "preserve_source_audio": bool(
+            getattr(args, "preserve_source_audio", False)
+        ),
+        "subtitles": not bool(
+            getattr(args, "no_subtitles", False)
+        ),
+        "authorization_confirmed": bool(
+            getattr(args, "voice_authorized", False)
+        ),
+        "custom_voice": bool(
+            getattr(args, "voice_sample", None)
+            or getattr(args, "voice_consent", None)
+        ),
+        "custom_voice_id": (
+            getattr(args, "custom_voice_id", None) or ""
+        ),
+        "custom_voice_name": (
+            getattr(args, "custom_voice_name", None)
+            or "Silver Screen Voice"
+        ),
+        "voice_sample": getattr(
+            args, "voice_sample", None
+        ),
+        "consent_recording": getattr(
+            args, "voice_consent", None
+        ),
+        "manual_tracks": tracks,
+        "allow_original_fallback": True,
+    }
+    return [request]
+
+
 def _progress(stage: str, percent: int, message: str) -> None:
     print(
         f"[{percent:3d}%] {stage}: {message}",
@@ -249,6 +386,7 @@ def _progress(stage: str, percent: int, message: str) -> None:
 def _run_summary(result: dict[str, Any]) -> dict[str, Any]:
     state = result.get("state") or {}
     media = result.get("media") or {}
+    voice = media.get("voice") or {}
     return {
         "status": result.get("status"),
         "runId": (result.get("run") or {}).get("id"),
@@ -266,13 +404,19 @@ def _run_summary(result: dict[str, Any]) -> dict[str, Any]:
         "resumeRequired": media.get("resumeRequired", False),
         "finalVideo": media.get("final_video_path"),
         "partialVideo": media.get("partial_video_path"),
+        "voiceStatus": voice.get("status"),
+        "voiceMetrics": voice.get("metrics") or {},
+        "voiceError": voice.get("error"),
+        "subtitles": voice.get("subtitles_path"),
         "warnings": result.get("warnings") or [],
         "artifacts": result.get("artifacts") or {},
         "timings": result.get("timings") or {},
     }
 
 
-def _video_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+def _video_kwargs(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
     return {
         "target_runtime_seconds": getattr(
             args, "target_runtime_seconds", None
@@ -305,12 +449,12 @@ def _video_kwargs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _print_summary(
-    summary: dict[str, Any], *, as_json: bool
+    summary: dict[str, Any],
+    *,
+    as_json: bool,
 ) -> None:
     if as_json:
-        print(
-            json.dumps(summary, indent=2, ensure_ascii=False)
-        )
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
         return
     print(
         f"Status: {str(summary.get('status')).upper()} | "
@@ -327,6 +471,14 @@ def _print_summary(
             f"{video.get('plannedShots', 0)} clips, "
             f"{video.get('verifiedSeconds', 0)} verified seconds"
         )
+    voice = summary.get("voiceMetrics") or {}
+    if summary.get("voiceStatus"):
+        print(
+            "Voice: "
+            f"{summary.get('voiceStatus')} | "
+            f"{voice.get('generatedLines', 0)}/"
+            f"{voice.get('plannedLines', 0)} lines"
+        )
     if summary.get("resumeRequired"):
         print(
             "Resume: silver-screen resume-video "
@@ -338,6 +490,13 @@ def _print_summary(
         print(f"Final video: {final_video}")
     elif partial_video:
         print(f"Partial video: {partial_video}")
+    if summary.get("subtitles"):
+        print(f"Subtitles: {summary['subtitles']}")
+    if summary.get("voiceError"):
+        print(
+            f"Voice error: {summary['voiceError']}",
+            file=sys.stderr,
+        )
     bundle = (summary.get("artifacts") or {}).get("bundle")
     if bundle:
         print(f"Bundle: {bundle}")
@@ -350,7 +509,7 @@ def _handle_run(args: argparse.Namespace) -> int:
     result = run_pipeline(
         brief,
         images=args.image,
-        voices=args.voice,
+        voices=_voice_request(args),
         output_root=args.output,
         persist=not args.no_persist,
         render_media=args.media != "off",
@@ -364,7 +523,8 @@ def _handle_run(args: argparse.Namespace) -> int:
         **_video_kwargs(args),
     )
     _print_summary(
-        _run_summary(result), as_json=args.json
+        _run_summary(result),
+        as_json=args.json,
     )
     return 0
 
@@ -382,8 +542,32 @@ def _handle_resume(args: argparse.Namespace) -> int:
         use_continuity=not args.no_video_continuity,
         progress=None if args.json else _progress,
     )
+    if args.enable_voices:
+        result = attach_voice_to_run(
+            args.run_id,
+            _voice_request(args),
+            output_root=args.output,
+        )
     _print_summary(
-        _run_summary(result), as_json=args.json
+        _run_summary(result),
+        as_json=args.json,
+    )
+    return 0
+
+
+def _handle_voice_run(args: argparse.Namespace) -> int:
+    if not args.enable_voices:
+        raise VoiceStudioError(
+            "voice-run requires --enable-voices and a configured voice source"
+        )
+    result = attach_voice_to_run(
+        args.run_id,
+        _voice_request(args),
+        output_root=args.output,
+    )
+    _print_summary(
+        _run_summary(result),
+        as_json=args.json,
     )
     return 0
 
@@ -398,19 +582,14 @@ def _handle_video_status(args: argparse.Namespace) -> int:
         print(
             f"{args.run_id} | {video.get('status')} | "
             f"{metrics.get('verifiedShots', 0)}/"
-            f"{metrics.get('plannedShots', 0)} clips | "
-            f"{metrics.get('verifiedSeconds', 0)} seconds"
+            f"{metrics.get('plannedShots', 0)} clips"
         )
-        if video.get("stopReason"):
-            print(f"Stop reason: {video['stopReason']}")
     return 0
 
 
 def _handle_validate(args: argparse.Namespace) -> int:
     normalized = validate_brief(_brief_from_args(args))
-    print(
-        json.dumps(normalized, indent=2, ensure_ascii=False)
-    )
+    print(json.dumps(normalized, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -427,7 +606,11 @@ def _handle_health(args: argparse.Namespace) -> int:
     return 0 if report["ready"] else 1
 
 
-def _handle_list(args: argparse.Namespace, *, resumable: bool) -> int:
+def _handle_list(
+    args: argparse.Namespace,
+    *,
+    resumable: bool,
+) -> int:
     records = (
         list_resumable_runs(args.output, args.limit)
         if resumable
@@ -438,7 +621,7 @@ def _handle_list(args: argparse.Namespace, *, resumable: bool) -> int:
         return 0
     if not records:
         print(
-            "No resumable video runs found."
+            "No resumable runs found."
             if resumable
             else "No durable runs found."
         )
@@ -448,7 +631,7 @@ def _handle_list(args: argparse.Namespace, *, resumable: bool) -> int:
             f"{record.get('runId', '?')} | "
             f"{record.get('status', '?')} | "
             f"{record.get('title') or (record.get('brief') or {}).get('title') or 'Untitled'} | "
-            f"{record.get('updatedAt', '')}"
+            f"{record.get('startedAt', '')}"
         )
     return 0
 
@@ -461,6 +644,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _handle_run(args)
         if args.command == "resume-video":
             return _handle_resume(args)
+        if args.command == "voice-run":
+            return _handle_voice_run(args)
         if args.command == "video-status":
             return _handle_video_status(args)
         if args.command == "validate":
@@ -476,16 +661,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         BriefValidationError,
         json.JSONDecodeError,
         OSError,
-        ValueError,
     ) as exc:
         print(f"Input error: {exc}", file=sys.stderr)
         return 2
     except PipelineError as exc:
-        suffix = f" Run ID: {exc.run_id}." if exc.run_id else ""
+        suffix = (
+            f" Run ID: {exc.run_id}." if exc.run_id else ""
+        )
         print(
             f"Pipeline error: {exc}.{suffix}",
             file=sys.stderr,
         )
+        return 1
+    except VoiceStudioError as exc:
+        print(f"Voice Studio error: {exc}", file=sys.stderr)
         return 1
     return 1
 
