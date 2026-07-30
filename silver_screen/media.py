@@ -1,6 +1,7 @@
 """Media helpers — portraits / generated cards → chapter + hero reels (moviepy + Pillow).
 
 Graceful fallback to still PNGs if video write fails.
+Compatible with moviepy 1.x (moviepy.editor) and 2.x.
 """
 from __future__ import annotations
 import io
@@ -8,10 +9,20 @@ import os
 import tempfile
 from typing import Any, Dict, List, Optional
 
+HAS_MEDIA = False
+ImageClip = concatenate_videoclips = ColorClip = None
+np = None
+Image = ImageDraw = ImageFont = None
+
 try:
     from PIL import Image, ImageDraw, ImageFont
     import numpy as np
-    from moviepy.editor import ImageClip, concatenate_videoclips, ColorClip
+    try:
+        # moviepy 1.x
+        from moviepy.editor import ImageClip, concatenate_videoclips, ColorClip
+    except ImportError:
+        # moviepy 2.x
+        from moviepy import ImageClip, concatenate_videoclips, ColorClip
     HAS_MEDIA = True
 except Exception:
     HAS_MEDIA = False
@@ -28,6 +39,8 @@ def _genre_color(genre: str):
     }.get(g, (30, 30, 50))
 
 def _make_card(text: str, size=(1280, 720), bg=(30, 30, 50), accent=(210, 200, 180)):
+    if Image is None:
+        raise RuntimeError("Pillow not available")
     img = Image.new("RGB", size, bg)
     draw = ImageDraw.Draw(img)
     try:
@@ -80,7 +93,7 @@ def process_media(
         "status": "pending",
     }
     if not HAS_MEDIA:
-        result["note"] = "moviepy/Pillow unavailable — install requirements.txt"
+        result["note"] = "moviepy/Pillow unavailable — pip install -r requirements.txt"
         result["status"] = "libs missing"
         return result
 
@@ -127,14 +140,25 @@ def process_media(
         clips = []
         for card in cards:
             try:
-                clips.append(ImageClip(np.array(card)).set_duration(2.8))
+                clips.append(ImageClip(np.array(card)).with_duration(2.8) if hasattr(ImageClip(np.array(card)), "with_duration") else ImageClip(np.array(card)).set_duration(2.8))
             except Exception:
-                pass
+                try:
+                    clips.append(ImageClip(np.array(card)).set_duration(2.8))
+                except Exception:
+                    pass
         if not clips:
-            clips = [ColorClip(size=(1280, 720), color=bg).set_duration(3)]
+            try:
+                clips = [ColorClip(size=(1280, 720), color=bg).set_duration(3)]
+            except Exception:
+                try:
+                    clips = [ColorClip(size=(1280, 720), color=bg).with_duration(3)]
+                except Exception:
+                    clips = []
 
         path = os.path.join(out_dir, f"chapter_{ci+1}.webm")
         try:
+            if not clips:
+                raise RuntimeError("no clips")
             chapter = concatenate_videoclips(clips, method="compose")
             chapter.write_videofile(path, fps=12, codec="libvpx", audio=False, verbose=False, logger=None)
             result["chapter_paths"].append(path)
@@ -159,7 +183,10 @@ def process_media(
                     c.close()
                 except Exception:
                     pass
-            hero.close()
+            try:
+                hero.close()
+            except Exception:
+                pass
         except Exception as e:
             result["error"] = (result.get("error") or "") + " | hero: " + str(e)
 
@@ -169,5 +196,5 @@ def process_media(
     return result
 
 def process_uploads(images=None, voices=None, film=None, out_dir=None):
-    """Backward-compatible alias used by older pipeline."""
+    """Backward-compatible alias."""
     return process_media(film or {}, images=images, voices=voices, out_dir=out_dir)
