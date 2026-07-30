@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_brief_arguments(run_parser)
     run_parser.add_argument("--image", action="append", default=[], help="Portrait image path; repeatable")
     run_parser.add_argument("--voice", action="append", default=[], help="Voice file path to inventory; repeatable")
-    run_parser.add_argument("--output", help="Run workspace root")
+    run_parser.add_argument("--output", choices=["runs"], default="runs", help="Allowlisted run-storage alias")
     run_parser.add_argument(
         "--media",
         choices=["off", "cards", "chapters", "hero"],
@@ -66,11 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_brief_arguments(validate_parser)
 
     health_parser = subparsers.add_parser("health", help="Inspect runtime capabilities")
-    health_parser.add_argument("--output", help="Run workspace root")
+    health_parser.add_argument("--output", choices=["runs"], default="runs", help="Allowlisted run-storage alias")
     health_parser.add_argument("--json", action="store_true")
 
     list_parser = subparsers.add_parser("list", help="List recent durable runs")
-    list_parser.add_argument("--output", help="Run workspace root")
+    list_parser.add_argument("--output", choices=["runs"], default="runs", help="Allowlisted run-storage alias")
     list_parser.add_argument("--limit", type=int, default=20)
     list_parser.add_argument("--json", action="store_true")
     return parser
