@@ -19,4 +19,5 @@ def test_voice_regression_reports_full_result(tmp_path: Path, monkeypatch: pytes
         voice_inputs=[_request()],
         provider_factory=lambda config: provider,
     )
-    assert result["status"] == "complete", result
+    assert result.get("error") is None, str(result.get("error"))
+    assert result["status"] == "complete", str(result.get("plan"))
