@@ -24,7 +24,7 @@ Media errors do not fail the core run. They are added to `warnings`, and PNG or 
 ## Production deployment
 
 1. Use the supplied Docker image or Python 3.10 and later.
-2. Mount `SILVER_SCREEN_RUNS_DIR` to durable storage.
+2. Mount the fixed `./runs` directory to durable storage. `SILVER_SCREEN_RUNS_DIR` is an allowlisted alias and must remain `runs`.
 3. Keep `SILVER_SCREEN_DEBUG=0` outside a controlled diagnostic session.
 4. Put TLS, authentication, request limits, and audit logging in the reverse proxy or platform layer.
 5. Back up completed run directories or copy final ZIP bundles to object storage.
@@ -61,7 +61,7 @@ A degraded result can still be operational for CLI screenplay generation.
 
 ### Core run failure
 
-1. Locate the run by ID under the configured workspace root.
+1. Locate the run by ID under the fixed `./runs` workspace root.
 2. Read `manifest.json` and inspect `stage`, `error`, `brief`, and `options`.
 3. Correct the environment or input.
 4. Replay the normalized `brief` with the recorded seed.
@@ -118,6 +118,7 @@ The run ID and workspace design already permits independent concurrent processes
 - Treat uploaded media as untrusted input.
 - Keep platform upload limits in addition to the application read limit.
 - Do not put API keys or secrets in briefs, manifests, or repository files.
+- Run storage is fixed to the allowlisted `./runs` directory; user input never becomes a storage path.
 - This release does not execute uploaded code.
 - This release does not clone or synthesize voices.
 - Only use images and audio that the operator is authorized to process.
