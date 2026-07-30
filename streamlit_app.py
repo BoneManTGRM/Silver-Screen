@@ -1,10 +1,11 @@
 """Silver-Screen — Streamlit primary studio (Reparodynamics · TGRM).
 
-Demo UI for Brief → TGRM pipeline → RYE / MSIL metrics + scar memory.
+Usable now: Brief → TGRM → metrics + script + scars.
+Optional: chapter/hero reels if moviepy works.
 """
-
 from __future__ import annotations
 import streamlit as st
+
 from silver_screen.science import SCIENCE, FIVE_LAWS, FORMATS
 from silver_screen.tgrm import run_tgrm
 
@@ -15,8 +16,8 @@ st.set_page_config(
 )
 
 st.title("🎥 Silver-Screen")
-st.caption(SCIENCE["credit"])
-st.markdown(f"**{SCIENCE['tagline']}**")
+st.caption(SCIENCE.get("credit", "Reparodynamics · TGRM · RYE · MSIL"))
+st.markdown(f"**{SCIENCE.get('tagline', '')}**")
 
 with st.sidebar:
     st.header("Brief")
@@ -26,19 +27,23 @@ with st.sidebar:
         value="A repair technician discovers that every system she fixes remembers the pain of the break and begins to dream.",
         height=120,
     )
-    genre = st.selectbox("Genre", ["sci-fi", "drama", "thriller", "fantasy", "noir"], index=0)
-    tone = st.selectbox("Tone", ["cinematic", "intimate", "tense", "poetic"], index=0)
-    fmt = st.selectbox("Format", list(FORMATS.keys()), index=2)
+    genre_options = list(FORMATS.keys()) if FORMATS else ["feature", "short", "trailer"]
+    genre = st.selectbox("Genre", ["sci-fi", "noir", "drama", "thriller", "fantasy", "horror"], index=0)
+    tone = st.selectbox("Tone", ["cinematic", "intimate", "tense", "poetic", "melancholy"], index=0)
+    fmt = st.selectbox("Format", genre_options, index=min(2, len(genre_options) - 1))
     st.divider()
-    st.subheader("Your Images & Voices (demo)")
-    imgs = st.file_uploader("Character portraits", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
-    voices = st.file_uploader("Voice samples", type=["wav", "mp3", "m4a"], accept_multiple_files=True)
-    st.caption("Uploads are accepted for future media pipeline; current demo uses text TGRM.")
+    st.subheader("Your Images (optional)")
+    imgs = st.file_uploader("Character portraits", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True)
+    voices = st.file_uploader("Voice samples (future)", type=["wav", "mp3", "m4a"], accept_multiple_files=True)
+    st.caption("Portraits used for reels when moviepy is available.")
 
 if st.button("Run TGRM Pipeline", type="primary"):
-    fmt_info = FORMATS.get(fmt, FORMATS["feature"])
-    acts = [{"name": f"Act {i+1}", "scene_count": max(1, fmt_info["chapters"] // fmt_info["acts"])} for i in range(fmt_info["acts"])]
-    scenes = [{"id": i, "summary": f"Scene {i+1} of the journey"} for i in range(fmt_info["chapters"])]
+    fmt_info = FORMATS.get(fmt, {"acts": 3, "chapters": 6, "duration_min": 90})
+    acts = [
+        {"name": f"Act {i+1}", "scene_count": max(1, fmt_info.get("chapters", 6) // max(1, fmt_info.get("acts", 3)))}
+        for i in range(fmt_info.get("acts", 3))
+    ]
+    scenes = [{"id": i, "summary": f"Scene {i+1} of the journey", "chapter": (i // 2) + 1} for i in range(fmt_info.get("chapters", 6))]
     characters = [
         {"name": "Aria", "role": "protagonist"},
         {"name": "The System", "role": "antagonist / mirror"},
@@ -67,56 +72,82 @@ The system begins to speak in her own voice.
         "characters": characters,
         "scenes": scenes,
         "acts": acts,
+        "chapters": [{"number": i + 1, "title": f"Chapter {i+1}"} for i in range(fmt_info.get("chapters", 6))],
         "scars": [],
     }
 
     with st.spinner("TGRM running: Detect → Minimal → Verify → Reinforce..."):
         result = run_tgrm(state)
 
-    st.success("Pipeline complete")
+    st.success("TGRM complete")
+    m = result.get("metrics", {})
     col1, col2, col3, col4 = st.columns(4)
-    m = result["metrics"]
-    col1.metric("RYE", f"{m['rye']:.4f}")
-    col2.metric("ΔR", f"{m['deltaR']:.4f}")
-    col3.metric("Energy", m["energy"])
-    col4.metric("MSIL", result["msil"]["verdict"].upper())
+    col1.metric("RYE", f"{m.get('rye', 0):.4f}")
+    col2.metric("ΔR", f"{m.get('deltaR', 0):.4f}")
+    col3.metric("Energy", m.get("energy", 0))
+    col4.metric("MSIL", str(result.get("msil", {}).get("verdict", "—")).upper())
 
-    st.subheader("Repaired screenplay (seed + micro-fixes)")
-    st.text_area("Script", result["state"].get("script", ""), height=280)
+    st.subheader("Repaired screenplay")
+    st.text_area("Script", result.get("state", {}).get("script", ""), height=280)
 
-    st.subheader("TGRM cycle log")
-    for entry in result["log"]:
-        with st.expander(f"Cycle {entry['cycle']} · {entry['phase']} · RYE {entry.get('rye', 0):.4f}"):
+    # Optional media reels (does not crash if moviepy fails)
+    try:
+        from silver_screen.media import process_media
+        with st.spinner("Generating chapter / hero reels (optional)..."):
+            media = process_media(result.get("state", state), images=imgs, voices=voices)
+        if media.get("hero_path"):
+            st.subheader("Hero Reel")
+            try:
+                st.video(media["hero_path"])
+                with open(media["hero_path"], "rb") as f:
+                    st.download_button("Download hero reel", f, file_name="hero_reel.webm")
+            except Exception as e:
+                st.info(f"Hero reel path: {media['hero_path']} ({e})")
+        if media.get("chapter_paths"):
+            st.subheader("Chapter Reels / Stills")
+            for i, p in enumerate(media["chapter_paths"]):
+                st.markdown(f"**Chapter {i+1}**")
+                try:
+                    if str(p).endswith((".webm", ".mp4")):
+                        st.video(p)
+                    else:
+                        st.image(p)
+                    with open(p, "rb") as f:
+                        st.download_button(
+                            f"Download chapter {i+1}",
+                            f,
+                            file_name=f"chapter_{i+1}.webm" if str(p).endswith(".webm") else f"chapter_{i+1}.png",
+                            key=f"dl_{i}",
+                        )
+                except Exception as e:
+                    st.write(p, e)
+        elif media.get("note"):
+            st.info(media.get("note"))
+    except Exception as e:
+        st.warning(f"Media step skipped: {e}")
+
+    with st.expander("TGRM cycle log"):
+        for entry in result.get("log", []):
+            st.write(f"Cycle {entry.get('cycle')} · {entry.get('phase')} · RYE {entry.get('rye', 0)}")
             st.write(entry.get("notes", []))
-            if entry.get("fracture"):
-                st.json(entry["fracture"])
-            st.write("Correction:", entry.get("correction"))
 
-    st.subheader("Scar memory")
-    if result["scars"]:
-        st.json(result["scars"])
-    else:
-        st.info("No scars reinforced this run.")
+    with st.expander("Scar memory & MSIL"):
+        st.json({"scars": result.get("scars", []), "msil": result.get("msil", {})})
 
-    st.subheader("MSIL report")
-    st.json(result["msil"])
-
-    st.subheader("NFT-style metadata traits")
+    st.subheader("NFT-style traits")
     st.json({
         "name": title,
         "description": premise[:200],
         "attributes": [
-            {"trait_type": "RYE", "value": m["rye"]},
-            {"trait_type": "MSIL_verdict", "value": result["msil"]["verdict"]},
-            {"trait_type": "TGRM_cycles", "value": m["cycles"]},
-            {"trait_type": "micro_repairs", "value": m["microRepairs"]},
-            {"trait_type": "full_repairs", "value": m["fullRepairs"]},
-            {"trait_type": "tau", "value": SCIENCE["tau"]},
+            {"trait_type": "RYE", "value": m.get("rye")},
+            {"trait_type": "MSIL_verdict", "value": result.get("msil", {}).get("verdict")},
+            {"trait_type": "TGRM_cycles", "value": m.get("cycles")},
             {"trait_type": "format", "value": fmt},
+            {"trait_type": "tau", "value": SCIENCE.get("tau", 0.6)},
         ],
     })
 else:
-    st.info("Fill the brief in the sidebar and click **Run TGRM Pipeline** to execute Detect → Minimal → Verify → Reinforce.")
+    st.info("Fill the brief in the sidebar and click **Run TGRM Pipeline**.")
     st.markdown("### Five Laws of Reparodynamics (cinema)")
     for law in FIVE_LAWS:
-        st.markdown(f"**{law['name']}** — {law['cinema']}")
+        st.markdown(f"**{law.get('name', '')}** — {law.get('cinema', '')}")
