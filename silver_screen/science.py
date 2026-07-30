@@ -62,13 +62,52 @@ FIVE_LAWS = [
     },
 ]
 
-FORMATS = {
-    "trailer": {"duration_min": 2, "acts": 1, "chapters": 3},
-    "short": {"duration_min": 15, "acts": 2, "chapters": 5},
-    "episode": {"duration_min": 45, "acts": 3, "chapters": 8},
-    "featurette": {"duration_min": 30, "acts": 2, "chapters": 6},
-    "feature": {"duration_min": 90, "acts": 3, "chapters": 12},
+# Aligned with TypeScript FORMATS in src/lib/types.ts
+FORMATS: Dict[str, Dict[str, Any]] = {
+    "trailer": {
+        "label": "Trailer",
+        "minutes": 2,
+        "scenes": 5,
+        "acts": 1,
+        "chapters": 1,
+        "hint": "2-min sizzle",
+    },
+    "short": {
+        "label": "Short",
+        "minutes": 12,
+        "scenes": 8,
+        "acts": 2,
+        "chapters": 2,
+        "hint": "12-min short",
+    },
+    "episode": {
+        "label": "Episode",
+        "minutes": 24,
+        "scenes": 12,
+        "acts": 3,
+        "chapters": 3,
+        "hint": "24-min episode",
+    },
+    "featurette": {
+        "label": "Featurette",
+        "minutes": 45,
+        "scenes": 16,
+        "acts": 3,
+        "chapters": 4,
+        "hint": "45-min mid-form",
+    },
+    "feature": {
+        "label": "Feature",
+        "minutes": 90,
+        "scenes": 24,
+        "acts": 3,
+        "chapters": 8,
+        "hint": "90-min full film",
+    },
 }
+
+GENRES = ["noir", "scifi", "drama", "thriller", "fantasy", "western", "romance", "horror"]
+TONES = ["cinematic", "intimate", "epic", "melancholy", "tense", "hopeful"]
 
 FractureClass = Literal[
     "plot_hole",
@@ -80,6 +119,7 @@ FractureClass = Literal[
     "act_imbalance",
 ]
 
+
 @dataclass
 class Fracture:
     id: str
@@ -89,6 +129,7 @@ class Fracture:
     description: str
     hint: str
 
+
 @dataclass
 class ScarMemory:
     key: str
@@ -96,6 +137,7 @@ class ScarMemory:
     fix: str
     rye: float
     uses: int = 1
+
 
 @dataclass
 class TgrmCycleLog:
@@ -108,6 +150,7 @@ class TgrmCycleLog:
     notes: List[str] = field(default_factory=list)
     fracture: Optional[Fracture] = None
     correction: Optional[str] = None
+
 
 @dataclass
 class RyeMetrics:
@@ -123,6 +166,7 @@ class RyeMetrics:
     fullRepairs: int = 0
     reinforcements: int = 0
 
+
 @dataclass
 class MsilReport:
     stabilityIndex: float
@@ -133,3 +177,7 @@ class MsilReport:
     collapseRisk: float = 0.0
     verdict: Literal["stable", "repairing", "unstable"] = "stable"
     notes: List[str] = field(default_factory=list)
+
+
+def format_meta(fmt: str) -> Dict[str, Any]:
+    return FORMATS.get(fmt, FORMATS["feature"])
