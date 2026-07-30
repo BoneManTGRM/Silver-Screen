@@ -3,9 +3,11 @@
 from .pipeline import (
     BriefValidationError,
     PipelineError,
+    resume_video_run,
     run_pipeline,
     run_pipeline_from_file,
     validate_brief,
+    video_run_status,
 )
 from .science import APP_VERSION, FIVE_LAWS, FORMATS, SCIENCE
 from .script_engine import build_film_from_brief, generate_outline
@@ -23,9 +25,11 @@ __all__ = [
     "build_film_from_brief",
     "detect_fractures",
     "generate_outline",
+    "resume_video_run",
     "run_msil",
     "run_pipeline",
     "run_pipeline_from_file",
     "run_tgrm",
     "validate_brief",
+    "video_run_status",
 ]
