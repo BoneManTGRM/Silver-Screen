@@ -1,29 +1,31 @@
-"""Media rendering for static cards, honest previews, and resumable AI films."""
-
+"""Media rendering plus optional authorized voice production."""
 from __future__ import annotations
-
 import io
 import os
 import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any
-
 from .ai_video import generate_ai_video
+from .voice_config import _load_json as _load_voice_json
+from .voice_config import _paths as _voice_paths
+from .voice_studio import (
+    merge_voice_result,
+    process_voice_production,
+    voice_capabilities,
+)
 
 HAS_PIL = False
 HAS_VIDEO = False
 Image = ImageDraw = ImageFont = ImageOps = None
 np = None
 ImageClip = concatenate_videoclips = None
-
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
 
     HAS_PIL = True
 except Exception:
     pass
-
 try:
     import numpy as np
 
@@ -49,6 +51,7 @@ def media_capabilities() -> dict[str, Any]:
             "SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast"
         ),
         "resumableVideo": True,
+        "voiceStudio": voice_capabilities(),
         "modes": sorted(VIDEO_MODES),
     }
 
@@ -84,6 +87,7 @@ def _genre_color(genre: str) -> tuple[int, int, int]:
         "horror": (28, 12, 18),
         "romance": (66, 38, 58),
         "western": (76, 52, 30),
+        "comedy": (78, 52, 74),
     }.get((genre or "drama").lower().replace("-", ""), (30, 30, 50))
 
 
@@ -228,6 +232,16 @@ def _write_preview(clip, path: Path) -> Path | None:
     return None
 
 
+def _voice_request_exists(root: Path, voice_inputs: list[Any]) -> bool:
+    if any(
+        isinstance(item, dict) and bool(item.get("enabled"))
+        for item in voice_inputs
+    ):
+        return True
+    existing = _load_voice_json(_voice_paths(root)["config"])
+    return bool(existing and existing.get("enabled"))
+
+
 def process_media(
     state: dict[str, Any] | None = None,
     images: list[Any] | None = None,
@@ -248,15 +262,15 @@ def process_media(
     video_use_continuity: bool | None = None,
     video_progress: Any = None,
 ) -> dict[str, Any]:
-    """Create media while keeping generated footage and previews distinct."""
-
+    """Create media and, when authorized, build a resumable voice layer."""
     state = state or {}
     image_inputs = list(images or [])
     voice_inputs = list(voices or [])
     mode = video_mode if video_mode in VIDEO_MODES else "cards"
-    output = Path(out_dir or tempfile.mkdtemp(prefix="silverscreen_media_"))
+    output = Path(
+        out_dir or tempfile.mkdtemp(prefix="silverscreen_media_")
+    ).resolve()
     output.mkdir(parents=True, exist_ok=True)
-
     if mode == "ai-video":
         result = generate_ai_video(
             state,
@@ -279,18 +293,44 @@ def process_media(
             {
                 "mode": mode,
                 "card_paths": [],
-                "out_dir": str(output.resolve()),
+                "out_dir": str(output),
                 "portraits_used": 1 if image_inputs else 0,
                 "voices_count": len(voice_inputs),
                 "capabilities": media_capabilities(),
             }
         )
-        if voice_inputs:
-            result.setdefault("warnings", []).append(
-                "Voice files were inventoried but not synthesized."
-            )
+        if _voice_request_exists(output, voice_inputs):
+            try:
+                voice = process_voice_production(
+                    state, result, output, voice_inputs=voice_inputs
+                )
+            except Exception as exc:
+                voice = {
+                    "enabled": True,
+                    "status": "blocked",
+                    "metrics": {},
+                    "msil": {"verdict": "attention"},
+                    "silent_video_path": (
+                        result.get("final_video_path")
+                        or result.get("partial_video_path")
+                        or result.get("hero_path")
+                    ),
+                    "warnings": [str(exc)],
+                    "error": str(exc),
+                    "capabilities": voice_capabilities(),
+                }
+            result = merge_voice_result(result, voice)
+        else:
+            result["voice"] = {
+                "enabled": False,
+                "status": "disabled",
+                "metrics": {},
+                "msil": {"verdict": "disabled"},
+                "warnings": [],
+                "error": None,
+                "capabilities": voice_capabilities(),
+            }
         return result
-
     warnings: list[str] = []
     result: dict[str, Any] = {
         "ok": False,
@@ -302,15 +342,23 @@ def process_media(
         "hero_path": None,
         "final_video_path": None,
         "partial_video_path": None,
-        "out_dir": str(output.resolve()),
+        "out_dir": str(output),
         "portraits_used": 0,
         "voices_count": len(voice_inputs),
         "warnings": warnings,
         "error": None,
         "capabilities": media_capabilities(),
+        "voice": {
+            "enabled": False,
+            "status": "not_applicable",
+            "metrics": {},
+            "msil": {"verdict": "not_applicable"},
+        },
     }
     if voice_inputs:
-        warnings.append("Voice files were inventoried but not synthesized.")
+        warnings.append(
+            "Voice Studio requires verified AI-video clips; voice inputs were not used in preview/card mode."
+        )
     if not HAS_PIL:
         result.update(
             status="failed",
@@ -318,7 +366,6 @@ def process_media(
             note="No media was produced.",
         )
         return result
-
     portraits = []
     for index, upload in enumerate(image_inputs):
         try:
@@ -326,7 +373,6 @@ def process_media(
         except Exception as exc:
             warnings.append(f"Portrait {index + 1} was skipped: {exc}")
     result["portraits_used"] = len(portraits)
-
     chapters = [
         item
         for item in state.get("chapters") or []
@@ -364,7 +410,6 @@ def process_media(
             else:
                 clip.close()
                 warnings.append(f"Preview {number} could not be encoded.")
-
     if (
         mode == "preview-film"
         and clips
@@ -385,7 +430,6 @@ def process_media(
             clip.close()
         except Exception:
             pass
-
     result["ok"] = bool(result["card_paths"])
     result["status"] = "complete" if result["ok"] else "failed"
     result["note"] = (
