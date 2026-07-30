@@ -16,6 +16,24 @@ from typing import Any
 DEFAULT_RUNS_DIR = "runs"
 
 
+def resolve_runs_root(alias: str | os.PathLike[str] | None = None) -> Path:
+    """Resolve the allowlisted run-storage alias to ``./runs``.
+
+    User-controlled values are compared against the allowlist and never become
+    path segments. Deployments relocate storage by changing the working
+    directory or mounting durable storage at ``./runs``.
+    """
+
+    requested = str(
+        alias if alias not in (None, "") else os.getenv("SILVER_SCREEN_RUNS_DIR", DEFAULT_RUNS_DIR)
+    ).strip()
+    if requested != DEFAULT_RUNS_DIR:
+        raise ValueError(
+            f"Unsupported run storage alias {requested!r}; only {DEFAULT_RUNS_DIR!r} is allowed"
+        )
+    return (Path.cwd() / DEFAULT_RUNS_DIR).resolve()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -70,8 +88,7 @@ class RunWorkspace:
         brief: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
     ) -> None:
-        configured_root = root or os.getenv("SILVER_SCREEN_RUNS_DIR") or DEFAULT_RUNS_DIR
-        self.root = Path(configured_root).expanduser().resolve()
+        self.root = resolve_runs_root(root)
         self.run_id = run_id or create_run_id()
         if not re.fullmatch(r"[A-Za-z0-9_.-]{6,120}", self.run_id):
             raise ValueError("run_id contains unsupported characters")
@@ -241,9 +258,7 @@ def list_runs(
     root: str | os.PathLike[str] | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    configured_root = Path(
-        root or os.getenv("SILVER_SCREEN_RUNS_DIR") or DEFAULT_RUNS_DIR
-    ).expanduser()
+    configured_root = resolve_runs_root(root)
     if not configured_root.exists():
         return []
     records: list[dict[str, Any]] = []
@@ -265,8 +280,13 @@ def load_run(
     run_id: str,
     root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    configured_root = Path(
-        root or os.getenv("SILVER_SCREEN_RUNS_DIR") or DEFAULT_RUNS_DIR
-    ).expanduser()
-    result_path = configured_root / run_id / "result.json"
-    return json.loads(result_path.read_text(encoding="utf-8"))
+    configured_root = resolve_runs_root(root)
+    requested = str(run_id).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{6,120}", requested):
+        raise ValueError("run_id contains unsupported characters")
+    if not configured_root.exists():
+        raise FileNotFoundError(f"Run {requested!r} was not found")
+    for candidate in configured_root.iterdir():
+        if candidate.is_dir() and candidate.name == requested:
+            return json.loads((candidate / "result.json").read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"Run {requested!r} was not found")
