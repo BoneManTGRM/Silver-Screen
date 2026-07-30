@@ -1,4 +1,4 @@
-"""Media rendering for static cards, honest previews, and resumable AI films."""
+"""Media rendering for cards, previews, resumable AI films, and voices."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .ai_video import generate_ai_video
+from .voice_studio import process_voice_production, voice_capabilities
 
 HAS_PIL = False
 HAS_VIDEO = False
@@ -19,14 +20,12 @@ ImageClip = concatenate_videoclips = None
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageOps
-
     HAS_PIL = True
 except Exception:
     pass
 
 try:
     import numpy as np
-
     try:
         from moviepy import ImageClip, concatenate_videoclips
     except Exception:
@@ -45,26 +44,21 @@ def media_capabilities() -> dict[str, Any]:
         "localPreview": HAS_VIDEO,
         "aiVideo": bool(os.getenv("REPLICATE_API_TOKEN")),
         "aiProvider": "replicate",
-        "aiModel": os.getenv(
-            "SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast"
-        ),
+        "aiModel": os.getenv("SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast"),
         "resumableVideo": True,
+        "voiceStudio": voice_capabilities(),
         "modes": sorted(VIDEO_MODES),
     }
 
 
 def _font(size: int, bold: bool = False):
     candidates = [
-        (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            if bold
-            else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        ),
-        (
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
-            if bold
-            else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
-        ),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
     ]
     for candidate in candidates:
         try:
@@ -79,6 +73,7 @@ def _genre_color(genre: str) -> tuple[int, int, int]:
         "scifi": (18, 36, 72),
         "noir": (24, 24, 28),
         "drama": (58, 40, 48),
+        "comedy": (78, 57, 36),
         "thriller": (56, 20, 26),
         "fantasy": (42, 30, 72),
         "horror": (28, 12, 18),
@@ -112,14 +107,7 @@ def _load_image(upload: Any):
     return image.convert("RGB")
 
 
-def _draw_wrapped(
-    draw,
-    text: str,
-    xy: tuple[int, int],
-    font,
-    width: int,
-    max_lines: int,
-) -> None:
+def _draw_wrapped(draw, text: str, xy: tuple[int, int], font, width: int, max_lines: int) -> None:
     words = (text or "").replace("\n", " ").split()
     lines: list[str] = []
     current = ""
@@ -155,30 +143,21 @@ def _chapter_summary(state: dict[str, Any], chapter_number: int) -> str:
         if isinstance(scene, dict)
         and int(scene.get("chapter", 1)) == chapter_number
     ]
-    return " ".join(
-        str(scene.get("summary") or "") for scene in scenes[:3]
-    ) or str(state.get("premise") or "")
+    return " ".join(str(scene.get("summary") or "") for scene in scenes[:3]) or str(
+        state.get("premise") or ""
+    )
 
 
-def _make_card(
-    state: dict[str, Any],
-    chapter: dict[str, Any],
-    summary: str,
-    portrait=None,
-):
+def _make_card(state: dict[str, Any], chapter: dict[str, Any], summary: str, portrait=None):
     size = (1280, 720)
     if portrait is not None:
         resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
-        card = ImageOps.fit(
-            portrait, size, method=resampling, centering=(0.5, 0.45)
-        )
+        card = ImageOps.fit(portrait, size, method=resampling, centering=(0.5, 0.45))
         card = Image.alpha_composite(
             card.convert("RGBA"), Image.new("RGBA", size, (0, 0, 0, 150))
         ).convert("RGB")
     else:
-        card = Image.new(
-            "RGB", size, _genre_color(str(state.get("genre") or "drama"))
-        )
+        card = Image.new("RGB", size, _genre_color(str(state.get("genre") or "drama")))
     draw = ImageDraw.Draw(card)
     accent = (226, 216, 190)
     draw.rectangle((0, 0, 18, size[1]), fill=accent)
@@ -194,9 +173,7 @@ def _make_card(
         font=_font(38, True),
         fill=(255, 255, 255),
     )
-    _draw_wrapped(
-        draw, summary, (72, 245), _font(28), size[0] - 150, 8
-    )
+    _draw_wrapped(draw, summary, (72, 245), _font(28), size[0] - 150, 8)
     draw.text(
         (72, 650),
         "SILVER-SCREEN | REPARODYNAMICS | TGRM",
@@ -207,11 +184,7 @@ def _make_card(
 
 
 def _with_duration(clip, seconds: float):
-    return (
-        clip.with_duration(seconds)
-        if hasattr(clip, "with_duration")
-        else clip.set_duration(seconds)
-    )
+    return clip.with_duration(seconds) if hasattr(clip, "with_duration") else clip.set_duration(seconds)
 
 
 def _write_preview(clip, path: Path) -> Path | None:
@@ -226,6 +199,59 @@ def _write_preview(clip, path: Path) -> Path | None:
         except Exception:
             continue
     return None
+
+
+def _voice_requested(voice_inputs: list[Any]) -> bool:
+    return any(
+        isinstance(item, dict) and bool(item.get("enabled"))
+        for item in voice_inputs
+    )
+
+
+def _merge_voice_result(result: dict[str, Any], voice: dict[str, Any]) -> None:
+    result["voice"] = voice
+    result["voice_enabled"] = bool(voice.get("enabled"))
+    result["voice_status"] = voice.get("status")
+    result["voice_metrics"] = voice.get("metrics") or {}
+    result["voice_msil"] = voice.get("msil") or {}
+    result["voice_error"] = voice.get("error")
+    result["subtitles_path"] = voice.get("subtitles_path")
+    result["voice_config_path"] = voice.get("config_path")
+    result["voice_cast_path"] = voice.get("cast_path")
+    result["voice_plan_path"] = voice.get("plan_path")
+    result["voice_runtime_path"] = voice.get("runtime_path")
+    result["voice_scar_memory_path"] = voice.get("scar_memory_path")
+    result["voice_line_audio_paths"] = voice.get("line_audio_paths") or []
+    result["dubbed_clip_paths"] = voice.get("dubbed_clip_paths") or []
+
+    voiced = voice.get("assembled_video_path")
+    if voiced:
+        result["silent_final_video_path"] = result.get("final_video_path")
+        result["silent_partial_video_path"] = result.get("partial_video_path")
+        result["silent_hero_path"] = result.get("hero_path")
+        if voice.get("status") == "complete":
+            result["final_video_path"] = voiced
+            result["partial_video_path"] = None
+        else:
+            result["partial_video_path"] = voiced
+        result["hero_path"] = voiced
+
+    voice_status = str(voice.get("status") or "disabled")
+    video_status = str(result.get("status") or "failed")
+    if voice_status == "blocked":
+        result["status"] = "blocked"
+        result["stopReason"] = "voice_production_blocked"
+        result["error"] = voice.get("error")
+    elif video_status == "complete" and voice_status in {"partial", "planned"}:
+        result["status"] = "partial"
+        result["stopReason"] = "voice_checkpoint"
+    elif video_status == "complete" and voice_status == "complete":
+        result["status"] = "complete"
+        result["stopReason"] = "target_runtime_and_voice_reached"
+
+    for warning in voice.get("warnings") or []:
+        if warning and warning not in result.setdefault("warnings", []):
+            result["warnings"].append(str(warning))
 
 
 def process_media(
@@ -248,7 +274,7 @@ def process_media(
     video_use_continuity: bool | None = None,
     video_progress: Any = None,
 ) -> dict[str, Any]:
-    """Create media while keeping generated footage and previews distinct."""
+    """Create media while keeping AI footage, previews, and voices distinct."""
 
     state = state or {}
     image_inputs = list(images or [])
@@ -285,10 +311,51 @@ def process_media(
                 "capabilities": media_capabilities(),
             }
         )
-        if voice_inputs:
-            result.setdefault("warnings", []).append(
-                "Voice files were inventoried but not synthesized."
-            )
+
+        persisted_voice_config = (output / "audio" / "voice_config.json").exists()
+        if _voice_requested(voice_inputs) or persisted_voice_config:
+            try:
+                voice = process_voice_production(
+                    state, result, output, voice_inputs
+                )
+            except Exception as exc:
+                voice = {
+                    "ok": False,
+                    "enabled": True,
+                    "status": "blocked",
+                    "provider": None,
+                    "model": None,
+                    "cast": {},
+                    "plan": {},
+                    "metrics": {},
+                    "msil": {"verdict": "attention"},
+                    "scars": [],
+                    "warnings": [str(exc)],
+                    "error": str(exc),
+                    "assembled_video_path": None,
+                    "final_video_path": None,
+                    "partial_video_path": None,
+                    "subtitles_path": None,
+                    "config_path": str(output / "audio" / "voice_config.json"),
+                    "cast_path": None,
+                    "plan_path": None,
+                    "runtime_path": None,
+                    "scar_memory_path": None,
+                    "line_audio_paths": [],
+                    "dubbed_clip_paths": [],
+                    "capabilities": voice_capabilities(),
+                    "note": (
+                        "Video footage remains verified, but Voice Studio requires attention."
+                    ),
+                }
+            _merge_voice_result(result, voice)
+        else:
+            result["voice"] = {
+                "enabled": False,
+                "status": "disabled",
+                "note": "Voice Studio is disabled.",
+                "capabilities": voice_capabilities(),
+            }
         return result
 
     warnings: list[str] = []
@@ -308,9 +375,16 @@ def process_media(
         "warnings": warnings,
         "error": None,
         "capabilities": media_capabilities(),
+        "voice": {
+            "enabled": False,
+            "status": "not_applicable",
+            "note": "Voice mixing currently applies to real AI-video output.",
+        },
     }
     if voice_inputs:
-        warnings.append("Voice files were inventoried but not synthesized.")
+        warnings.append(
+            "Voice Studio requires AI-video output; uploaded audio was not processed in card/preview mode."
+        )
     if not HAS_PIL:
         result.update(
             status="failed",
@@ -328,9 +402,7 @@ def process_media(
     result["portraits_used"] = len(portraits)
 
     chapters = [
-        item
-        for item in state.get("chapters") or []
-        if isinstance(item, dict)
+        item for item in state.get("chapters") or [] if isinstance(item, dict)
     ] or [{"number": 1, "title": "Chapter 1"}]
     limit = max(1, min(int(max_chapters), len(chapters), 12))
     clips = []
@@ -346,10 +418,7 @@ def process_media(
         result["chapter_paths"].append(str(card_path.resolve()))
         if mode in {"preview", "preview-film"}:
             if not HAS_VIDEO or ImageClip is None or np is None:
-                if (
-                    "MoviePy is unavailable; static cards were retained."
-                    not in warnings
-                ):
+                if "MoviePy is unavailable; static cards were retained." not in warnings:
                     warnings.append(
                         "MoviePy is unavailable; static cards were retained."
                     )
@@ -365,11 +434,7 @@ def process_media(
                 clip.close()
                 warnings.append(f"Preview {number} could not be encoded.")
 
-    if (
-        mode == "preview-film"
-        and clips
-        and concatenate_videoclips is not None
-    ):
+    if mode == "preview-film" and clips and concatenate_videoclips is not None:
         hero = None
         try:
             hero = concatenate_videoclips(clips, method="compose")
