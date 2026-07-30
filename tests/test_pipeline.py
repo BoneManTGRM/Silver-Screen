@@ -134,10 +134,11 @@ def test_energy_budget_stops_before_unaffordable_repair() -> None:
     )
 
 
-def test_pipeline_persists_complete_bundle(tmp_path: Path) -> None:
+def test_pipeline_persists_complete_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     result = run_pipeline(
         BASE_BRIEF,
-        output_root=str(tmp_path),
+        output_root="runs",
         persist=True,
         render_media=False,
     )
@@ -155,21 +156,23 @@ def test_pipeline_persists_complete_bundle(tmp_path: Path) -> None:
         assert {"manifest.json", "screenplay.txt", "film.json", "tgrm.json"} <= names
 
 
-def test_list_runs_reads_durable_manifest(tmp_path: Path) -> None:
+def test_list_runs_reads_durable_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     result = run_pipeline(
         BASE_BRIEF,
-        output_root=str(tmp_path),
+        output_root="runs",
         persist=True,
         render_media=False,
     )
-    records = list_runs(tmp_path)
+    records = list_runs("runs")
     assert records
     assert records[0]["runId"] == result["run"]["id"]
     assert records[0]["status"] == "complete"
 
 
-def test_workspace_rejects_path_escape(tmp_path: Path) -> None:
-    workspace = RunWorkspace(tmp_path, "ss_safe_test")
+def test_workspace_rejects_path_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = RunWorkspace("runs", "ss_safe_test")
     with pytest.raises(ValueError):
         workspace.write_text("../escape.txt", "not allowed")
 
@@ -191,8 +194,16 @@ def test_media_cards_are_valid_pngs(tmp_path: Path) -> None:
         assert data.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def test_health_report_has_operational_contract(tmp_path: Path) -> None:
-    report = health_report(tmp_path)
+def test_run_storage_rejects_uncontrolled_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError):
+        RunWorkspace("../outside", "ss_blocked_test")
+    assert not (tmp_path.parent / "outside").exists()
+
+
+def test_health_report_has_operational_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    report = health_report("runs")
     assert report["ready"] is True
     assert report["checks"]["outputWritable"] is True
     assert report["status"] in {"ready", "degraded"}
