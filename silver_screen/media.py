@@ -1,7 +1,7 @@
-"""media.py — chapter cards + optional reels for Streamlit.
+"""Safe chapter-card and preview-reel rendering.
 
-Compatible with moviepy 1.x and 2.x. Always produces PNG cards; video when possible.
-Never raises into Streamlit.
+Media is optional. A missing codec or library degrades to PNG cards and returns
+structured warnings instead of failing the story pipeline.
 """
 
 from __future__ import annotations
@@ -9,43 +9,70 @@ from __future__ import annotations
 import io
 import os
 import tempfile
-from typing import Any, Dict, List, Optional
+import textwrap
+from pathlib import Path
+from typing import Any
 
-HAS_MEDIA = False
-ImageClip = concatenate_videoclips = ColorClip = None
+HAS_PIL = False
+HAS_VIDEO = False
+Image = ImageDraw = ImageFont = ImageOps = None
 np = None
-Image = ImageDraw = ImageFont = None
+ImageClip = concatenate_videoclips = None
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
-    import numpy as np
-    try:
-        from moviepy import ImageClip, concatenate_videoclips, ColorClip  # v2
-    except Exception:
-        from moviepy.editor import ImageClip, concatenate_videoclips, ColorClip  # v1
-    HAS_MEDIA = True
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+    HAS_PIL = True
 except Exception:
-    HAS_MEDIA = False
+    HAS_PIL = False
+
+try:
+    import numpy as np
+
+    try:
+        from moviepy import ImageClip, concatenate_videoclips
+    except Exception:
+        from moviepy.editor import ImageClip, concatenate_videoclips
+    HAS_VIDEO = True
+except Exception:
+    HAS_VIDEO = False
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+VIDEO_MODES = {"cards", "chapters", "hero"}
 
 
-def _genre_color(genre: str):
-    g = (genre or "drama").lower().replace("-", "")
+def media_capabilities() -> dict[str, Any]:
     return {
-        "scifi": (20, 40, 90),
-        "noir": (25, 25, 30),
-        "drama": (55, 40, 50),
-        "thriller": (50, 20, 25),
-        "fantasy": (40, 30, 70),
-        "horror": (25, 10, 15),
-        "romance": (48, 32, 48),
-    }.get(g, (30, 30, 50))
+        "pillow": HAS_PIL,
+        "video": HAS_VIDEO,
+        "modes": sorted(VIDEO_MODES),
+    }
 
 
-def _font(size: int = 40):
-    for path in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
+def _genre_color(genre: str) -> tuple[int, int, int]:
+    normalized = (genre or "drama").lower().replace("-", "")
+    return {
+        "scifi": (18, 36, 72),
+        "noir": (24, 24, 28),
+        "drama": (58, 40, 48),
+        "thriller": (56, 20, 26),
+        "fantasy": (42, 30, 72),
+        "horror": (28, 12, 18),
+        "romance": (66, 38, 58),
+        "western": (76, 52, 30),
+    }.get(normalized, (30, 30, 50))
+
+
+def _font(size: int = 40, bold: bool = False):
+    candidates = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
+        if bold
+        else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    )
+    for path in candidates:
         try:
             return ImageFont.truetype(path, size)
         except Exception:
@@ -53,44 +80,121 @@ def _font(size: int = 40):
     return ImageFont.load_default()
 
 
-def _make_card(text: str, size=(1280, 720), bg=(30, 30, 50), accent=(210, 200, 180)):
-    img = Image.new("RGB", size, bg)
-    draw = ImageDraw.Draw(img)
-    font = _font(40)
+def _read_upload(upload: Any) -> bytes:
+    if isinstance(upload, (str, os.PathLike)):
+        path = Path(upload)
+        if path.stat().st_size > MAX_UPLOAD_BYTES:
+            raise ValueError(f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+        return path.read_bytes()
+    size = getattr(upload, "size", None)
+    if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if not hasattr(upload, "read"):
+        raise TypeError("Unsupported image input")
+    data = upload.read(MAX_UPLOAD_BYTES + 1)
+    if hasattr(upload, "seek"):
+        upload.seek(0)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    return data
+
+
+def _load_image(upload: Any):
+    data = _read_upload(upload)
+    image = Image.open(io.BytesIO(data))
+    image.load()
+    return image.convert("RGB")
+
+
+def _fit_background(image, size: tuple[int, int]):
+    resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+    return ImageOps.fit(image, size, method=resampling, centering=(0.5, 0.45))
+
+
+def _draw_wrapped(
+    draw,
+    text: str,
+    xy: tuple[int, int],
+    *,
+    font,
+    fill: tuple[int, int, int],
+    width: int,
+    line_spacing: int,
+    max_lines: int,
+) -> int:
     words = (text or "").replace("\n", " ").split()
-    lines, line = [], ""
-    for w in words:
-        test = (line + " " + w).strip()
-        if len(test) > 42:
-            if line:
-                lines.append(line)
-            line = w
-        else:
-            line = test
-    if line:
-        lines.append(line)
-    y = size[1] // 2 - max(1, len(lines)) * 28
-    for ln in lines[:10]:
+    if not words:
+        return xy[1]
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
         try:
-            bbox = draw.textbbox((0, 0), ln, font=font)
-            x = (size[0] - (bbox[2] - bbox[0])) // 2
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            candidate_width = bbox[2] - bbox[0]
         except Exception:
-            x = 40
-        draw.text((x, y), ln, fill=accent, font=font)
-        y += 52
-    return img
+            candidate_width = len(candidate) * 10
+        if current and candidate_width > width:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if len(lines) == max_lines and words:
+        lines[-1] = textwrap.shorten(lines[-1], width=max(10, len(lines[-1]) - 1), placeholder="...")
+    y = xy[1]
+    for line in lines:
+        draw.text((xy[0], y), line, font=font, fill=fill)
+        y += line_spacing
+    return y
 
 
-def _load_upload(upload) -> Optional[Any]:
-    try:
-        if hasattr(upload, "read"):
-            data = upload.read()
-            if hasattr(upload, "seek"):
-                upload.seek(0)
-            return Image.open(io.BytesIO(data)).convert("RGB")
-        return Image.open(upload).convert("RGB")
-    except Exception:
-        return None
+def _make_card(
+    title: str,
+    chapter_title: str,
+    summary: str,
+    *,
+    genre: str,
+    portrait=None,
+    size: tuple[int, int] = (1280, 720),
+):
+    background = _genre_color(genre)
+    if portrait is not None:
+        card = _fit_background(portrait, size)
+        overlay = Image.new("RGBA", size, (0, 0, 0, 145))
+        card = Image.alpha_composite(card.convert("RGBA"), overlay).convert("RGB")
+    else:
+        card = Image.new("RGB", size, background)
+
+    draw = ImageDraw.Draw(card)
+    accent = (226, 216, 190)
+    muted = (224, 224, 224)
+    title_font = _font(56, bold=True)
+    chapter_font = _font(38, bold=True)
+    body_font = _font(28)
+    draw.rectangle((0, 0, 18, size[1]), fill=accent)
+    draw.text((70, 68), title[:80], font=title_font, fill=accent)
+    draw.text((72, 160), chapter_title[:100], font=chapter_font, fill=(255, 255, 255))
+    _draw_wrapped(
+        draw,
+        summary,
+        (72, 245),
+        font=body_font,
+        fill=muted,
+        width=size[0] - 150,
+        line_spacing=40,
+        max_lines=8,
+    )
+    draw.text(
+        (72, size[1] - 70),
+        "SILVER-SCREEN | REPARODYNAMICS | TGRM",
+        font=_font(20, bold=True),
+        fill=accent,
+    )
+    return card
 
 
 def _clip_with_duration(clip, seconds: float):
@@ -99,139 +203,190 @@ def _clip_with_duration(clip, seconds: float):
     return clip.set_duration(seconds)
 
 
-def _write_video(clip, path: str, fps: int = 12) -> None:
-    """Write video without moviepy-version-specific kwargs that break v2."""
-    try:
-        clip.write_videofile(path, fps=fps, codec="libx264", audio=False, logger=None)
-        return
-    except TypeError:
-        pass
-    try:
-        clip.write_videofile(path, fps=fps, codec="libx264", audio=False)
-        return
-    except Exception:
-        pass
-    alt = path.rsplit(".", 1)[0] + ".webm"
-    try:
-        clip.write_videofile(alt, fps=fps, codec="libvpx", audio=False, logger=None)
-        if alt != path and os.path.exists(alt):
-            os.replace(alt, path)
-    except TypeError:
-        clip.write_videofile(alt, fps=fps, codec="libvpx", audio=False)
-        if alt != path and os.path.exists(alt):
-            os.replace(alt, path)
+def _write_video(clip, path: Path, fps: int = 12) -> Path | None:
+    attempts = [
+        {"fps": fps, "codec": "libx264", "audio": False, "logger": None},
+        {"fps": fps, "codec": "libx264", "audio": False},
+    ]
+    for kwargs in attempts:
+        try:
+            clip.write_videofile(str(path), **kwargs)
+            if path.exists() and path.stat().st_size > 0:
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def _chapter_summary(state: dict[str, Any], chapter_number: int) -> str:
+    scenes = [
+        scene
+        for scene in state.get("scenes") or []
+        if isinstance(scene, dict) and int(scene.get("chapter", 1)) == chapter_number
+    ]
+    summaries = [str(scene.get("summary") or "") for scene in scenes[:3]]
+    return " ".join(summary for summary in summaries if summary) or str(
+        state.get("premise") or ""
+    )
 
 
 def process_media(
-    state: Optional[Dict[str, Any]] = None,
-    images: Optional[List[Any]] = None,
-    voices: Optional[List[Any]] = None,
-    out_dir: Optional[str] = None,
+    state: dict[str, Any] | None = None,
+    images: list[Any] | None = None,
+    voices: list[Any] | None = None,
+    out_dir: str | os.PathLike[str] | None = None,
     max_chapters: int = 4,
-) -> Dict[str, Any]:
+    video_mode: str = "cards",
+) -> dict[str, Any]:
+    """Render chapter cards and, when requested, short preview videos."""
+
     state = state or {}
-    images = images or []
-    result: Dict[str, Any] = {
+    images = list(images or [])
+    voices = list(voices or [])
+    mode = video_mode if video_mode in VIDEO_MODES else "cards"
+    warnings: list[str] = []
+    result: dict[str, Any] = {
         "ok": False,
-        "status": "init",
+        "status": "initializing",
+        "mode": mode,
         "chapter_paths": [],
+        "card_paths": [],
+        "video_paths": [],
         "hero_path": None,
         "out_dir": None,
         "portraits_used": 0,
-        "voices_count": len(voices or []),
+        "voices_count": len(voices),
+        "warnings": warnings,
         "note": "",
         "error": None,
+        "capabilities": media_capabilities(),
     }
 
-    if not HAS_MEDIA or Image is None:
-        result["status"] = "unavailable"
-        result["note"] = "moviepy/Pillow unavailable — pip install -r requirements.txt"
+    if voices:
+        warnings.append(
+            "Voice files were inventoried but not synthesized. Silver-Screen does not impersonate or clone voices in this release."
+        )
+    if not HAS_PIL or Image is None:
+        result.update(
+            {
+                "status": "unavailable",
+                "note": "Pillow is unavailable, so media rendering was skipped.",
+                "error": "missing_pillow",
+            }
+        )
         return result
 
     try:
-        out_dir = out_dir or tempfile.mkdtemp(prefix="silverscreen_")
-        os.makedirs(out_dir, exist_ok=True)
-        result["out_dir"] = out_dir
-
-        bg = _genre_color(state.get("genre") or "drama")
-        title = state.get("title") or "Silver-Screen"
-        premise = (state.get("premise") or "")[:100]
-        scenes = state.get("scenes") or []
-        chapters = state.get("chapters") or [
-            {"number": i + 1, "title": f"Chapter {i + 1}"} for i in range(2)
-        ]
+        output = Path(out_dir or tempfile.mkdtemp(prefix="silverscreen_media_"))
+        output.mkdir(parents=True, exist_ok=True)
+        result["out_dir"] = str(output.resolve())
 
         portraits = []
-        for up in images:
-            im = _load_upload(up)
-            if im is not None:
-                try:
-                    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
-                    portraits.append(im.resize((1280, 720), resample))
-                except Exception:
-                    portraits.append(im)
+        for index, upload in enumerate(images):
+            try:
+                portraits.append(_load_image(upload))
+            except Exception as exc:
+                warnings.append(f"Portrait {index + 1} was skipped: {exc}")
         result["portraits_used"] = len(portraits)
 
-        chapter_paths: List[str] = []
-        chapter_clips = []
+        title = str(state.get("title") or "Silver-Screen")
+        genre = str(state.get("genre") or "drama")
+        chapters = [chapter for chapter in state.get("chapters") or [] if isinstance(chapter, dict)]
+        if not chapters:
+            chapters = [{"number": 1, "title": "Chapter 1"}]
+        chapter_limit = max(1, min(int(max_chapters), len(chapters), 12))
+        clips = []
 
-        for ci, ch in enumerate(chapters[:max_chapters]):
-            ch_title = ch.get("title", f"Chapter {ci + 1}") if isinstance(ch, dict) else str(ch)
-            lines = f"{title}\n{ch_title}\n{premise}"
-            card = _make_card(lines, bg=bg)
-            if portraits:
+        for index, chapter in enumerate(chapters[:chapter_limit]):
+            chapter_number = int(chapter.get("number", index + 1) or index + 1)
+            chapter_title = str(chapter.get("title") or f"Chapter {chapter_number}")
+            summary = _chapter_summary(state, chapter_number)
+            portrait = portraits[index % len(portraits)] if portraits else None
+            card = _make_card(
+                title,
+                chapter_title,
+                summary,
+                genre=genre,
+                portrait=portrait,
+            )
+            card_path = output / f"chapter_{chapter_number:02d}.png"
+            card.save(card_path, format="PNG", optimize=True)
+            result["card_paths"].append(str(card_path.resolve()))
+            result["chapter_paths"].append(str(card_path.resolve()))
+
+            if mode in {"chapters", "hero"}:
+                if not HAS_VIDEO or ImageClip is None or np is None:
+                    if "MoviePy or NumPy is unavailable; PNG cards were retained." not in warnings:
+                        warnings.append("MoviePy or NumPy is unavailable; PNG cards were retained.")
+                    continue
                 try:
-                    p = portraits[ci % len(portraits)].copy().resize((640, 360))
-                    card.paste(p, (320, 360))
-                except Exception:
-                    pass
+                    clip = _clip_with_duration(ImageClip(np.array(card)), 2.8)
+                    video_path = output / f"chapter_{chapter_number:02d}.mp4"
+                    written = _write_video(clip, video_path, fps=12)
+                    if written is not None:
+                        result["video_paths"].append(str(written.resolve()))
+                        result["chapter_paths"][-1] = str(written.resolve())
+                        clips.append(clip)
+                    else:
+                        clip.close()
+                        warnings.append(
+                            f"Chapter {chapter_number} video encoding failed; the PNG card remains available."
+                        )
+                except Exception as exc:
+                    warnings.append(
+                        f"Chapter {chapter_number} video encoding failed; the PNG card remains available: {exc}"
+                    )
 
-            png_path = os.path.join(out_dir, f"chapter_{ci + 1}.png")
-            card.save(png_path)
-
-            video_path = os.path.join(out_dir, f"chapter_{ci + 1}.mp4")
-            wrote_video = False
-            if ImageClip is not None and np is not None:
-                try:
-                    clip = _clip_with_duration(ImageClip(np.array(card)), 2.5)
-                    _write_video(clip, video_path, fps=10)
-                    if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
-                        chapter_paths.append(video_path)
-                        chapter_clips.append(clip)
-                        wrote_video = True
-                except Exception as e:
-                    result["error"] = str(e)
-
-            if not wrote_video:
-                chapter_paths.append(png_path)
-
-        result["chapter_paths"] = chapter_paths
-
-        if chapter_clips and concatenate_videoclips is not None:
+        if mode == "hero" and clips and concatenate_videoclips is not None:
+            hero = None
             try:
-                hero = concatenate_videoclips(chapter_clips[: min(3, len(chapter_clips))], method="compose")
-                hero_path = os.path.join(out_dir, "hero_reel.mp4")
-                _write_video(hero, hero_path, fps=10)
-                if os.path.exists(hero_path) and os.path.getsize(hero_path) > 0:
-                    result["hero_path"] = hero_path
-            except Exception as e:
-                result["error"] = (result.get("error") or "") + " | hero: " + str(e)
+                hero = concatenate_videoclips(clips, method="compose")
+                hero_path = output / "hero_reel.mp4"
+                written = _write_video(hero, hero_path, fps=12)
+                if written is not None:
+                    result["hero_path"] = str(written.resolve())
+                else:
+                    warnings.append("Hero reel encoding failed; chapter artifacts remain available.")
+            except Exception as exc:
+                warnings.append(f"Hero reel encoding failed: {exc}")
+            finally:
+                if hero is not None:
+                    try:
+                        hero.close()
+                    except Exception:
+                        pass
 
-        result["ok"] = bool(chapter_paths)
-        result["status"] = "ok" if result["ok"] else "no clips"
-        has_vid = any(str(p).endswith((".mp4", ".webm")) for p in chapter_paths) or bool(result.get("hero_path"))
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+        result["ok"] = bool(result["card_paths"])
+        result["status"] = "complete" if result["ok"] else "empty"
         result["note"] = (
-            f"Generated {len(chapter_paths)} chapter(s)"
-            + (f" with {result['portraits_used']} portrait(s)" if result["portraits_used"] else "")
-            + (". Video ready." if has_vid else ". PNG cards (video write failed or unavailable).")
+            f"Generated {len(result['card_paths'])} chapter card(s), "
+            f"{len(result['video_paths'])} chapter video(s), and "
+            f"{'one hero reel' if result['hero_path'] else 'no hero reel'}."
         )
-    except Exception as e:
-        result["error"] = str(e)
-        result["status"] = "error"
-        result["note"] = f"Media failed safely: {e}"
-
+    except Exception as exc:
+        result.update(
+            {
+                "status": "error",
+                "error": str(exc),
+                "note": f"Media failed safely: {exc}",
+            }
+        )
     return result
 
 
 def process_uploads(images=None, voices=None, film=None, out_dir=None):
-    return process_media(film or {}, images=images, voices=voices, out_dir=out_dir)
+    """Compatibility wrapper retained for earlier integrations."""
+
+    return process_media(
+        film or {},
+        images=images,
+        voices=voices,
+        out_dir=out_dir,
+        video_mode="cards",
+    )
