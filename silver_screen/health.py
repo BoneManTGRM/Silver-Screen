@@ -49,16 +49,16 @@ def health_report(output_root: str | os.PathLike[str] | None = None) -> dict[str
         "corePackage": True,
         "outputWritable": writable,
         "streamlit": _module_available("streamlit"),
-        "pillow": capabilities["pillow"],
+        "pillow": bool(capabilities.get("pillow")),
         "numpy": _module_available("numpy"),
-        "moviepy": capabilities["video"],
+        "moviepy": bool(capabilities.get("localPreview")),
         "ffmpeg": bool(ffmpeg),
+        "aiVideoProvider": bool(capabilities.get("aiVideo")),
     }
     critical_ok = checks["corePackage"] and checks["outputWritable"]
-    media_ok = checks["pillow"]
     if not critical_ok:
         status = "unhealthy"
-    elif media_ok and checks["streamlit"]:
+    elif checks["pillow"] and checks["streamlit"]:
         status = "ready"
     else:
         status = "degraded"
@@ -68,9 +68,11 @@ def health_report(output_root: str | os.PathLike[str] | None = None) -> dict[str
     if not checks["streamlit"]:
         notes.append("Streamlit is not installed; CLI and core pipeline remain available.")
     if not checks["pillow"]:
-        notes.append("Pillow is not installed; media cards are disabled.")
+        notes.append("Pillow is not installed; static media cards are disabled.")
     if not checks["moviepy"] or not checks["ffmpeg"]:
-        notes.append("Video encoding is unavailable; PNG media cards remain supported when Pillow is present.")
+        notes.append("Local preview encoding is unavailable; AI video generation can still work when its provider is configured.")
+    if not checks["aiVideoProvider"]:
+        notes.append("REPLICATE_API_TOKEN is not configured; actual AI video generation is unavailable.")
     return {
         "status": status,
         "ready": critical_ok,
@@ -78,6 +80,7 @@ def health_report(output_root: str | os.PathLike[str] | None = None) -> dict[str
         "checkedAt": utc_now(),
         "outputRoot": str(root.resolve()),
         "checks": checks,
+        "mediaCapabilities": capabilities,
         "ffmpegPath": ffmpeg,
         "notes": notes,
     }
