@@ -2,30 +2,94 @@
 
 **A Reparodynamics production system using TGRM, RYE, and MSIL**
 
-Silver-Screen turns a story brief into a deterministic production package: story bible, cast, acts, chapters, scenes, shot plan, screenplay blueprint, TGRM repair audit, optional media previews, and a durable ZIP bundle.
-
-The primary runtime is Python and Streamlit. It is designed to run locally, in CI, or in a container without depending on a remote model. The same normalized brief and seed produce the same initial film state, so repair decisions are reproducible and testable.
+Silver-Screen turns a story brief into a deterministic screenplay package and a resumable AI-film production. It plans a target runtime as an ordered shot queue, submits real model-backed video generations, persists prediction IDs, verifies MP4 outputs, repairs only failed shots, chains accepted final frames for continuity, and assembles verified footage chapter by chapter.
 
 Founder: **Cody Ryan Jenkins** ([BoneManTGRM](https://github.com/BoneManTGRM), [@Reparodynamics](https://x.com/Reparodynamics))
 
-## What is operational now
+## What is operational
 
-1. **Validated briefs** with normalized genre, tone, format, custom cast, and deterministic seed.
-2. **Deterministic story generation** with a story bible, continuity anchors, character arcs, balanced acts, chapters, scenes, and shot plans.
-3. **Bounded TGRM repair** with explicit energy budgets, verification, rollback on regression, stop reasons, and scar memory.
-4. **RYE and MSIL reporting** with before-and-after scores, repair yield, act balance, continuity, theme coherence, and collapse risk.
-5. **Durable run workspaces** with atomic manifests, status, progress, warnings, timings, and artifact paths.
-6. **Production bundles** containing screenplay text, film state, outline, TGRM audit, manifest, media, and result JSON.
-7. **Command-line automation** for headless runs, validation, health checks, and run history.
-8. **Controlled media rendering** that always keeps PNG cards and degrades safely when video encoding is unavailable.
-9. **Deployment support** through Streamlit configuration, Docker, Compose, and a non-root container user.
-10. **Automated verification** through compilation checks, 19 tests, smoke execution, and GitHub Actions.
+- Validated, normalized production briefs with deterministic seeds.
+- Story bible, cast, acts, chapters, scenes, shots, continuity anchors, and screenplay blueprint.
+- Narrative TGRM with energy budgets, verification, rollback, stop reasons, and scar memory.
+- Actual AI-generated video through Replicate official model endpoints.
+- Target-runtime planning rather than a fixed eight-clip ceiling.
+- Durable shot queues and immediate provider-prediction checkpoints.
+- Resume support without regenerating already verified clips.
+- Shot-level TGRM repair for provider, download, container, duration, and assembly failures.
+- Final-frame continuity chaining between accepted clips.
+- Provider-call and estimated-spend gates.
+- Video RYE, video MSIL, continuity coverage, failure rate, repair oscillation, and stop reasons.
+- Verified partial assemblies, chapter reels, and final MP4 assembly.
+- Streamlit controls plus headless CLI run, status, resume, health, and history operations.
+- Docker, Compose, non-root execution, durable storage, tests, CI, CodeQL, and dependency review.
 
-## Important scope boundary
+## How long-running generation works
 
-Silver-Screen currently produces a **screenplay and production blueprint**, plus optional short preview cards and reels. It does not yet render a finished 12, 45, or 90 minute cinematic film, and it does not currently call an external large language model or video-generation provider. The state contract is designed so those providers can be added later without replacing the operational core.
+Video models create short clips. Silver-Screen creates a longer film by applying the Reparodynamics loop to an ordered queue:
 
-Voice files are inventoried only. This release does not clone, imitate, or synthesize a person's voice.
+```text
+PLAN
+  Convert the target runtime into ordered shot segments.
+
+GENERATE
+  Submit the next incomplete shot and immediately persist its prediction ID.
+
+DETECT
+  Identify provider failure, timeout, missing output, invalid MP4, short duration,
+  continuity gaps, exhausted retries, assembly failure, or a budget gate.
+
+MINIMAL CORRECTION
+  Repair only the affected shot through a bounded retry, prompt simplification,
+  seed change, audio change, redownload, or verified-container regeneration.
+
+VERIFY
+  Accept only a durable MP4 with a valid container and usable duration.
+
+STABILIZE
+  Atomically save the queue, runtime metrics, artifacts, provider state, and events.
+
+REINFORCE
+  Record successful repair strategies and seeds in video scar memory.
+
+CONTINUE
+  Advance to the next incomplete shot until the runtime target or an explicit gate.
+```
+
+A normal bounded batch ends as `partial`, not failed. Continue the same run from the UI or CLI. A budget or retry gate ends as `blocked` while preserving all accepted footage.
+
+## Required provider configuration
+
+Add the token to deployment secrets, not source control:
+
+```text
+REPLICATE_API_TOKEN=r8_your_private_token
+```
+
+Default model and video settings:
+
+```text
+SILVER_SCREEN_VIDEO_MODEL=google/veo-3.1-fast
+SILVER_SCREEN_VIDEO_DURATION=8
+SILVER_SCREEN_VIDEO_RESOLUTION=720p
+SILVER_SCREEN_VIDEO_ASPECT_RATIO=16:9
+SILVER_SCREEN_VIDEO_AUDIO=1
+```
+
+Long-production settings:
+
+```text
+SILVER_SCREEN_TARGET_RUNTIME_SECONDS=60
+SILVER_SCREEN_VIDEO_MAX_SHOTS=128
+SILVER_SCREEN_VIDEO_BATCH_SIZE=4
+SILVER_SCREEN_VIDEO_MAX_RETRIES=2
+SILVER_SCREEN_VIDEO_MAX_PROVIDER_CALLS=0
+SILVER_SCREEN_VIDEO_MAX_SPEND_USD=0
+SILVER_SCREEN_VIDEO_COST_PER_SECOND_USD=0
+SILVER_SCREEN_VIDEO_CONTINUITY=1
+SILVER_SCREEN_VIDEO_CHAPTER_SIZE=12
+```
+
+Zero spend values disable estimated-spend gating. Silver-Screen does not hard-code or guess provider pricing; supply a current cost-per-generated-second value when using the spend gate.
 
 ## Quick start
 
@@ -36,30 +100,60 @@ python -m pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
-Open the URL Streamlit prints, normally `http://localhost:8501`.
+The studio provides:
+
+- target runtime up to 90 minutes
+- planned paid-clip count
+- checkpoint batch size
+- TGRM retry budget
+- provider-call budget
+- estimated-spend gate
+- final-frame continuity control
+- continuous or checkpointed execution
+- resumable-run selector
+- production queue, TGRM audit, video metrics, partial assembly, and downloads
 
 ### Command line
 
+Start a checkpointed one-minute AI film:
+
 ```bash
-python -m silver_screen run \
+silver-screen run \
   --brief examples/brief.json \
-  --media cards \
-  --output runs
+  --media ai-video \
+  --target-runtime-seconds 60 \
+  --video-batch-size 2 \
+  --video-max-retries 2
 ```
 
-The installed console command is equivalent:
+List resumable productions:
 
 ```bash
-silver-screen run --brief examples/brief.json --media cards
+silver-screen list-resumable
 ```
 
-Useful operations:
+Inspect a queue:
 
 ```bash
-python -m silver_screen validate --brief examples/brief.json
-python -m silver_screen health --json
-python -m silver_screen list --output runs
-python -m silver_screen run \
+silver-screen video-status <run-id> --json
+```
+
+Continue the next batch:
+
+```bash
+silver-screen resume-video <run-id> --video-batch-size 2
+```
+
+Continue until completion or a gate:
+
+```bash
+silver-screen resume-video <run-id> --video-continuous
+```
+
+Generate only the deterministic screenplay package:
+
+```bash
+silver-screen run \
   --premise "A courier discovers that every delivered letter changes yesterday." \
   --genre thriller \
   --format episode \
@@ -68,67 +162,103 @@ python -m silver_screen run \
   --json
 ```
 
-## Run workspace
+## Durable workspace
 
-Every persisted run receives a unique ID and a self-contained directory:
+Each persisted run is isolated:
 
 ```text
 runs/
-  ss_20260730T040124Z_2d16a2d3/
-    manifest.json          # status, stage, progress, warnings, metrics, artifact map
-    brief.json             # normalized and replayable input
-    film.json              # repaired structured film state
-    outline.json           # compact cast, act, chapter, and scene plan
-    screenplay.txt         # screenplay blueprint
-    tgrm.json              # repair metrics, MSIL, cycles, scars, remaining fractures
-    result.json            # complete pipeline response
+  <run-id>/
+    manifest.json
+    brief.json
+    film.json
+    outline.json
+    screenplay.txt
+    tgrm.json
+    result.json
     media/
-      chapter_01.png
-      chapter_01.mp4       # only when requested and available
-      hero_reel.mp4        # only in hero mode
-    <title>-<run-id>.zip   # complete portable production bundle
+      video_queue.json
+      video_runtime.json
+      video_scar_memory.json
+      clips/
+        shot_0001.mp4
+        shot_0002.mp4
+      continuity/
+        shot_0001_last.jpg
+      chapters/
+        chapter_001.mp4
+      partial_ai_film.mp4
+      final_ai_film.mp4
+    <title>-<run-id>.zip
 ```
 
-The storage path is fixed to `./runs`; deployments relocate it by changing the working directory or mounting that directory. Writes use a temporary file followed by an atomic replace. A core failure records a failed manifest. Optional media failures are isolated as warnings so the screenplay package remains usable.
+The provider prediction ID is saved immediately after submission. When a process restarts, Silver-Screen polls that prediction before creating another paid request. Accepted clips are reconciled and retained; a missing or corrupt accepted file reopens only that shot.
 
-## TGRM execution contract
+## Video metrics
+
+Silver-Screen records:
+
+- planned, verified, and failed shot counts
+- verified runtime
+- provider calls and repair count
+- completion ratio
+- continuity coverage
+- estimated spend
+- video energy
+- video RYE
+- video MSIL stability, failure rate, oscillation, and collapse risk
+
+The current operational definition is:
 
 ```text
-DETECT
-  scene-count gaps, under-developed script density, missing ending,
-  placeholder content, timeline breaks, act imbalance, character drift,
-  late-story theme loss, repeated dialogue, and pacing collapse
-
-MINIMAL CORRECTION
-  choose the smallest repair that can address the highest-severity fracture
-  and charge the configured energy budget
-
-VERIFY
-  compare before and after narrative scores and high-severity fracture counts
-
-REINFORCE OR ROLLBACK
-  keep verified improvements in scar memory; reject regressions without
-  contaminating the accepted state
+Video RYE = verified usable seconds / bounded production energy
 ```
 
-**RYE** is accepted `Delta R / energy spent`. **MSIL** combines continuity, act balance, theme coherence, character coverage, and repair oscillation into a stability report.
+Production energy includes provider attempts, repair operations, and verified accepted shots. It is an internal system metric, not an established physical or economic measurement.
 
-## Configuration
+## Budget and safety gates
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `SILVER_SCREEN_RUNS_DIR` | `runs` | Allowlisted storage alias; only `runs` is accepted |
-| `SILVER_SCREEN_DEBUG` | `0` | Show full Streamlit exceptions only when set to `1` |
+For paid deployments, use:
 
-The Streamlit upload limit is 20 MB per file. The media layer also enforces a 20 MB image-read limit.
+```bash
+--video-max-provider-calls 30
+--video-cost-per-second-usd <current-provider-rate>
+--video-max-spend-usd 100
+```
 
-## Docker
+The call budget covers the whole queue, including repair attempts. A gate creates a durable `blocked` checkpoint. Increase only an approved limit and resume the existing run.
+
+Uploaded reference images must be authorized by the operator. Voice files are inventoried only; this release does not clone or synthesize voices.
+
+## Architecture
+
+```text
+streamlit_app.py              long-running interactive studio
+silver_screen/
+  science.py                  Reparodynamics vocabulary and format contracts
+  script_engine.py            deterministic story and screenplay state
+  tgrm.py                     narrative detect, repair, verify, rollback, reinforce
+  video_runtime.py            durable queue, video RYE/MSIL, fractures, scars, gates
+  ai_video.py                 provider predictions, resume, verification, continuity, assembly
+  media.py                    AI-video, cards, and honest local-preview routing
+  runtime.py                  atomic run manifests, reopen, artifacts, bundles, history
+  pipeline.py                 end-to-end orchestration and resume API
+  health.py                   capability and storage diagnostics
+  cli.py                      run, resume, status, health, and history commands
+tests/                        regression and queue-recovery coverage
+```
+
+## Deployment
+
+The supplied container includes FFmpeg and writes to the fixed `./runs` directory. Mount that directory to durable storage:
 
 ```bash
 docker compose up --build
 ```
 
-The service listens on port `8501` and mounts the fixed `./runs` directory into the container. The image includes FFmpeg and DejaVu fonts, runs as an unprivileged user, and exposes a Streamlit health check.
+For long productions, prefer small Streamlit batches or an isolated CLI/worker process. Ephemeral storage removes the ability to resume after a restart.
+
+See [OPERATIONS.md](OPERATIONS.md) for recovery, retention, budget, and deployment procedures.
 
 ## Verification
 
@@ -139,29 +269,11 @@ python -m silver_screen health --json
 make smoke
 ```
 
-The test suite covers validation, deterministic replay, every production format, balanced structure, TGRM repair, energy-budget gating, durable manifests, ZIP integrity, media cards, CLI execution, custom cast handling, health diagnostics, and workspace path safety.
+The suite covers story validation, deterministic replay, all story formats, narrative TGRM, durable bundles, filesystem safety, AI-video provider contracts, runtime planning, queue extension, checkpoint/resume, targeted shot repair, scar memory, provider-call gates, and durable video status files.
 
-## Architecture
+## Scope and realism
 
-```text
-streamlit_app.py              interactive operational studio
-silver_screen/
-  science.py                  Reparodynamics constants and format contracts
-  script_engine.py            deterministic story, scene, shot, and screenplay state
-  tgrm.py                     detect, correct, verify, rollback, reinforce, RYE, MSIL
-  media.py                    safe cards and optional preview reels
-  runtime.py                  atomic manifests, durable runs, bundles, run history
-  pipeline.py                 validated end-to-end orchestration and progress events
-  health.py                   capability and storage diagnostics
-  cli.py                      headless operations
-  __main__.py                 python -m silver_screen entry point
-tests/                        operational regression suite
-.github/workflows/ci.yml      compile, test, health, and smoke verification
-Dockerfile                    non-root production image
-OPERATIONS.md                 deployment and recovery runbook
-```
-
-The existing TanStack code under `src/` remains a secondary interface. The Python pipeline is the authoritative production path in this release.
+Silver-Screen can orchestrate production for a long target runtime, but the final quality, total cost, and elapsed time depend on the configured video model, provider capacity, retry rate, continuity performance, and operator review. A 90-minute target can require hundreds of paid short-clip generations. The system therefore exposes hard shot, call, retry, and spend gates rather than claiming that feature-length generation is free or immediate.
 
 ## Science references and provenance
 
@@ -170,8 +282,8 @@ The existing TanStack code under `src/` remains a secondary interface. The Pytho
 - Coding velocity simulation: [10.5281/zenodo.17336075](https://doi.org/10.5281/zenodo.17336075)
 - Corpus: https://bonemantgrm.github.io/reparodynamics-corpus/
 
-Reparodynamics is presented here as Cody Ryan Jenkins's conceptual engineering framework. The software metrics are operational heuristics for this system, not established clinical or physical measurements.
+Reparodynamics is presented as Cody Ryan Jenkins's conceptual engineering framework. The software metrics are operational heuristics for this system, not established clinical or physical measurements.
 
 ## License
 
-No new license is implied by this operational release. Use the repository's existing licensing terms and attribution requirements.
+No new license is implied by this release. Use the repository's existing licensing terms and attribution requirements.
