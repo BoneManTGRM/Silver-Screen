@@ -1,0 +1,11 @@
+services:
+  silver-screen:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      SILVER_SCREEN_RUNS_DIR: runs
+      SILVER_SCREEN_DEBUG: "0"
+    volumes:
+      - ./runs:/app/runs
+    restart: unless-stopped

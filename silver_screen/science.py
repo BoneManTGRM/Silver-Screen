@@ -1,15 +1,18 @@
-"""Reparodynamics science constants and types for Silver-Screen.
-Provenance: Cody Ryan Jenkins / BoneManTGRM
-- TGRM: Targeted Gradient Repair Mechanism
-- RYE: Repair Yield per Energy
-- MSIL: Meta Stability Intelligence Layer
+"""Shared scientific vocabulary and production format definitions.
+
+Silver-Screen uses the Reparodynamics framing as an engineering metaphor for
+bounded narrative repair. The constants in this module are intentionally
+small, explicit, and serializable so every run can record its configuration.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Dict, Any, Literal, Optional
 
-SCIENCE = {
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+APP_VERSION = "2.0.0"
+
+SCIENCE: dict[str, Any] = {
     "studio": "Reparodynamics",
     "founder": "Cody Ryan Jenkins",
     "pipeline": "TGRM",
@@ -18,9 +21,11 @@ SCIENCE = {
     "msil": "Meta Stability Intelligence Layer",
     "ara": "Autonomous Research Agent",
     "tau": 0.6,
-    "maxCycles": 5,
-    "ryeAccept": 0.12,
-    "domainGate": 0.65,
+    "maxCycles": 8,
+    "energyBudget": 40,
+    "ryeAccept": 0.01,
+    "domainGate": 0.6,
+    "version": APP_VERSION,
     "dois": {
         "fiveLaw": "10.5281/zenodo.17538091",
         "tgrm": "10.5281/zenodo.17273433",
@@ -29,48 +34,52 @@ SCIENCE = {
     "github": "https://github.com/BoneManTGRM/Silver-Screen",
     "corpus": "https://bonemantgrm.github.io/reparodynamics-corpus/",
     "x": "https://x.com/Reparodynamics",
-    "credit": "A Reparodynamics Production · TGRM · RYE · MSIL",
-    "tagline": "Self-repairing narrative systems — detect fractures, apply minimal corrections, verify continuity, reinforce scar memory.",
+    "credit": "A Reparodynamics Production | TGRM | RYE | MSIL",
+    "tagline": (
+        "A deterministic story-production system that detects narrative "
+        "fractures, applies bounded corrections, verifies improvement, and "
+        "records successful repair patterns."
+    ),
     "loop": ["DETECT", "MINIMAL_CORRECTION", "VERIFY", "REINFORCE"],
 }
 
-FIVE_LAWS = [
+FIVE_LAWS: list[dict[str, str]] = [
     {
         "id": "bounded_energy",
         "name": "Energy-Bounded Repair",
-        "cinema": "Never over-write a scene when a micro-fix restores continuity.",
+        "cinema": "Do not rewrite a scene when a smaller change restores continuity.",
     },
     {
         "id": "minimal_gradient",
         "name": "Minimal Gradient",
-        "cinema": "Change the smallest narrative unit (one beat, one line, one motive).",
+        "cinema": "Change the smallest useful narrative unit: a beat, line, motive, or transition.",
     },
     {
         "id": "verified_delta",
-        "name": "Verified ΔR",
-        "cinema": "Only keep edits that improve measurable continuity / tension / clarity.",
+        "name": "Verified Delta R",
+        "cinema": "Keep a correction only when the measured narrative score improves.",
     },
     {
         "id": "scar_memory",
         "name": "Scar Memory",
-        "cinema": "Reinforce winning fixes so later acts inherit repaired character logic.",
+        "cinema": "Record successful fixes so later runs can reuse proven repair patterns.",
     },
     {
         "id": "aligned_stability",
         "name": "Aligned Stability",
-        "cinema": "MSIL rejects repairs that raise RYE locally but collapse global act structure.",
+        "cinema": "Reject local improvements that damage the global story structure.",
     },
 ]
 
-# Aligned with TypeScript FORMATS in src/lib/types.ts
-FORMATS: Dict[str, Dict[str, Any]] = {
+FORMATS: dict[str, dict[str, Any]] = {
     "trailer": {
         "label": "Trailer",
         "minutes": 2,
         "scenes": 5,
         "acts": 1,
         "chapters": 1,
-        "hint": "2-min sizzle",
+        "target_words": 550,
+        "hint": "A compact sizzle and story promise",
     },
     "short": {
         "label": "Short",
@@ -78,7 +87,8 @@ FORMATS: Dict[str, Dict[str, Any]] = {
         "scenes": 8,
         "acts": 2,
         "chapters": 2,
-        "hint": "12-min short",
+        "target_words": 1500,
+        "hint": "A complete short-film blueprint",
     },
     "episode": {
         "label": "Episode",
@@ -86,7 +96,8 @@ FORMATS: Dict[str, Dict[str, Any]] = {
         "scenes": 12,
         "acts": 3,
         "chapters": 3,
-        "hint": "24-min episode",
+        "target_words": 2600,
+        "hint": "An episodic production blueprint",
     },
     "featurette": {
         "label": "Featurette",
@@ -94,7 +105,8 @@ FORMATS: Dict[str, Dict[str, Any]] = {
         "scenes": 16,
         "acts": 3,
         "chapters": 4,
-        "hint": "45-min mid-form",
+        "target_words": 4200,
+        "hint": "A mid-form production blueprint",
     },
     "feature": {
         "label": "Feature",
@@ -102,12 +114,22 @@ FORMATS: Dict[str, Dict[str, Any]] = {
         "scenes": 24,
         "acts": 3,
         "chapters": 8,
-        "hint": "90-min full film",
+        "target_words": 7000,
+        "hint": "A feature-length scene and screenplay blueprint",
     },
 }
 
-GENRES = ["noir", "scifi", "drama", "thriller", "fantasy", "western", "romance", "horror"]
-TONES = ["cinematic", "intimate", "epic", "melancholy", "tense", "hopeful"]
+GENRES = (
+    "noir",
+    "scifi",
+    "drama",
+    "thriller",
+    "fantasy",
+    "western",
+    "romance",
+    "horror",
+)
+TONES = ("cinematic", "intimate", "epic", "melancholy", "tense", "hopeful")
 
 FractureClass = Literal[
     "plot_hole",
@@ -117,14 +139,16 @@ FractureClass = Literal[
     "pacing_collapse",
     "dialogue_redundancy",
     "act_imbalance",
+    "placeholder_content",
+    "missing_ending",
 ]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Fracture:
     id: str
     class_: FractureClass
-    severity: float  # 0..1 compared against τ
+    severity: float
     location: str
     description: str
     hint: str
@@ -133,7 +157,7 @@ class Fracture:
 @dataclass
 class ScarMemory:
     key: str
-    fracture_class: FractureClass
+    fracture_class: FractureClass | str
     fix: str
     rye: float
     uses: int = 1
@@ -147,9 +171,9 @@ class TgrmCycleLog:
     deltaR: float
     energy: float
     rye: float
-    notes: List[str] = field(default_factory=list)
-    fracture: Optional[Fracture] = None
-    correction: Optional[str] = None
+    notes: list[str] = field(default_factory=list)
+    fracture: Fracture | None = None
+    correction: str | None = None
 
 
 @dataclass
@@ -176,8 +200,10 @@ class MsilReport:
     themeCoherence: float = 1.0
     collapseRisk: float = 0.0
     verdict: Literal["stable", "repairing", "unstable"] = "stable"
-    notes: List[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
 
-def format_meta(fmt: str) -> Dict[str, Any]:
-    return FORMATS.get(fmt, FORMATS["feature"])
+def format_meta(fmt: str) -> dict[str, Any]:
+    """Return a defensive copy of a known format definition."""
+
+    return dict(FORMATS.get(fmt, FORMATS["feature"]))
