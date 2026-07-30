@@ -1,4 +1,4 @@
-"""Durable run workspaces, manifests, and artifact bundles."""
+"""Durable run workspaces, manifests, resumable media, and bundles."""
 
 from __future__ import annotations
 
@@ -14,22 +14,21 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_RUNS_DIR = "runs"
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9_.-]{6,120}")
 
 
 def resolve_runs_root(alias: str | os.PathLike[str] | None = None) -> Path:
-    """Resolve the allowlisted run-storage alias to ``./runs``.
-
-    User-controlled values are compared against the allowlist and never become
-    path segments. Deployments relocate storage by changing the working
-    directory or mounting durable storage at ``./runs``.
-    """
+    """Resolve the allowlisted run-storage alias to ``./runs``."""
 
     requested = str(
-        alias if alias not in (None, "") else os.getenv("SILVER_SCREEN_RUNS_DIR", DEFAULT_RUNS_DIR)
+        alias
+        if alias not in (None, "")
+        else os.getenv("SILVER_SCREEN_RUNS_DIR", DEFAULT_RUNS_DIR)
     ).strip()
     if requested != DEFAULT_RUNS_DIR:
         raise ValueError(
-            f"Unsupported run storage alias {requested!r}; only {DEFAULT_RUNS_DIR!r} is allowed"
+            f"Unsupported run storage alias {requested!r}; "
+            f"only {DEFAULT_RUNS_DIR!r} is allowed"
         )
     return (Path.cwd() / DEFAULT_RUNS_DIR).resolve()
 
@@ -39,13 +38,22 @@ def utc_now() -> str:
 
 
 def slugify(value: str, fallback: str = "silver-screen") -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
+    cleaned = re.sub(
+        r"[^a-zA-Z0-9]+", "-", value.strip().lower()
+    ).strip("-")
     return (cleaned[:80] or fallback).strip("-")
 
 
 def create_run_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"ss_{stamp}_{uuid.uuid4().hex[:8]}"
+
+
+def validate_run_id(run_id: str) -> str:
+    requested = str(run_id).strip()
+    if not RUN_ID_PATTERN.fullmatch(requested):
+        raise ValueError("run_id contains unsupported characters")
+    return requested
 
 
 def _json_default(value: Any) -> Any:
@@ -55,7 +63,9 @@ def _json_default(value: Any) -> Any:
         return asdict(value)
     if isinstance(value, set):
         return sorted(value)
-    if hasattr(value, "name") and not isinstance(value, (str, bytes, bytearray)):
+    if hasattr(value, "name") and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
         return str(getattr(value, "name", type(value).__name__))
     return str(value)
 
@@ -63,7 +73,11 @@ def _json_default(value: Any) -> Any:
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", delete=False, dir=path.parent, prefix=f".{path.name}."
+        "w",
+        encoding="utf-8",
+        delete=False,
+        dir=path.parent,
+        prefix=f".{path.name}.",
     ) as handle:
         handle.write(content)
         temp_name = handle.name
@@ -73,12 +87,35 @@ def atomic_write_text(path: Path, content: str) -> None:
 def atomic_write_json(path: Path, payload: Any) -> None:
     atomic_write_text(
         path,
-        json.dumps(payload, indent=2, ensure_ascii=False, default=_json_default) + "\n",
+        json.dumps(
+            payload,
+            indent=2,
+            ensure_ascii=False,
+            default=_json_default,
+        )
+        + "\n",
     )
 
 
+def find_run_workspace(
+    run_id: str,
+    root: str | os.PathLike[str] | None = None,
+) -> Path:
+    configured_root = resolve_runs_root(root)
+    requested = validate_run_id(run_id)
+    if not configured_root.exists():
+        raise FileNotFoundError(f"Run {requested!r} was not found")
+    for candidate in configured_root.iterdir():
+        if candidate.is_dir() and candidate.name == requested:
+            resolved = candidate.resolve()
+            if configured_root not in resolved.parents:
+                raise ValueError("run workspace escaped the configured root")
+            return resolved
+    raise FileNotFoundError(f"Run {requested!r} was not found")
+
+
 class RunWorkspace:
-    """A single durable pipeline run with an append-safe manifest."""
+    """A durable pipeline run with atomic state and reopen support."""
 
     def __init__(
         self,
@@ -89,9 +126,7 @@ class RunWorkspace:
         options: dict[str, Any] | None = None,
     ) -> None:
         self.root = resolve_runs_root(root)
-        self.run_id = run_id or create_run_id()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]{6,120}", self.run_id):
-            raise ValueError("run_id contains unsupported characters")
+        self.run_id = validate_run_id(run_id or create_run_id())
         self.path = (self.root / self.run_id).resolve()
         if self.root not in self.path.parents:
             raise ValueError("run workspace escaped the configured root")
@@ -99,7 +134,7 @@ class RunWorkspace:
         self.path.mkdir(parents=True, exist_ok=False)
         self.media_dir.mkdir(parents=True, exist_ok=True)
         self.manifest: dict[str, Any] = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "runId": self.run_id,
             "status": "running",
             "stage": "created",
@@ -114,6 +149,30 @@ class RunWorkspace:
             "artifacts": {},
         }
         self._write_manifest()
+
+    @classmethod
+    def open_existing(
+        cls,
+        root: str | os.PathLike[str] | None,
+        run_id: str,
+    ) -> "RunWorkspace":
+        workspace_path = find_run_workspace(run_id, root)
+        manifest_path = workspace_path / "manifest.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(
+                f"Run {run_id!r} has no manifest.json"
+            )
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Run manifest must be a JSON object")
+        instance = cls.__new__(cls)
+        instance.root = resolve_runs_root(root)
+        instance.run_id = validate_run_id(run_id)
+        instance.path = workspace_path
+        instance.media_dir = workspace_path / "media"
+        instance.media_dir.mkdir(parents=True, exist_ok=True)
+        instance.manifest = payload
+        return instance
 
     @property
     def manifest_path(self) -> Path:
@@ -171,9 +230,20 @@ class RunWorkspace:
             raise ValueError("artifact is outside the run workspace")
         return resolved.relative_to(self.path).as_posix()
 
-    def register_artifact(self, name: str, path: str | os.PathLike[str]) -> None:
+    def register_artifact(
+        self, name: str, path: str | os.PathLike[str]
+    ) -> None:
         self.manifest.setdefault("artifacts", {})[name] = self.relative(path)
         self._write_manifest()
+
+    def register_optional_artifact(
+        self, name: str, path: str | os.PathLike[str] | None
+    ) -> None:
+        if not path:
+            return
+        candidate = Path(path)
+        if candidate.exists():
+            self.register_artifact(name, candidate)
 
     def persist_result(self, result: dict[str, Any]) -> dict[str, str]:
         state = result.get("state") or {}
@@ -182,7 +252,22 @@ class RunWorkspace:
             "msil": result.get("msil") or {},
             "log": result.get("log") or [],
             "scars": result.get("scars") or [],
-            "remainingFractures": result.get("remainingFractures") or [],
+            "remainingFractures": result.get(
+                "remainingFractures"
+            )
+            or [],
+            "video": {
+                "metrics": (result.get("media") or {}).get("metrics")
+                or {},
+                "msil": (result.get("media") or {}).get("msil")
+                or {},
+                "fractures": (result.get("media") or {}).get(
+                    "fractures"
+                )
+                or [],
+                "scars": (result.get("media") or {}).get("scars")
+                or [],
+            },
         }
         outline = {
             "title": state.get("title"),
@@ -206,40 +291,76 @@ class RunWorkspace:
             ],
         }
         paths = {
-            "brief": self.write_json("brief.json", result.get("brief") or {}),
+            "brief": self.write_json(
+                "brief.json", result.get("brief") or {}
+            ),
             "film": self.write_json("film.json", state),
             "outline": self.write_json("outline.json", outline),
-            "screenplay": self.write_text("screenplay.txt", str(state.get("script") or "")),
+            "screenplay": self.write_text(
+                "screenplay.txt", str(state.get("script") or "")
+            ),
             "tgrm": self.write_json("tgrm.json", tgrm_payload),
             "result": self.write_json("result.json", result),
         }
         for name, path in paths.items():
-            self.manifest.setdefault("artifacts", {})[name] = self.relative(path)
+            self.manifest.setdefault("artifacts", {})[
+                name
+            ] = self.relative(path)
         self._write_manifest()
         return {name: str(path) for name, path in paths.items()}
 
     def build_bundle(self, title: str | None = None) -> Path:
-        filename = f"{slugify(title or self.run_id)}-{self.run_id}.zip"
+        filename = (
+            f"{slugify(title or self.run_id)}-{self.run_id}.zip"
+        )
         bundle_path = self.path / filename
         self.manifest.setdefault("artifacts", {})["bundle"] = filename
         self._write_manifest()
-        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        with zipfile.ZipFile(
+            bundle_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
             for path in sorted(self.path.rglob("*")):
                 if not path.is_file() or path == bundle_path:
                     continue
-                archive.write(path, path.relative_to(self.path).as_posix())
+                archive.write(
+                    path, path.relative_to(self.path).as_posix()
+                )
         return bundle_path
 
-    def complete(self, extra: dict[str, Any] | None = None) -> None:
+    def complete(
+        self, extra: dict[str, Any] | None = None
+    ) -> None:
         payload = {
             "status": "complete",
             "stage": "complete",
             "progress": 100,
             "completedAt": utc_now(),
+            "error": None,
         }
         if extra:
             payload.update(extra)
         self.manifest.update(payload)
+        self._write_manifest()
+
+    def checkpoint(
+        self,
+        *,
+        status: str,
+        stage: str,
+        progress: int,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self.manifest.update(
+            {
+                "status": status,
+                "stage": stage,
+                "progress": max(0, min(99, int(progress))),
+                "completedAt": None,
+                "error": None,
+            }
+        )
+        if extra:
+            self.manifest.update(extra)
         self._write_manifest()
 
     def fail(self, error: str) -> None:
@@ -264,29 +385,69 @@ def list_runs(
     records: list[dict[str, Any]] = []
     for manifest_path in configured_root.glob("*/manifest.json"):
         try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            payload["workspace"] = str(manifest_path.parent.resolve())
+            payload = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            payload["workspace"] = str(
+                manifest_path.parent.resolve()
+            )
             records.append(payload)
         except (OSError, json.JSONDecodeError):
             continue
     records.sort(
-        key=lambda item: str(item.get("startedAt") or item.get("updatedAt") or ""),
+        key=lambda item: str(
+            item.get("startedAt") or item.get("updatedAt") or ""
+        ),
         reverse=True,
     )
     return records[: max(0, limit)]
+
+
+def list_resumable_runs(
+    root: str | os.PathLike[str] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in list_runs(root, limit=limit * 3)
+        if record.get("status") in {
+            "partial",
+            "blocked",
+            "running",
+        }
+        and (
+            Path(str(record.get("workspace") or ""))
+            / "media"
+            / "video_queue.json"
+        ).exists()
+    ][:limit]
+
+
+def load_run_manifest(
+    run_id: str,
+    root: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    workspace = find_run_workspace(run_id, root)
+    payload = json.loads(
+        (workspace / "manifest.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Run manifest must be a JSON object")
+    payload["workspace"] = str(workspace)
+    return payload
 
 
 def load_run(
     run_id: str,
     root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
-    configured_root = resolve_runs_root(root)
-    requested = str(run_id).strip()
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{6,120}", requested):
-        raise ValueError("run_id contains unsupported characters")
-    if not configured_root.exists():
-        raise FileNotFoundError(f"Run {requested!r} was not found")
-    for candidate in configured_root.iterdir():
-        if candidate.is_dir() and candidate.name == requested:
-            return json.loads((candidate / "result.json").read_text(encoding="utf-8"))
-    raise FileNotFoundError(f"Run {requested!r} was not found")
+    workspace = find_run_workspace(run_id, root)
+    result_path = workspace / "result.json"
+    if not result_path.exists():
+        raise FileNotFoundError(
+            f"Run {run_id!r} has no result.json"
+        )
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Run result must be a JSON object")
+    return payload

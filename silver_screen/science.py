@@ -1,8 +1,8 @@
 """Shared scientific vocabulary and production format definitions.
 
 Silver-Screen uses the Reparodynamics framing as an engineering metaphor for
-bounded narrative repair. The constants in this module are intentionally
-small, explicit, and serializable so every run can record its configuration.
+bounded narrative and video-production repair. The constants in this module are
+small, explicit, and serializable so every run records its configuration.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "3.0.0"
 
 SCIENCE: dict[str, Any] = {
     "studio": "Reparodynamics",
@@ -36,9 +36,9 @@ SCIENCE: dict[str, Any] = {
     "x": "https://x.com/Reparodynamics",
     "credit": "A Reparodynamics Production | TGRM | RYE | MSIL",
     "tagline": (
-        "A deterministic story-production system that detects narrative "
-        "fractures, applies bounded corrections, verifies improvement, and "
-        "records successful repair patterns."
+        "A durable AI-film production system that detects narrative and media "
+        "fractures, applies bounded corrections, verifies improvement, "
+        "checkpoints progress, and records successful repair patterns."
     ),
     "loop": ["DETECT", "MINIMAL_CORRECTION", "VERIFY", "REINFORCE"],
 }
@@ -47,27 +47,27 @@ FIVE_LAWS: list[dict[str, str]] = [
     {
         "id": "bounded_energy",
         "name": "Energy-Bounded Repair",
-        "cinema": "Do not rewrite a scene when a smaller change restores continuity.",
+        "cinema": "Do not rewrite a scene or regenerate a film when a smaller repair restores continuity.",
     },
     {
         "id": "minimal_gradient",
         "name": "Minimal Gradient",
-        "cinema": "Change the smallest useful narrative unit: a beat, line, motive, or transition.",
+        "cinema": "Change the smallest useful narrative or production unit: a beat, prompt, seed, shot, or transition.",
     },
     {
         "id": "verified_delta",
         "name": "Verified Delta R",
-        "cinema": "Keep a correction only when the measured narrative score improves.",
+        "cinema": "Keep a correction only when the measured narrative or media state improves.",
     },
     {
         "id": "scar_memory",
         "name": "Scar Memory",
-        "cinema": "Record successful fixes so later runs can reuse proven repair patterns.",
+        "cinema": "Record successful fixes so later shots and runs can reuse proven repair patterns.",
     },
     {
         "id": "aligned_stability",
         "name": "Aligned Stability",
-        "cinema": "Reject local improvements that damage the global story structure.",
+        "cinema": "Reject local improvements that damage global story, continuity, budget, or production stability.",
     },
 ]
 
