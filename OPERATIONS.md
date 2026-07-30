@@ -2,35 +2,162 @@
 
 ## Service model
 
-The current service executes one production request synchronously inside the Streamlit process or CLI process. Each run is isolated in a unique workspace. No background worker, distributed queue, external database, or remote model is required.
+Silver-Screen has two execution layers:
 
-This model is appropriate for local use, demonstrations, controlled internal deployments, and low-concurrency production. A future multi-user deployment should put the existing pipeline behind a job queue and object storage while preserving the run manifest contract.
+1. A deterministic story pipeline that validates a brief, generates structured film state, and runs narrative TGRM repair.
+2. A durable AI-video worker that decomposes a target runtime into short provider clips, checkpoints every transition, verifies accepted footage, repairs only failed shots, and resumes until completion or an explicit gate.
+
+The Streamlit app can process bounded batches. The CLI can run one batch or continue a run until the target or a budget gate is reached. Durable storage is required for resume behavior.
 
 ## Run lifecycle
 
 | Stage | Manifest state | Meaning |
 | --- | --- | --- |
-| Created | `running / created / 0` | Workspace exists and input/options were recorded |
-| Validated | `running / validated / 5` | Brief passed normalization and safety checks |
-| Generating | `running / generating / 20` | Initial deterministic film state is being built |
-| Repairing | `running / repairing / 48` | TGRM is detecting and verifying bounded corrections |
-| Rendering | `running / rendering_media / 72` | Optional cards or preview videos are being produced |
-| Persisting | `running / persisting / 90` | JSON, text, manifest, and ZIP artifacts are being written |
-| Complete | `complete / complete / 100` | Final result and bundle are durable |
-| Failed | `failed / failed` | A core stage failed and the error is recorded |
+| Created | `running / created / 0` | Workspace and input contract were created |
+| Validated | `running / validated / 5` | Brief passed validation |
+| Generating | `running / generating / 20` | Deterministic story state is being built |
+| Repairing | `running / repairing / 48` | Narrative TGRM is verifying bounded corrections |
+| Video production | `running / video_production / 72-89` | Provider clips are submitted, recovered, downloaded, verified, and checkpointed |
+| Video checkpoint | `partial / video_checkpoint / <100` | A safe batch ended; accepted clips and prediction IDs are durable |
+| Video blocked | `blocked / video_blocked / <100` | A retry, provider-call, spend, or assembly gate stopped the run safely |
+| Complete | `complete / complete / 100` | Target runtime was reached and final artifacts were persisted |
+| Failed | `failed / failed` | A non-recoverable pipeline error was recorded |
 
-Media errors do not fail the core run. They are added to `warnings`, and PNG or screenplay outputs are retained whenever possible.
+A `partial` run is not a failure. Continue it with the UI or `silver-screen resume-video <run-id>`.
 
-## Production deployment
+## Durable video contract
 
-1. Use the supplied Docker image or Python 3.10 and later.
-2. Mount the fixed `./runs` directory to durable storage. `SILVER_SCREEN_RUNS_DIR` is an allowlisted alias and must remain `runs`.
-3. Keep `SILVER_SCREEN_DEBUG=0` outside a controlled diagnostic session.
-4. Put TLS, authentication, request limits, and audit logging in the reverse proxy or platform layer.
-5. Back up completed run directories or copy final ZIP bundles to object storage.
-6. Monitor disk usage because film JSON, uploaded portraits, and video previews can accumulate.
+Every AI-video run stores these files under `runs/<run-id>/media/`:
 
-Example:
+```text
+video_queue.json         complete shot queue, provider IDs, attempts, verification, events
+video_runtime.json       compact status, metrics, MSIL, stop reason, artifacts
+video_scar_memory.json   successful TGRM video repair patterns
+clips/                   verified generated MP4 clips
+continuity/              accepted final frames used to chain later clips
+chapters/                assembled chapter reels
+partial_ai_film.mp4      verified assembly at an incomplete checkpoint
+final_ai_film.mp4        verified assembly when the runtime target is reached
+```
+
+Writes are atomic. A provider prediction ID is persisted immediately after submission so an interrupted process can poll the existing prediction instead of silently paying for a duplicate request.
+
+## Required configuration
+
+Set `REPLICATE_API_TOKEN` in deployment secrets. Do not commit it.
+
+Recommended starting values:
+
+```text
+SILVER_SCREEN_VIDEO_MODEL=google/veo-3.1-fast
+SILVER_SCREEN_VIDEO_DURATION=8
+SILVER_SCREEN_TARGET_RUNTIME_SECONDS=60
+SILVER_SCREEN_VIDEO_MAX_SHOTS=128
+SILVER_SCREEN_VIDEO_BATCH_SIZE=2
+SILVER_SCREEN_VIDEO_MAX_RETRIES=2
+SILVER_SCREEN_VIDEO_MAX_PROVIDER_CALLS=0
+SILVER_SCREEN_VIDEO_MAX_SPEND_USD=0
+SILVER_SCREEN_VIDEO_COST_PER_SECOND_USD=0
+SILVER_SCREEN_VIDEO_CONTINUITY=1
+SILVER_SCREEN_VIDEO_CHAPTER_SIZE=12
+```
+
+Zero spend values disable estimated-spend gating. Silver-Screen does not guess provider prices; enter a current cost-per-generated-second value when using a spend limit.
+
+## Production commands
+
+Start a checkpointed one-minute production:
+
+```bash
+silver-screen run \
+  --brief examples/brief.json \
+  --media ai-video \
+  --target-runtime-seconds 60 \
+  --video-batch-size 2 \
+  --video-max-retries 2
+```
+
+List resumable runs:
+
+```bash
+silver-screen list-resumable
+```
+
+Inspect one run:
+
+```bash
+silver-screen video-status <run-id> --json
+```
+
+Continue the next bounded batch:
+
+```bash
+silver-screen resume-video <run-id> --video-batch-size 2
+```
+
+Continue until completion or a gate:
+
+```bash
+silver-screen resume-video <run-id> --video-continuous
+```
+
+## Reparodynamics and TGRM behavior
+
+For every incomplete shot, the worker applies:
+
+```text
+PLAN       map target runtime to ordered shot segments
+GENERATE   submit one model prediction and persist its ID
+DETECT     identify provider, download, container, duration, continuity, or budget fractures
+REPAIR     modify only the affected shot's prompt, seed, audio setting, or retry path
+VERIFY     accept only a durable MP4 with a valid container and usable duration
+STABILIZE  checkpoint the queue, metrics, prediction state, and accepted footage
+REINFORCE  store successful repair strategy and seed in video scar memory
+CONTINUE   advance to the next incomplete shot
+```
+
+Video RYE is verified usable seconds divided by bounded production energy. Video MSIL combines completion, continuity coverage, failure rate, and repair oscillation.
+
+## Budget gates
+
+Use both of these in paid deployments:
+
+- `--video-max-provider-calls` limits all prediction attempts across the production.
+- `--video-max-spend-usd` and `--video-cost-per-second-usd` create an estimated spend gate.
+
+A gate produces a `blocked` checkpoint, not data loss. Raise the approved limit and resume the same run.
+
+## Recovery procedures
+
+### Interrupted during provider processing
+
+Run `video-status`. If the shot has a persisted prediction ID, `resume-video` polls that existing prediction before creating a new request.
+
+### Failed shot
+
+The worker records the failure, chooses a minimal TGRM repair, and retries only that shot within the configured retry budget. Accepted earlier clips remain unchanged.
+
+### Missing or corrupt accepted clip
+
+Resume reconciliation reopens that shot as pending. It is regenerated without deleting other verified clips.
+
+### Assembly failure
+
+Individual verified clips and chapter reels remain durable. Correct FFmpeg or storage problems and resume; the worker reassembles from accepted footage.
+
+### Provider-call or spend gate
+
+Review `video_runtime.json`, increase only the approved limit, and resume. Do not edit shot statuses manually.
+
+## Deployment
+
+1. Use Python 3.10+ or the supplied container.
+2. Mount `./runs` to durable storage. Ephemeral storage defeats resume guarantees.
+3. Keep `SILVER_SCREEN_DEBUG=0` in production.
+4. Put authentication, TLS, request limits, and audit logging at the platform or reverse-proxy layer.
+5. Prefer small Streamlit batches. Use an isolated worker or CLI process for continuous long productions.
+6. Monitor storage and provider spend.
+7. Back up complete run directories or final ZIP bundles.
 
 ```bash
 docker compose up --build -d
@@ -38,87 +165,27 @@ docker compose logs -f silver-screen
 curl -f http://127.0.0.1:8501/_stcore/health
 ```
 
-## Health diagnostics
+## Verification
 
 ```bash
+python -m compileall -q silver_screen streamlit_app.py
+python -m pytest -q
 python -m silver_screen health --json
+make smoke
 ```
-
-Critical checks:
-
-- Core package imports.
-- Run root can be created and written.
-
-Degradable checks:
-
-- Streamlit availability.
-- Pillow availability for PNG cards.
-- NumPy, MoviePy, and FFmpeg availability for preview video.
-
-A degraded result can still be operational for CLI screenplay generation.
-
-## Failure recovery
-
-### Core run failure
-
-1. Locate the run by ID under the fixed `./runs` workspace root.
-2. Read `manifest.json` and inspect `stage`, `error`, `brief`, and `options`.
-3. Correct the environment or input.
-4. Replay the normalized `brief` with the recorded seed.
-5. Do not edit a failed workspace into a complete workspace. Start a new run so provenance remains intact.
-
-### Media failure
-
-1. Confirm `screenplay.txt`, `film.json`, and `tgrm.json` exist.
-2. Read `media.error` and `warnings` in `result.json`.
-3. Run `python -m silver_screen health --json`.
-4. Install FFmpeg only when video is required. PNG card mode needs Pillow but not FFmpeg.
-5. Re-run with `--media cards` to avoid a codec dependency.
-
-### Interrupted process
-
-A process killed between atomic writes can leave a run in `running` state, but completed files should not contain partial JSON or text. Treat a stale `running` manifest as interrupted, preserve it for audit, and start a new run.
 
 ## Retention
 
-A conservative policy is:
-
-- Keep failed and interrupted manifests for 30 days.
-- Keep final ZIP bundles according to project policy.
-- Remove redundant expanded media only after bundle integrity is verified.
-- Never delete a run while it is `running`.
-
-ZIP integrity check:
-
-```bash
-python - <<'PY'
-from pathlib import Path
-from zipfile import ZipFile
-
-for path in Path("runs").glob("*/*.zip"):
-    with ZipFile(path) as archive:
-        print(path, "OK" if archive.testzip() is None else "CORRUPT")
-PY
-```
-
-## Concurrency and scaling
-
-The run ID and workspace design already permits independent concurrent processes when they share a filesystem that supports atomic rename. For a larger deployment:
-
-1. Move request intake to an authenticated API.
-2. Store the normalized brief and options in a durable queue.
-3. Execute `run_pipeline` in isolated workers.
-4. Replace local workspace storage with object storage or a mounted volume.
-5. Emit progress events from the existing callback to a database or event stream.
-6. Add per-tenant authorization before exposing run history or artifacts.
-7. Keep TGRM deterministic and version every manifest schema.
+- Never delete a run while its manifest says `running`.
+- Preserve partial and blocked queues until the operator intentionally abandons them.
+- Keep failed manifests for audit.
+- Remove expanded clips only after final bundle integrity and retention requirements are satisfied.
 
 ## Security boundaries
 
 - Treat uploaded media as untrusted input.
-- Keep platform upload limits in addition to the application read limit.
-- Do not put API keys or secrets in briefs, manifests, or repository files.
-- Run storage is fixed to the allowlisted `./runs` directory; user input never becomes a storage path.
-- This release does not execute uploaded code.
-- This release does not clone or synthesize voices.
-- Only use images and audio that the operator is authorized to process.
+- Process only media the operator is authorized to use.
+- Never put provider tokens in briefs, manifests, screenshots, issues, or source control.
+- The run root remains fixed to the allowlisted `./runs` directory.
+- Uploaded code is never executed.
+- Voice files are inventoried but not cloned or synthesized in this release.
