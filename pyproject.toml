@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silver-screen-studio"
-version = "2.0.0"
-description = "Deterministic screenplay production with bounded TGRM repair and durable run artifacts"
+version = "3.0.0"
+description = "Resumable Reparodynamics AI-film production with bounded TGRM repair and durable artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Cody Ryan Jenkins"}]
