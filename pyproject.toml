@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silver-screen-studio"
+version = "2.0.0"
+description = "Deterministic screenplay production with bounded TGRM repair and durable run artifacts"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Cody Ryan Jenkins"}]
+dependencies = [
+  "streamlit>=1.32,<2",
+  "Pillow>=10,<13",
+  "numpy>=1.26,<3",
+  "moviepy>=1.0.3,<3",
+  "imageio>=2.34,<3",
+  "imageio-ffmpeg>=0.5,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+silver-screen = "silver_screen.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["silver_screen*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
