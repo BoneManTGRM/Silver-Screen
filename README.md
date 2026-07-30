@@ -19,7 +19,7 @@ Founder: **Cody Ryan Jenkins** ([BoneManTGRM](https://github.com/BoneManTGRM), [
 7. **Command-line automation** for headless runs, validation, health checks, and run history.
 8. **Controlled media rendering** that always keeps PNG cards and degrades safely when video encoding is unavailable.
 9. **Deployment support** through Streamlit configuration, Docker, Compose, and a non-root container user.
-10. **Automated verification** through compilation checks, 18 tests, smoke execution, and GitHub Actions.
+10. **Automated verification** through compilation checks, 19 tests, smoke execution, and GitHub Actions.
 
 ## Important scope boundary
 
@@ -89,7 +89,7 @@ runs/
     <title>-<run-id>.zip   # complete portable production bundle
 ```
 
-Writes use a temporary file followed by an atomic replace. A core failure records a failed manifest. Optional media failures are isolated as warnings so the screenplay package remains usable.
+The storage path is fixed to `./runs`; deployments relocate it by changing the working directory or mounting that directory. Writes use a temporary file followed by an atomic replace. A core failure records a failed manifest. Optional media failures are isolated as warnings so the screenplay package remains usable.
 
 ## TGRM execution contract
 
@@ -117,7 +117,7 @@ REINFORCE OR ROLLBACK
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SILVER_SCREEN_RUNS_DIR` | `runs` | Durable workspace root |
+| `SILVER_SCREEN_RUNS_DIR` | `runs` | Allowlisted storage alias; only `runs` is accepted |
 | `SILVER_SCREEN_DEBUG` | `0` | Show full Streamlit exceptions only when set to `1` |
 
 The Streamlit upload limit is 20 MB per file. The media layer also enforces a 20 MB image-read limit.
@@ -128,7 +128,7 @@ The Streamlit upload limit is 20 MB per file. The media layer also enforces a 20
 docker compose up --build
 ```
 
-The service listens on port `8501` and mounts `./runs` into the container. The image includes FFmpeg and DejaVu fonts, runs as an unprivileged user, and exposes a Streamlit health check.
+The service listens on port `8501` and mounts the fixed `./runs` directory into the container. The image includes FFmpeg and DejaVu fonts, runs as an unprivileged user, and exposes a Streamlit health check.
 
 ## Verification
 
