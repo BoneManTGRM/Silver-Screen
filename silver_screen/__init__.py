@@ -32,7 +32,6 @@ _script_engine.TITLE_CORES.setdefault(
     ],
 )
 
-# Release metadata is patched before operational modules import it.
 from . import science as _science
 
 _science.APP_VERSION = "9.0.0"
@@ -74,6 +73,12 @@ install_visual_quality_supervisor()
 from .gentler_transition_install import install_gentler_transition_smoothing
 install_gentler_transition_smoothing()
 
+# Patch Autonomous Studio after all lower-level generation, prompt, visual, and
+# continuity layers are installed. The wrapper preserves accepted clips and uses
+# only the remaining operator-approved call budget for semantic retakes.
+from .autonomous_closed_loop_install import install_autonomous_closed_loop
+install_autonomous_closed_loop()
+
 from .autonomous_studio import (
     QUALITY_PROFILES,
     AutonomousStudioError,
@@ -89,7 +94,6 @@ from .production_memory import (
 )
 from .semantic_supervisor import inspect_run_semantics
 
-# Refresh public pipeline exports after all extension installers have run.
 from .pipeline import run_pipeline as run_pipeline, validate_brief as validate_brief
 from .script_engine import build_film_from_brief as build_film_from_brief
 from .tgrm import run_tgrm as run_tgrm
