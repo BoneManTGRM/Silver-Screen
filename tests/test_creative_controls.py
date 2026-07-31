@@ -186,5 +186,5 @@ def test_creative_director_page_compiles() -> None:
     compile(page.read_text(encoding="utf-8"), str(page), "exec")
 
 
-def test_package_version_is_eight() -> None:
-    assert silver_screen.__version__ == "8.0.0"
+def test_package_version_is_nine() -> None:
+    assert silver_screen.__version__ == "9.0.0"
