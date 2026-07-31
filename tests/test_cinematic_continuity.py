@@ -132,7 +132,7 @@ def test_provider_prompt_is_upgraded_for_same_take_continuation() -> None:
     }
     prompt = ai_video.scene_prompt(state, scene, shot)
     assert "literal final frame" in prompt
-    assert "same take" in prompt
+    assert "do not reset the take" in prompt
     assert getattr(
         ai_video,
         "_cinematic_continuity_installed",
@@ -140,10 +140,20 @@ def test_provider_prompt_is_upgraded_for_same_take_continuation() -> None:
     )
 
 
-def _make_clip(path: Path, color: str, frequency: int) -> None:
+def _ffmpeg_for_test() -> str:
     ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
+    if ffmpeg:
+        return ffmpeg
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
         pytest.skip("FFmpeg is required for cinematic assembly")
+
+
+def _make_clip(path: Path, color: str, frequency: int) -> None:
+    ffmpeg = _ffmpeg_for_test()
     path.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
         [
