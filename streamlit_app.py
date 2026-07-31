@@ -1,9 +1,7 @@
 """General-purpose landing page for Silver-Screen."""
-
 from __future__ import annotations
 
 import os
-
 import streamlit as st
 
 from silver_screen.health import health_report
@@ -11,260 +9,89 @@ from silver_screen.runtime import list_runs
 from silver_screen.science import SCIENCE
 from silver_screen.voice_providers import provider_capabilities
 
-st.set_page_config(
-    page_title="Silver-Screen | AI Film Studio",
-    page_icon="🎥",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.title("🎥 Silver-Screen")
+st.set_page_config(page_title="Silver-Screen | Autonomous AI Film Studio", page_icon="🎥", layout="wide", initial_sidebar_state="expanded")
+st.title("Silver-Screen")
 st.caption(SCIENCE["credit"])
-st.subheader("A general-purpose AI film production studio")
+st.subheader("A durable, memory-backed autonomous film-production studio")
 st.write(
-    "Create original films, make yourself the lead, work with an authorized real "
-    "person or character, preview and lock exact shot prompts before spending, generate "
-    "full blueprint-length productions, add voices, synchronize authored scripts, "
-    "rebuild smooth cinematic transitions, and repair only the weak boundary of an "
-    "otherwise accepted film. Moonie Moo is an optional example project; the repository "
-    "is not dedicated to any single character."
+    "Create an original film, make yourself the lead with authorized references, or use an authorized character. "
+    "Silver-Screen 9 adds a one-click Autonomous Studio that coordinates screenplay planning, prompt ledgers, "
+    "persistent world memory, model routing, resumable generation, visual and semantic QA, repair, transitions, "
+    "voices, captions, evidence, and a machine-readable edit timeline. Moonie Moo remains an optional example."
 )
 
-replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
+replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN", "").strip())
+openai_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
 voice_caps = provider_capabilities()
-continuity_ready = os.getenv(
-    "SILVER_SCREEN_CINEMATIC_TRANSITIONS", "1"
-).strip().lower() not in {"0", "false", "no", "off"}
+continuity_ready = os.getenv("SILVER_SCREEN_CINEMATIC_TRANSITIONS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
-status_columns = st.columns(5)
-status_columns[0].metric(
-    "Video generation",
-    "Ready" if replicate_ready else "Needs key",
-)
-status_columns[1].metric(
-    "OpenAI voices",
-    "Ready" if voice_caps.get("openai") else "Optional",
-)
-status_columns[2].metric(
-    "ElevenLabs voices",
-    "Ready" if voice_caps.get("elevenlabs") else "Optional",
-)
-status_columns[3].metric("Durable checkpoints", "Enabled")
-status_columns[4].metric(
-    "Cinematic transitions",
-    "Enabled" if continuity_ready else "Disabled",
-)
+status = st.columns(6)
+status[0].metric("Video", "Ready" if replicate_ready else "Needs key")
+status[1].metric("Semantic QA", "Ready" if openai_ready else "Optional")
+status[2].metric("OpenAI voices", "Ready" if voice_caps.get("openai") else "Optional")
+status[3].metric("ElevenLabs", "Ready" if voice_caps.get("elevenlabs") else "Optional")
+status[4].metric("Project memory", "Enabled")
+status[5].metric("Transitions", "Enabled" if continuity_ready else "Disabled")
 
 st.divider()
-st.header("Start a production")
+st.header("Recommended")
+st.subheader("Autonomous Studio: one-click production")
+st.write(
+    "Enter the concept once. The system performs free preproduction, locks the approved shot contract, "
+    "creates persistent project memory, generates within explicit budgets, inspects accepted footage, "
+    "finishes the edit, and preserves a durable checkpoint if hosting or provider limits interrupt the run."
+)
+st.warning(
+    "Blockbuster target maximizes the available workflow, but no orchestration layer can guarantee that current "
+    "generative models will equal a human-produced Hollywood feature in every shot."
+)
+try:
+    st.page_link("pages/9_Autonomous_Studio.py", label="Open Autonomous Studio", icon="🎬", use_container_width=True)
+except TypeError:
+    st.page_link("pages/9_Autonomous_Studio.py", label="Open Autonomous Studio", icon="🎬")
+
+st.divider()
+st.header("Specialist workspaces")
 left, right = st.columns(2)
-
 with left:
-    st.subheader("🎥 Shot Director - highest control")
-    st.write(
-        "Turn every planned provider clip into a distinct screenplay shot. Preview the "
-        "complete shot deck, positive and negative prompts, continuity variants, audio "
-        "strategy, coverage scores, and the final ledger hash for free. Paid generation "
-        "is locked to the approved ledger."
-    )
-    try:
-        st.page_link(
-            "pages/7_Shot_Director.py",
-            label="Open Shot Director",
-            icon="🎥",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/7_Shot_Director.py",
-            label="Open Shot Director",
-            icon="🎥",
-        )
-
-    st.subheader("🎬 Creative Director")
-    st.write(
-        "Choose grounded prestige, modern spy thriller, naturalistic drama, dark "
-        "psychological thriller, premium animation, or a custom visual contract. Build "
-        "the screenplay and initial provider prompts for free, inspect anti-cliche "
-        "scores, then approve the script, direction, and paid call ceiling separately."
-    )
-    try:
-        st.page_link(
-            "pages/6_Creative_Director.py",
-            label="Open Creative Director",
-            icon="🎬",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/6_Creative_Director.py",
-            label="Open Creative Director",
-            icon="🎬",
-        )
-
-    st.subheader("⭐ Put yourself in the movie")
-    st.write(
-        "Upload authorized photos of yourself, lock your identity and wardrobe, run "
-        "a one-clip screen test, then continue the same production into a trailer, "
-        "short, episode, featurette, or feature film."
-    )
-    try:
-        st.page_link(
-            "pages/0_Star_Vehicle_Studio.py",
-            label="Open Star Vehicle Studio",
-            icon="⭐",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/0_Star_Vehicle_Studio.py",
-            label="Open Star Vehicle Studio",
-            icon="⭐",
-        )
-
-    st.subheader("🎬 Build a complete original film")
-    st.write(
-        "Start from a blank project or an optional template. The story blueprint and "
-        "paid render runtime stay synchronized, so a two-minute trailer plans the full "
-        "two minutes rather than one eight-second clip."
-    )
-    try:
-        st.page_link(
-            "pages/1_Full_Blueprint_Production.py",
-            label="Open Full Blueprint Production",
-            icon="🎬",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/1_Full_Blueprint_Production.py",
-            label="Open Full Blueprint Production",
-            icon="🎬",
-        )
-
+    pages = [
+        ("pages/7_Shot_Director.py", "Shot Director", "Inspect and lock every clip prompt before spending."),
+        ("pages/6_Creative_Director.py", "Creative Director", "Control screenplay maturity, performance, camera, pacing, and anti-cliche gates."),
+        ("pages/0_Star_Vehicle_Studio.py", "Star Vehicle Studio", "Use authorized references to put yourself or another permitted subject in the lead."),
+        ("pages/1_Full_Blueprint_Production.py", "Full Blueprint Production", "Match the paid render length to the complete story blueprint."),
+        ("pages/8_Visual_Quality_Supervisor.py", "Visual Quality Supervisor", "Inspect sharpness, exposure, flicker, motion, and broad appearance consistency."),
+    ]
+    for path, label, description in pages:
+        st.subheader(label)
+        st.write(description)
+        try:
+            st.page_link(path, label=f"Open {label}", use_container_width=True)
+        except TypeError:
+            st.page_link(path, label=f"Open {label}")
 with right:
-    st.subheader("🎙️ Add voices to a saved film")
-    st.write(
-        "Use OpenAI voices, authorized ElevenLabs voice IDs, an authorized custom "
-        "voice where supported, or finished recordings you upload yourself."
-    )
-    try:
-        st.page_link(
-            "pages/3_Voice_Studio.py",
-            label="Open Voice Studio",
-            icon="🎙️",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/3_Voice_Studio.py",
-            label="Open Voice Studio",
-            icon="🎙️",
-        )
-
-    st.subheader("📝 Enter and synchronize a script")
-    st.write(
-        "Time authored dialogue against verified footage, generate speech, export "
-        "SRT/VTT/ASS captions, and create synchronized and captioned professional cuts."
-    )
-    try:
-        st.page_link(
-            "pages/2_Professional_Script_Sync.py",
-            label="Open Professional Script Sync",
-            icon="📝",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/2_Professional_Script_Sync.py",
-            label="Open Professional Script Sync",
-            icon="📝",
-        )
-
-    st.subheader("🎞️ Smooth an existing film")
-    st.write(
-        "Measure every clip boundary, apply match-on-action transitions, crossfade "
-        "audio, and rebuild a smoother local cinematic master without another "
-        "Replicate prediction."
-    )
-    try:
-        st.page_link(
-            "pages/4_Cinematic_Continuity.py",
-            label="Open Cinematic Continuity",
-            icon="🎞️",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/4_Cinematic_Continuity.py",
-            label="Open Cinematic Continuity",
-            icon="🎞️",
-        )
-
-    st.subheader("🎬 Repair a weak transition")
-    st.write(
-        "Director Review finds the boundaries that still read as abrupt. It preserves "
-        "the accepted incoming clip, authorizes at most one targeted retake at a time, "
-        "then automatically keeps whichever candidate scores better."
-    )
-    try:
-        st.page_link(
-            "pages/5_Director_Review.py",
-            label="Open Director Review",
-            icon="🎬",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/5_Director_Review.py",
-            label="Open Director Review",
-            icon="🎬",
-        )
-
-st.divider()
-st.header("Continue without wasting accepted footage")
-col_a, col_b = st.columns(2)
-with col_a:
-    st.write(
-        "Use **Extend Existing Production** to turn a successful one-clip test into a "
-        "longer film while preserving the verified clip."
-    )
-    try:
-        st.page_link(
-            "pages/2_Extend_Existing_Production.py",
-            label="Extend an existing production",
-            icon="➕",
-        )
-    except Exception:
-        pass
-with col_b:
-    st.write(
-        "All paid video work is checkpointed. Temporary Replicate 429 throttles use "
-        "the provider's Retry-After window, targeted transition retakes preserve the "
-        "accepted original, and ledger-locked runs reject unapproved prompt drift."
-    )
+    pages = [
+        ("pages/3_Voice_Studio.py", "Voice Studio", "Add generated or finished authorized voices to saved footage."),
+        ("pages/2_Professional_Script_Sync.py", "Professional Script Sync", "Time authored dialogue, speech, captions, and synchronized exports."),
+        ("pages/4_Cinematic_Continuity.py", "Cinematic Continuity", "Rebuild smoother local transitions without a new video prediction."),
+        ("pages/5_Director_Review.py", "Director Review", "Repair only a weak transition while preserving the accepted original."),
+        ("pages/2_Extend_Existing_Production.py", "Extend Existing Production", "Turn a successful screen test into a longer film without discarding it."),
+    ]
+    for path, label, description in pages:
+        st.subheader(label)
+        st.write(description)
+        try:
+            st.page_link(path, label=f"Open {label}", use_container_width=True)
+        except TypeError:
+            st.page_link(path, label=f"Open {label}")
 
 with st.sidebar:
     st.header("Provider setup")
-    st.write(
-        f"Replicate: **{'ready' if replicate_ready else 'missing'}**  \n"
-        "Secret: `REPLICATE_API_TOKEN`"
-    )
-    st.write(
-        f"OpenAI speech: **{'ready' if voice_caps.get('openai') else 'optional / missing'}**  \n"
-        "Secret: `OPENAI_API_KEY`"
-    )
-    st.write(
-        f"ElevenLabs speech: **{'ready' if voice_caps.get('elevenlabs') else 'optional / missing'}**  \n"
-        "Secret: `ELEVENLABS_API_KEY`"
-    )
-    st.write(
-        f"Cinematic continuity: **{'enabled' if continuity_ready else 'disabled'}**"
-    )
+    st.write(f"Replicate: **{'ready' if replicate_ready else 'missing'}**  \n`REPLICATE_API_TOKEN`")
+    st.write(f"OpenAI: **{'ready' if openai_ready else 'optional / missing'}**  \n`OPENAI_API_KEY`")
+    st.write(f"ElevenLabs: **{'ready' if voice_caps.get('elevenlabs') else 'optional / missing'}**  \n`ELEVENLABS_API_KEY`")
     st.caption(
-        "Replicate is required for generated video. Choose one speech provider or use "
-        "authorized finished audio tracks. Screenplay generation, prompt ledgers, "
-        "quality gates, transition analysis, and local assembly require no additional API."
+        "Replicate is required for generated video. OpenAI is optional for speech and explicitly authorized semantic shot review. "
+        "Free planning, project memory, prompt ledgers, visual QA, transition analysis, and local assembly require no additional API."
     )
     with st.expander("Runtime health"):
         st.json(health_report("runs"))
@@ -274,14 +101,9 @@ with st.sidebar:
             st.caption("No saved productions yet.")
         for record in records:
             brief = record.get("brief") or {}
-            st.caption(
-                f"{record.get('runId')} | {record.get('status')} | "
-                f"{record.get('title') or brief.get('title') or 'Untitled'}"
-            )
+            st.caption(f"{record.get('runId')} | {record.get('status')} | {record.get('title') or brief.get('title') or 'Untitled'}")
 
 st.info(
-    "For the strongest controlled result, begin in **Shot Director**, keep "
-    "**Professional dub later** selected, inspect the complete free prompt ledger, "
-    "approve one eight-second screen test, and extend the same saved production only "
-    "after the lead identity, acting, camera language, and shot objective look correct."
+    "For the safest first paid test, use Autonomous Studio with an 8-second screen test. "
+    "Once identity, acting, camera language, and visual quality are acceptable, continue the same durable project."
 )
