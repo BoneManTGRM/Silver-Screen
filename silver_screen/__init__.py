@@ -34,7 +34,7 @@ _script_engine.TITLE_CORES.setdefault(
 
 from . import science as _science
 
-_science.APP_VERSION = "9.1.0"
+_science.APP_VERSION = "9.0.0"
 _science.SCIENCE["version"] = _science.APP_VERSION
 
 from .pipeline import (
