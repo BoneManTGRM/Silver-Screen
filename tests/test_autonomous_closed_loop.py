@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,8 @@ def _report(shot_id: str, order: int, score: float, *, hard: bool = False) -> di
 
 
 def _workspace(tmp_path: Path) -> RunWorkspace:
-    return RunWorkspace(tmp_path / "runs", "run-test-0001", brief={}, options={})
+    os.chdir(tmp_path)
+    return RunWorkspace("runs", "run-test-0001", brief={}, options={})
 
 
 def _queue(path: Path) -> dict:
@@ -112,7 +114,7 @@ def test_plan_routes_are_persisted_into_runtime_queue(tmp_path: Path) -> None:
     _persist_plan_and_routes(
         workspace.run_id,
         plan,
-        output_root=str(workspace.root),
+        output_root="runs",
         config={"qualityProfile": "blockbuster_target"},
         project_id="project-test",
     )
@@ -129,7 +131,7 @@ def test_semantic_retake_never_expands_approved_call_ceiling(tmp_path: Path) -> 
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
         _report("shot_0001", 1, 0.60, hard=True),
-        output_root=str(workspace.root),
+        output_root="runs",
         approved_calls=5,
         max_retries=3,
     )
@@ -149,7 +151,7 @@ def test_semantic_retake_is_blocked_when_no_call_remains(tmp_path: Path) -> None
         _schedule_semantic_retake(
             workspace.run_id,
             _report("shot_0001", 1, 0.60, hard=True),
-            output_root=str(workspace.root),
+            output_root="runs",
             approved_calls=2,
             max_retries=3,
         )
@@ -161,7 +163,7 @@ def test_candidate_comparison_restores_original_without_verified_gain(tmp_path: 
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
         _report("shot_0001", 1, 0.70),
-        output_root=str(workspace.root),
+        output_root="runs",
         approved_calls=5,
         max_retries=3,
     )
@@ -191,7 +193,7 @@ def test_candidate_comparison_keeps_measurably_better_retake(tmp_path: Path) -> 
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
         _report("shot_0001", 1, 0.70),
-        output_root=str(workspace.root),
+        output_root="runs",
         approved_calls=5,
         max_retries=3,
     )
