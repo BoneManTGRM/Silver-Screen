@@ -218,5 +218,5 @@ def test_preproduction_builds_full_ledger_without_provider_calls() -> None:
     assert all(item.get("negativePrompt") for item in preview["prompts"])
 
 
-def test_package_version_is_eight() -> None:
-    assert silver_screen.__version__ == "8.0.0"
+def test_package_version_is_nine() -> None:
+    assert silver_screen.__version__ == "9.0.0"
