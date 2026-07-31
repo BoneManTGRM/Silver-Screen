@@ -35,6 +35,12 @@ _script_engine.TITLE_CORES.setdefault(
     ],
 )
 
+# Release metadata is patched before operational modules import it.
+from . import science as _science
+
+_science.APP_VERSION = "8.0.0"
+_science.SCIENCE["version"] = _science.APP_VERSION
+
 from .pipeline import (
     BriefValidationError,
     PipelineError,
@@ -48,43 +54,33 @@ from .science import APP_VERSION, FIVE_LAWS, FORMATS, SCIENCE
 from .script_engine import build_film_from_brief, generate_outline
 from .tgrm import detect_fractures, run_msil, run_tgrm
 
-# Some hosted environments provide imageio's FFmpeg executable but no ffprobe.
-# Install a portable metadata probe before the continuity engine starts using
-# source durations, dimensions, and audio-presence information.
 from . import transition_engine as _transition_engine
 from .media_probe import probe_media as _probe_media
 
 _transition_engine.probe = _probe_media
 
-# Install the local cinematic continuity extension after the core modules have
-# finished importing. It upgrades provider prompts and final assembly without
-# changing the existing public pipeline API.
 from .cinematic_continuity import install_cinematic_continuity
 
 install_cinematic_continuity()
 
-# Production resilience wraps the already-installed continuity layer. It adds
-# bounded Replicate 429 backoff and consent-gated transition retakes while
-# preserving the same public pipeline functions.
 from .production_resilience import install_production_resilience
 
 install_production_resilience()
 
-# Creative controls replace broad deterministic melodrama with grounded
-# screenplay profiles and preproduction approval gates.
 from .creative_control_install import install_creative_controls
 
 install_creative_controls()
 
-# Shot Director is installed last so it can preserve creative direction,
-# continuity, Director Review retakes, and TGRM repair while replacing generic
-# scene prompts with distinct shot contracts and approved prompt ledgers.
 from .shot_director_install import install_shot_director
 
 install_shot_director()
 
-# Refresh package-level exports after extension installation so callers using
-# `from silver_screen import run_pipeline` receive the fully patched functions.
+# Install last so visual-quality repair directives are appended after the full
+# creative, continuity, and approved-ledger prompt contract has been built.
+from .visual_quality_install import install_visual_quality_supervisor
+
+install_visual_quality_supervisor()
+
 from .pipeline import (
     run_pipeline as run_pipeline,
     validate_brief as validate_brief,
