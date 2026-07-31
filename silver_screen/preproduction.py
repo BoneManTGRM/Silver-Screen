@@ -55,6 +55,16 @@ def _scene_by_number(state: dict[str, Any], number: int) -> dict[str, Any]:
     return scenes[min(len(scenes) - 1, max(0, int(number) - 1))]
 
 
+def _audit_positive_prompt(prompt: str, direction: dict[str, Any]) -> dict[str, Any]:
+    """Audit what the model is asked to create, not the explicit negative list."""
+
+    positive, separator, avoid_contract = str(prompt or "").partition("Avoid:")
+    audit = audit_prompt(positive, direction)
+    audit["avoidContractPresent"] = bool(separator and avoid_contract.strip())
+    audit["avoidContractItems"] = len(direction.get("avoid") or [])
+    return audit
+
+
 def build_preproduction_preview(
     brief: dict[str, Any],
     *,
@@ -110,7 +120,7 @@ def build_preproduction_preview(
         source = shot.get("sourceScene") or {}
         scene = _scene_by_number(state, int(source.get("number", 1) or 1))
         prompt = scene_prompt(state, scene, shot)
-        audit = audit_prompt(prompt, direction)
+        audit = _audit_positive_prompt(prompt, direction)
         prompt_scores.append(float(audit["score"]))
         prompts.append(
             {
