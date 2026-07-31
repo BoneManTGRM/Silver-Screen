@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-APP_VERSION = "5.1.0"
+APP_VERSION = "6.0.0"
 
 SCIENCE: dict[str, Any] = {
     "studio": "Reparodynamics",
@@ -35,9 +35,10 @@ SCIENCE: dict[str, Any] = {
     "x": "https://x.com/Reparodynamics",
     "credit": "A Reparodynamics Production | TGRM | RYE | MSIL",
     "tagline": (
-        "A durable film-production system that detects fractures, applies "
-        "bounded corrections, verifies improvement, and records successful "
-        "repair patterns across story, video, and authorized voice layers."
+        "A durable film-production system that gates creative direction before paid "
+        "generation, detects fractures, applies bounded corrections, verifies "
+        "improvement, and records successful repair patterns across story, video, "
+        "transition, and authorized voice layers."
     ),
     "loop": ["DETECT", "MINIMAL_CORRECTION", "VERIFY", "REINFORCE"],
 }

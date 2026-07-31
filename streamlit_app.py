@@ -58,6 +58,27 @@ st.divider()
 st.header("Start a production")
 left, right = st.columns(2)
 with left:
+    st.subheader("🎬 Creative Director - recommended")
+    st.write(
+        "Choose grounded prestige, modern spy thriller, naturalistic drama, dark "
+        "psychological thriller, premium animation, or a custom visual contract. Build "
+        "the screenplay and exact provider prompts for free, inspect anti-cliche scores, "
+        "then approve the script, prompt direction, and paid call ceiling separately."
+    )
+    try:
+        st.page_link(
+            "pages/6_Creative_Director.py",
+            label="Open Creative Director",
+            icon="🎬",
+            use_container_width=True,
+        )
+    except TypeError:
+        st.page_link(
+            "pages/6_Creative_Director.py",
+            label="Open Creative Director",
+            icon="🎬",
+        )
+
     st.subheader("⭐ Put yourself in the movie")
     st.write(
         "Upload authorized photos of yourself, lock your identity and wardrobe, run "
@@ -219,8 +240,8 @@ with st.sidebar:
     )
     st.caption(
         "Replicate is required for generated video. Choose one speech provider or use "
-        "authorized finished audio tracks. Cinematic transition analysis and assembly "
-        "run locally through FFmpeg and require no additional API."
+        "authorized finished audio tracks. Creative preview, quality gates, script "
+        "analysis, and cinematic transition assembly require no additional API."
     )
     with st.expander("Runtime health"):
         st.json(health_report("runs"))
@@ -236,8 +257,7 @@ with st.sidebar:
             )
 
 st.info(
-    "For a movie starring you, begin with **Star Vehicle Studio** and generate one "
-    "eight-second identity test. Continue that same saved run only after the lead "
-    "looks recognizably consistent. New multi-clip assemblies automatically use the "
-    "cinematic continuity engine."
+    "For the least corny result, start in **Creative Director**, choose Grounded "
+    "prestige or Modern spy thriller, keep melodrama and exposition below 15, inspect "
+    "the free prompt preview, and begin with one eight-second screen test."
 )
