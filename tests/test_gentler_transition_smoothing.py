@@ -29,10 +29,6 @@ def test_explicit_transition_values_are_respected(monkeypatch) -> None:
 
 
 def test_adaptive_analysis_extends_mismatched_continuation(monkeypatch, tmp_path) -> None:
-    original = transition_engine.analyze
-
-    # The installed wrapper closes over the pre-install analyzer. Patch the
-    # frame-scoring helper so the real analyzer receives a deterministic low match.
     monkeypatch.setattr(
         transition_engine,
         "_similarity",
@@ -44,6 +40,6 @@ def test_adaptive_analysis_extends_mismatched_continuation(monkeypatch, tmp_path
     cfg = replace(transition_engine.settings("auto"), analyze_frames=True)
     previous = {"id": "a", "order": 1, "status": "verified", "sourceScene": {"number": 1, "chapter": 1}}
     current = {"id": "b", "order": 2, "status": "verified", "sourceScene": {"number": 1, "chapter": 1}}
-    item = original(previous, current, tmp_path, cfg)
+    item = transition_engine.analyze(previous, current, tmp_path, cfg)
     assert item["relation"] == "continuation"
     assert item["durationSeconds"] >= 0.42
