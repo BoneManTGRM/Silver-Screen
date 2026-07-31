@@ -173,6 +173,14 @@ def test_scene_override_text_parser_is_operator_friendly() -> None:
     assert parsed["2"].startswith("Slow lateral")
 
 
+def test_scene_override_parser_handles_long_spacing_without_regex_backtracking() -> None:
+    spacing = " " * 10_000
+    parsed = parse_scene_override_text(
+        f"Scene{spacing}1{spacing}:{spacing}Static 50mm profile."
+    )
+    assert parsed == {"1": "Static 50mm profile."}
+
+
 def test_creative_director_page_compiles() -> None:
     page = Path("pages/6_Creative_Director.py")
     compile(page.read_text(encoding="utf-8"), str(page), "exec")
