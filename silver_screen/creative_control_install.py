@@ -54,6 +54,30 @@ def _mature_logline(state: dict[str, Any]) -> None:
     )
 
 
+def _compose_prompt(base: str, contract: str, limit: int = 3500) -> str:
+    """Keep late continuity and Director Review directives when space is tight."""
+
+    contract = contract[:2000].strip()
+    if not contract:
+        return base[:limit]
+    markers = (
+        "CINEMATIC CONTINUITY:",
+        "CINEMATIC TRANSITION:",
+        "CINEMATIC OPENING:",
+        "DIRECTOR REVIEW RETAKE:",
+    )
+    positions = [base.find(marker) for marker in markers if base.find(marker) >= 0]
+    tail = ""
+    head = base
+    if positions:
+        start = min(positions)
+        head, tail = base[:start].rstrip(), base[start:].strip()
+    reserved = len(contract) + len(tail) + 2
+    head_budget = max(0, limit - reserved)
+    parts = [head[:head_budget].rstrip(), tail, contract]
+    return " ".join(part for part in parts if part)[:limit]
+
+
 def install_creative_controls() -> None:
     """Patch extension points once after core package imports complete."""
 
@@ -156,10 +180,8 @@ def install_creative_controls() -> None:
             direction,
             scene=scene,
             shot=shot,
-        )[:2000]
-        if not contract:
-            return base
-        return (base[: max(0, 3500 - len(contract) - 1)] + " " + contract)[:3500]
+        )
+        return _compose_prompt(base, contract)
 
     def run_pipeline(
         brief: dict[str, Any],
