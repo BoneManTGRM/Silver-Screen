@@ -266,11 +266,21 @@ if schedule_only or schedule_and_render:
             finished_video = _video(rebuilt) or _video(resumed)
             if finished_video:
                 st.video(finished_video)
-        st.session_state["director_review"] = prepare_director_review(
-            run_id,
-            output_root="runs",
-            mode=mode,
-        )
+            try:
+                st.session_state["director_review"] = prepare_director_review(
+                    run_id,
+                    output_root="runs",
+                    mode=mode,
+                )
+            except DirectorReviewError:
+                st.session_state.pop("director_review", None)
+        else:
+            st.session_state.pop("director_review", None)
+            st.info(
+                "The retake is scheduled but no provider call was made. Open Star "
+                "Vehicle Studio or Full Blueprint Production and continue this saved "
+                "run with one new clip when you are ready."
+            )
     except (DirectorReviewError, PipelineError, OSError, ValueError) as exc:
         st.error(str(exc))
 
