@@ -51,7 +51,13 @@ def request_fingerprint(
 def _audit_positive_prompt(
     prompt: str, direction: dict[str, Any]
 ) -> dict[str, Any]:
-    return audit_prompt(str(prompt or ""), direction)
+    """Audit requested imagery without penalizing explicit exclusions."""
+
+    positive, separator, avoid_contract = str(prompt or "").partition("Avoid:")
+    audit = audit_prompt(positive, direction)
+    audit["avoidContractPresent"] = bool(separator and avoid_contract.strip())
+    audit["avoidContractItems"] = len(direction.get("avoid") or [])
+    return audit
 
 
 def build_preproduction_preview(
