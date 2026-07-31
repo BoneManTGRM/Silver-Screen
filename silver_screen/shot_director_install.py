@@ -6,11 +6,11 @@ import contextvars
 import copy
 from typing import Any
 
+from .creative_direction import normalize_creative_direction
 from .shot_director import (
     ShotDirectorError,
     enforce_prompt_ledger,
     normalize_shot_direction,
-    render_directed_prompt,
     render_negative_prompt,
     verify_ledger_hash,
 )
@@ -31,10 +31,63 @@ def _shot_direction_from_brief(brief: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _required_scene_context(
+    state: dict[str, Any], scene: dict[str, Any]
+) -> str:
+    creative = normalize_creative_direction(state.get("creativeDirection"))
+    bible = state.get("storyBible") or {}
+    motif = str(bible.get("motif") or "").strip()
+    override = str(scene.get("promptOverride") or "").strip()
+    avoid = [
+        str(item).strip()
+        for item in creative.get("avoid") or []
+        if str(item).strip()
+    ]
+    pieces = [
+        f"Visual motif: {motif}." if motif else "",
+        (
+            "SCENE-SPECIFIC DIRECTOR OVERRIDE: " + override
+            if override
+            else ""
+        ),
+        (
+            "Avoid: " + "; ".join(avoid[:24]) + "."
+            if avoid
+            else ""
+        ),
+    ]
+    return " ".join(item for item in pieces if item)
+
+
+def _compose_required_context(base: str, extra: str, limit: int = 3500) -> str:
+    if not extra:
+        return base[:limit]
+    combined = f"{base.rstrip()} {extra}".strip()
+    if len(combined) <= limit:
+        return combined
+    markers = (
+        "AUDIO PLAN:",
+        "CINEMATIC CONTINUITY:",
+        "CINEMATIC TRANSITION:",
+        "CINEMATIC OPENING:",
+        "DIRECTOR REVIEW RETAKE:",
+        "TGRM REPAIR:",
+    )
+    positions = [base.find(marker) for marker in markers if base.find(marker) >= 0]
+    if not positions:
+        return f"{base[: max(0, limit - len(extra) - 1)]} {extra}"[:limit]
+    split_at = min(positions)
+    head, tail = base[:split_at].rstrip(), base[split_at:].strip()
+    head_budget = max(0, limit - len(extra) - len(tail) - 2)
+    return " ".join(
+        item for item in (head[:head_budget].rstrip(), extra, tail) if item
+    )[:limit]
+
+
 def install_shot_director() -> None:
     """Patch public pipeline extension points after continuity and creative controls."""
 
-    from . import ai_video, pipeline, script_engine
+    from . import ai_video, pipeline, script_engine, shot_director
 
     if getattr(pipeline, "_shot_director_installed", False):
         return
@@ -43,6 +96,50 @@ def install_shot_director() -> None:
     original_run_pipeline = pipeline.run_pipeline
     original_build = pipeline.build_film_from_brief
     original_request = ai_video.ReplicateVideoClient._request_json
+    original_select = shot_director.select_shot_blueprint
+    original_render = shot_director.render_directed_prompt
+
+    def select_shot_blueprint(
+        state: dict[str, Any],
+        scene: dict[str, Any],
+        shot: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Use segment coverage within a scene and varied coverage across one-shot scenes."""
+
+        runtime_shot = shot if isinstance(shot, dict) else {}
+        actual_segment = max(1, int(runtime_shot.get("segment", 1) or 1))
+        order = max(1, int(runtime_shot.get("order", actual_segment) or actual_segment))
+        scene_number = int(scene.get("number", 1) or 1)
+        runtime_shots = [
+            item
+            for item in state.get("_videoShots") or []
+            if isinstance(item, dict)
+            and int((item.get("sourceScene") or {}).get("number", -1) or -1)
+            == scene_number
+        ]
+        effective = copy.deepcopy(runtime_shot)
+        if len(runtime_shots) <= 1:
+            effective["segment"] = order
+        result = original_select(state, scene, effective)
+        result["segment"] = actual_segment
+        return result
+
+    def render_directed_prompt(
+        state: dict[str, Any],
+        scene: dict[str, Any],
+        shot: dict[str, Any] | None = None,
+        repair: dict[str, Any] | None = None,
+    ) -> str:
+        base = original_render(state, scene, shot, repair)
+        return _compose_required_context(
+            base,
+            _required_scene_context(state, scene),
+        )
+
+    # Replace module globals first. build_prompt_ledger and enforce_prompt_ledger
+    # resolve these names dynamically, so preview and paid runtime remain identical.
+    shot_director.select_shot_blueprint = select_shot_blueprint
+    shot_director.render_directed_prompt = render_directed_prompt
 
     def validate_brief(brief: dict[str, Any]) -> dict[str, Any]:
         normalized = original_validate(brief)
@@ -76,7 +173,7 @@ def install_shot_director() -> None:
         )
         state["shotDirection"] = direction
         runtime_shot = shot if isinstance(shot, dict) else {}
-        current_prompt = render_directed_prompt(
+        current_prompt = shot_director.render_directed_prompt(
             state, scene, runtime_shot, repair
         )
         current_negative = render_negative_prompt(state, runtime_shot)
