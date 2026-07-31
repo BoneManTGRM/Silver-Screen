@@ -24,22 +24,35 @@ st.subheader("A general-purpose AI film production studio")
 st.write(
     "Create original films, make yourself the lead, work with an authorized real "
     "person or character, generate full blueprint-length productions, add voices, "
-    "and synchronize authored scripts. Moonie Moo is available as an optional "
-    "example project; the repository is not dedicated to any single character."
+    "synchronize authored scripts, and rebuild smooth cinematic transitions. "
+    "Moonie Moo is available as an optional example project; the repository is not "
+    "dedicated to any single character."
 )
 
 replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
 voice_caps = provider_capabilities()
+continuity_ready = os.getenv(
+    "SILVER_SCREEN_CINEMATIC_TRANSITIONS", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
-status_columns = st.columns(4)
-status_columns[0].metric("Video generation", "Ready" if replicate_ready else "Needs key")
+status_columns = st.columns(5)
+status_columns[0].metric(
+    "Video generation",
+    "Ready" if replicate_ready else "Needs key",
+)
 status_columns[1].metric(
-    "OpenAI voices", "Ready" if voice_caps.get("openai") else "Optional"
+    "OpenAI voices",
+    "Ready" if voice_caps.get("openai") else "Optional",
 )
 status_columns[2].metric(
-    "ElevenLabs voices", "Ready" if voice_caps.get("elevenlabs") else "Optional"
+    "ElevenLabs voices",
+    "Ready" if voice_caps.get("elevenlabs") else "Optional",
 )
 status_columns[3].metric("Durable checkpoints", "Enabled")
+status_columns[4].metric(
+    "Cinematic transitions",
+    "Enabled" if continuity_ready else "Disabled",
+)
 
 st.divider()
 st.header("Start a production")
@@ -83,6 +96,26 @@ with left:
             "pages/1_Full_Blueprint_Production.py",
             label="Open Full Blueprint Production",
             icon="🎬",
+        )
+
+    st.subheader("🎞️ Smooth an existing film")
+    st.write(
+        "Measure every clip boundary, apply match-on-action transitions, crossfade "
+        "audio, and rebuild a smoother local cinematic master without another "
+        "Replicate prediction."
+    )
+    try:
+        st.page_link(
+            "pages/4_Cinematic_Continuity.py",
+            label="Open Cinematic Continuity",
+            icon="🎞️",
+            use_container_width=True,
+        )
+    except TypeError:
+        st.page_link(
+            "pages/4_Cinematic_Continuity.py",
+            label="Open Cinematic Continuity",
+            icon="🎞️",
         )
 
 with right:
@@ -160,9 +193,13 @@ with st.sidebar:
         f"ElevenLabs speech: **{'ready' if voice_caps.get('elevenlabs') else 'optional / missing'}**  \n"
         "Secret: `ELEVENLABS_API_KEY`"
     )
+    st.write(
+        f"Cinematic continuity: **{'enabled' if continuity_ready else 'disabled'}**"
+    )
     st.caption(
         "Replicate is required for generated video. Choose one speech provider or use "
-        "authorized finished audio tracks."
+        "authorized finished audio tracks. Cinematic transition analysis and assembly "
+        "run locally through FFmpeg and require no additional API."
     )
     with st.expander("Runtime health"):
         st.json(health_report("runs"))
@@ -180,5 +217,6 @@ with st.sidebar:
 st.info(
     "For a movie starring you, begin with **Star Vehicle Studio** and generate one "
     "eight-second identity test. Continue that same saved run only after the lead "
-    "looks recognizably consistent."
+    "looks recognizably consistent. New multi-clip assemblies automatically use the "
+    "cinematic continuity engine."
 )
