@@ -1,8 +1,5 @@
 """Silver-Screen: an operational Reparodynamics story-production system."""
 
-# Register first-class comedy assets before pipeline imports normalize or build a
-# film. This keeps the deterministic engine backward compatible while allowing
-# comedy briefs to remain comedy instead of falling back to drama.
 from . import script_engine as _script_engine
 
 _script_engine.LOCATIONS.setdefault(
@@ -38,7 +35,7 @@ _script_engine.TITLE_CORES.setdefault(
 # Release metadata is patched before operational modules import it.
 from . import science as _science
 
-_science.APP_VERSION = "8.0.0"
+_science.APP_VERSION = "9.0.0"
 _science.SCIENCE["version"] = _science.APP_VERSION
 
 from .pipeline import (
@@ -60,37 +57,40 @@ from .media_probe import probe_media as _probe_media
 _transition_engine.probe = _probe_media
 
 from .cinematic_continuity import install_cinematic_continuity
-
 install_cinematic_continuity()
 
 from .production_resilience import install_production_resilience
-
 install_production_resilience()
 
 from .creative_control_install import install_creative_controls
-
 install_creative_controls()
 
 from .shot_director_install import install_shot_director
-
 install_shot_director()
 
-# Install last so visual-quality repair directives are appended after the full
-# creative, continuity, and approved-ledger prompt contract has been built.
 from .visual_quality_install import install_visual_quality_supervisor
-
 install_visual_quality_supervisor()
 
-# Raise the default local overlap modestly and adapt it to measured boundary
-# mismatch. This changes only local assembly and does not create provider calls.
 from .gentler_transition_install import install_gentler_transition_smoothing
-
 install_gentler_transition_smoothing()
 
-from .pipeline import (
-    run_pipeline as run_pipeline,
-    validate_brief as validate_brief,
+from .autonomous_studio import (
+    QUALITY_PROFILES,
+    AutonomousStudioError,
+    continue_autonomous_production,
+    finish_autonomous_run,
+    prepare_autonomous_plan,
+    start_autonomous_production,
 )
+from .production_memory import (
+    load_project_memory,
+    memory_context,
+    save_project_memory,
+)
+from .semantic_supervisor import inspect_run_semantics
+
+# Refresh public pipeline exports after all extension installers have run.
+from .pipeline import run_pipeline as run_pipeline, validate_brief as validate_brief
 from .script_engine import build_film_from_brief as build_film_from_brief
 from .tgrm import run_tgrm as run_tgrm
 
@@ -98,19 +98,29 @@ __version__ = APP_VERSION
 
 __all__ = [
     "APP_VERSION",
+    "AutonomousStudioError",
     "BriefValidationError",
     "FIVE_LAWS",
     "FORMATS",
     "PipelineError",
+    "QUALITY_PROFILES",
     "SCIENCE",
     "build_film_from_brief",
+    "continue_autonomous_production",
     "detect_fractures",
+    "finish_autonomous_run",
     "generate_outline",
+    "inspect_run_semantics",
+    "load_project_memory",
+    "memory_context",
+    "prepare_autonomous_plan",
     "resume_video_run",
     "run_msil",
     "run_pipeline",
     "run_pipeline_from_file",
     "run_tgrm",
+    "save_project_memory",
+    "start_autonomous_production",
     "validate_brief",
     "video_run_status",
 ]
