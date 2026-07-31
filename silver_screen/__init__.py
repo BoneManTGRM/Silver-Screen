@@ -70,6 +70,22 @@ from .production_resilience import install_production_resilience
 
 install_production_resilience()
 
+# Creative controls wrap the deterministic script engine and provider prompt
+# path. The default is grounded prestige filmmaking, while an advanced page can
+# require explicit screenplay, prompt, and budget approval before paid work.
+from .creative_control_install import install_creative_controls
+
+install_creative_controls()
+
+# Refresh package-level exports after extension installation so callers using
+# `from silver_screen import run_pipeline` receive the patched functions.
+from .pipeline import (
+    run_pipeline as run_pipeline,
+    validate_brief as validate_brief,
+)
+from .script_engine import build_film_from_brief as build_film_from_brief
+from .tgrm import run_tgrm as run_tgrm
+
 __version__ = APP_VERSION
 
 __all__ = [
