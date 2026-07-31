@@ -38,7 +38,7 @@ _script_engine.TITLE_CORES.setdefault(
 # Release metadata is patched before operational modules import it.
 from . import science as _science
 
-_science.APP_VERSION = "8.0.0"
+_science.APP_VERSION = "8.0.1"
 _science.SCIENCE["version"] = _science.APP_VERSION
 
 from .pipeline import (
@@ -80,6 +80,12 @@ install_shot_director()
 from .visual_quality_install import install_visual_quality_supervisor
 
 install_visual_quality_supervisor()
+
+# Raise the default local overlap modestly and adapt it to measured boundary
+# mismatch. This changes only local assembly and does not create provider calls.
+from .gentler_transition_install import install_gentler_transition_smoothing
+
+install_gentler_transition_smoothing()
 
 from .pipeline import (
     run_pipeline as run_pipeline,
