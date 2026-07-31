@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silver-screen-studio"
-version = "9.1.0"
+version = "9.0.0"
 description = "One-click, memory-backed autonomous AI-film production with bounded semantic retakes, prompt contracts, visual QA, model routing, durable repair, cinematic continuity, and evidence-backed edits"
 readme = "README.md"
 requires-python = ">=3.10"
