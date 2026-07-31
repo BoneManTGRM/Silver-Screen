@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import re
 from typing import Any
 
 from .creative_direction import (
@@ -39,12 +40,17 @@ def _direction_from_brief(brief: dict[str, Any]) -> dict[str, Any]:
     return direction
 
 
+def _lead_names(state: dict[str, Any]) -> tuple[str, str]:
+    characters = [item for item in state.get("characters") or [] if isinstance(item, dict)]
+    lead = str(characters[0].get("name") or "The lead") if characters else "The lead"
+    other = str(characters[1].get("name") or "the other person") if len(characters) > 1 else "the other person"
+    return lead, other
+
+
 def _mature_logline(state: dict[str, Any]) -> None:
     if state.get("scriptSource") == "authored":
         return
-    characters = [item for item in state.get("characters") or [] if isinstance(item, dict)]
-    lead = str(characters[0].get("name") or "The lead") if characters else "The lead"
-    other = str(characters[1].get("name") or "the only useful witness") if len(characters) > 1 else "the only useful witness"
+    lead, other = _lead_names(state)
     premise = str(state.get("premise") or "").strip().rstrip(".")
     if premise:
         premise = premise[0].lower() + premise[1:]
@@ -52,6 +58,79 @@ def _mature_logline(state: dict[str, Any]) -> None:
         f"{lead} realizes that {premise}. The only useful lead points to {other}, "
         "whose silence may be protection, leverage, or control."
     )
+
+
+def _ground_story_bible(state: dict[str, Any], direction: dict[str, Any]) -> None:
+    if state.get("scriptSource") == "authored":
+        return
+    lead, other = _lead_names(state)
+    profile = str(direction.get("profile") or "grounded_prestige")
+    bible = state.setdefault("storyBible", {})
+    if profile == "modern_spy_thriller":
+        theme = "Competence becomes dangerous when someone else controls what counts as known."
+        world_rule = "Information has value only while the other side does not know you have it."
+    elif profile == "naturalistic_drama":
+        theme = "People reveal what they protect by refusing to say the obvious."
+        world_rule = "Small choices accumulate until silence is no longer neutral."
+    elif profile == "dark_psychological":
+        theme = "Control depends on whose version of events is allowed to feel ordinary."
+        world_rule = "Every attempt to verify the past changes the present relationship."
+    elif profile == "premium_animation":
+        theme = "Status is fragile; loyalty becomes visible through behavior under pressure."
+        world_rule = "Public mistakes create private choices that cannot be hidden for long."
+    else:
+        theme = "Pressure reveals what people value more clearly than explanation does."
+        world_rule = "Every concrete action changes what the other side believes is known."
+    bible.update(
+        {
+            "theme": theme,
+            "protagonistNeed": (
+                f"{lead} needs to identify who controls the timing without revealing how much has already been noticed."
+            ),
+            "opposingPressure": (
+                f"{other} controls access, timing, or interpretation and can force a premature decision."
+            ),
+            "worldRule": world_rule,
+        }
+    )
+
+
+def _clean_generated_actions(state: dict[str, Any]) -> None:
+    if state.get("scriptSource") == "authored":
+        return
+    replacements = (
+        (
+            "Nobody states the theme, summarizes the premise, or performs for the camera.",
+            "The exchange stays quiet and specific.",
+        ),
+        (
+            "The camera stays motivated by behavior and holds long enough to catch the change in their decisions.",
+            "A small change in behavior reveals the next decision.",
+        ),
+        (
+            "Performances remain restrained and the scene ends on a decision that can be carried into the next shot.",
+            "The scene ends on a decision that carries into the next room.",
+        ),
+    )
+    for scene in state.get("scenes") or []:
+        if not isinstance(scene, dict):
+            continue
+        action = str(scene.get("action") or "")
+        action = re.sub(
+            r"The tension comes from what both characters avoid saying about this situation:\s*.*?\.\s*The camera",
+            "The tension comes from what both characters avoid saying. The camera",
+            action,
+            flags=re.S,
+        )
+        for before, after in replacements:
+            action = action.replace(before, after)
+        scene["action"] = " ".join(action.split())
+
+
+def _prepare_generated_state(state: dict[str, Any], direction: dict[str, Any]) -> None:
+    _mature_logline(state)
+    _ground_story_bible(state, direction)
+    _clean_generated_actions(state)
 
 
 def _compose_prompt(base: str, contract: str, limit: int = 3500) -> str:
@@ -137,7 +216,7 @@ def install_creative_controls() -> None:
             authored_script=authored,
             render_screenplay_fn=script_engine.render_screenplay,
         )
-        _mature_logline(state)
+        _prepare_generated_state(state, direction)
         return finalize_creative_state(
             state,
             render_screenplay_fn=script_engine.render_screenplay,
@@ -149,8 +228,11 @@ def install_creative_controls() -> None:
         **kwargs: Any,
     ) -> dict[str, Any]:
         result = original_run_tgrm(state, *args, **kwargs)
+        current = result.get("state") or state
+        direction = normalize_creative_direction(current.get("creativeDirection"))
+        _prepare_generated_state(current, direction)
         result["state"] = finalize_creative_state(
-            result.get("state") or state,
+            current,
             render_screenplay_fn=script_engine.render_screenplay,
         )
         return result
