@@ -81,6 +81,12 @@ from .visual_quality_install import install_visual_quality_supervisor
 
 install_visual_quality_supervisor()
 
+# Raise the default local overlap modestly and adapt it to measured boundary
+# mismatch. This changes only local assembly and does not create provider calls.
+from .gentler_transition_install import install_gentler_transition_smoothing
+
+install_gentler_transition_smoothing()
+
 from .pipeline import (
     run_pipeline as run_pipeline,
     validate_brief as validate_brief,
