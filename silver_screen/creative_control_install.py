@@ -230,7 +230,15 @@ def install_creative_controls() -> None:
         result = original_run_tgrm(state, *args, **kwargs)
         current = result.get("state") or state
         direction = normalize_creative_direction(current.get("creativeDirection"))
-        _prepare_generated_state(current, direction)
+        if current.get("scriptSource") == "authored" and current.get("authoredScript"):
+            current = apply_creative_direction(
+                current,
+                direction,
+                authored_script=str(current.get("authoredScript") or ""),
+                render_screenplay_fn=script_engine.render_screenplay,
+            )
+        else:
+            _prepare_generated_state(current, direction)
         result["state"] = finalize_creative_state(
             current,
             render_screenplay_fn=script_engine.render_screenplay,
