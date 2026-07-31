@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -32,8 +31,8 @@ def _report(shot_id: str, order: int, score: float, *, hard: bool = False) -> di
     }
 
 
-def _workspace(tmp_path: Path) -> RunWorkspace:
-    os.chdir(tmp_path)
+def _workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunWorkspace:
+    monkeypatch.chdir(tmp_path)
     return RunWorkspace("runs", "run-test-0001", brief={}, options={})
 
 
@@ -95,8 +94,10 @@ def test_summary_records_semantic_counts() -> None:
     assert summary["rejected"] == 1
 
 
-def test_plan_routes_are_persisted_into_runtime_queue(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
+def test_plan_routes_are_persisted_into_runtime_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
     _queue(workspace.media_dir)
     plan = {
         "modelRoutes": {
@@ -125,8 +126,10 @@ def test_plan_routes_are_persisted_into_runtime_queue(tmp_path: Path) -> None:
     assert (workspace.path / "autonomous_job.json").exists()
 
 
-def test_semantic_retake_never_expands_approved_call_ceiling(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
+def test_semantic_retake_never_expands_approved_call_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
     _queue(workspace.media_dir)
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
@@ -142,24 +145,28 @@ def test_semantic_retake_never_expands_approved_call_ceiling(tmp_path: Path) -> 
     assert Path(scheduled["record"]["candidatePath"]).name.endswith(".mp4")
 
 
-def test_semantic_retake_is_blocked_when_no_call_remains(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    queue = _queue(workspace.media_dir)
-    queue["metrics"]["providerCalls"] = 2
-    save_video_queue(workspace.media_dir, queue)
+def test_semantic_retake_is_blocked_when_no_call_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
+    _queue(workspace.media_dir)
     with pytest.raises(AutonomousRepairError, match="No approved provider call remains"):
         _schedule_semantic_retake(
             workspace.run_id,
             _report("shot_0001", 1, 0.60, hard=True),
             output_root="runs",
-            approved_calls=2,
+            approved_calls=1,
             max_retries=3,
         )
 
 
-def test_candidate_comparison_restores_original_without_verified_gain(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
+def test_candidate_comparison_restores_original_without_verified_gain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
     queue = _queue(workspace.media_dir)
+    queue["shots"][0]["semanticQuality"] = _report("shot_0001", 1, 0.70)
+    save_video_queue(workspace.media_dir, queue)
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
         _report("shot_0001", 1, 0.70),
@@ -187,9 +194,13 @@ def test_candidate_comparison_restores_original_without_verified_gain(tmp_path: 
     assert shot["status"] == "verified"
 
 
-def test_candidate_comparison_keeps_measurably_better_retake(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
+def test_candidate_comparison_keeps_measurably_better_retake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path, monkeypatch)
     queue = _queue(workspace.media_dir)
+    queue["shots"][0]["semanticQuality"] = _report("shot_0001", 1, 0.70)
+    save_video_queue(workspace.media_dir, queue)
     scheduled = _schedule_semantic_retake(
         workspace.run_id,
         _report("shot_0001", 1, 0.70),
