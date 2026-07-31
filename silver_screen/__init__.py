@@ -27,7 +27,12 @@ _script_engine.ROLE_SETS.setdefault(
 )
 _script_engine.TITLE_CORES.setdefault(
     "comedy",
-    ["Queen of the Spotlight", "Red Carpet Trouble", "Famous for a Minute", "The Accidental Headliner"],
+    [
+        "Queen of the Spotlight",
+        "Red Carpet Trouble",
+        "Famous for a Minute",
+        "The Accidental Headliner",
+    ],
 )
 
 from .pipeline import (
@@ -42,6 +47,13 @@ from .pipeline import (
 from .science import APP_VERSION, FIVE_LAWS, FORMATS, SCIENCE
 from .script_engine import build_film_from_brief, generate_outline
 from .tgrm import detect_fractures, run_msil, run_tgrm
+
+# Install the local cinematic continuity extension after the core modules have
+# finished importing. It upgrades provider prompts and final assembly without
+# changing the existing public pipeline API.
+from .cinematic_continuity import install_cinematic_continuity
+
+install_cinematic_continuity()
 
 __version__ = APP_VERSION
 
