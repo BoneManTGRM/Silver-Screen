@@ -38,7 +38,7 @@ _script_engine.TITLE_CORES.setdefault(
 # Release metadata is patched before operational modules import it.
 from . import science as _science
 
-_science.APP_VERSION = "8.0.1"
+_science.APP_VERSION = "8.0.0"
 _science.SCIENCE["version"] = _science.APP_VERSION
 
 from .pipeline import (
