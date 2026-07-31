@@ -24,9 +24,9 @@ st.subheader("A general-purpose AI film production studio")
 st.write(
     "Create original films, make yourself the lead, work with an authorized real "
     "person or character, generate full blueprint-length productions, add voices, "
-    "synchronize authored scripts, and rebuild smooth cinematic transitions. "
-    "Moonie Moo is available as an optional example project; the repository is not "
-    "dedicated to any single character."
+    "synchronize authored scripts, rebuild smooth cinematic transitions, and repair "
+    "only the weak boundary of an otherwise accepted film. Moonie Moo is available "
+    "as an optional example project; the repository is not dedicated to any single character."
 )
 
 replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
@@ -157,6 +157,26 @@ with right:
             icon="📝",
         )
 
+    st.subheader("🎬 Repair a weak transition")
+    st.write(
+        "Director Review finds the boundaries that still read as abrupt. It preserves "
+        "the accepted incoming clip, authorizes at most one targeted retake at a time, "
+        "then automatically keeps whichever candidate scores better."
+    )
+    try:
+        st.page_link(
+            "pages/5_Director_Review.py",
+            label="Open Director Review",
+            icon="🎬",
+            use_container_width=True,
+        )
+    except TypeError:
+        st.page_link(
+            "pages/5_Director_Review.py",
+            label="Open Director Review",
+            icon="🎬",
+        )
+
 st.divider()
 st.header("Continue without wasting accepted footage")
 col_a, col_b = st.columns(2)
@@ -175,8 +195,9 @@ with col_a:
         pass
 with col_b:
     st.write(
-        "All paid video work is checkpointed. Closing the browser does not make the "
-        "system intentionally regenerate clips that were already verified and saved."
+        "All paid video work is checkpointed. Temporary Replicate 429 throttles use "
+        "the provider's Retry-After window, and targeted transition retakes preserve "
+        "the accepted original before making another paid request."
     )
 
 with st.sidebar:
