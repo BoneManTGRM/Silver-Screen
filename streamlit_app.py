@@ -23,10 +23,11 @@ st.caption(SCIENCE["credit"])
 st.subheader("A general-purpose AI film production studio")
 st.write(
     "Create original films, make yourself the lead, work with an authorized real "
-    "person or character, generate full blueprint-length productions, add voices, "
-    "synchronize authored scripts, rebuild smooth cinematic transitions, and repair "
-    "only the weak boundary of an otherwise accepted film. Moonie Moo is available "
-    "as an optional example project; the repository is not dedicated to any single character."
+    "person or character, preview and lock exact shot prompts before spending, generate "
+    "full blueprint-length productions, add voices, synchronize authored scripts, "
+    "rebuild smooth cinematic transitions, and repair only the weak boundary of an "
+    "otherwise accepted film. Moonie Moo is an optional example project; the repository "
+    "is not dedicated to any single character."
 )
 
 replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
@@ -57,13 +58,35 @@ status_columns[4].metric(
 st.divider()
 st.header("Start a production")
 left, right = st.columns(2)
+
 with left:
-    st.subheader("🎬 Creative Director - recommended")
+    st.subheader("🎥 Shot Director - highest control")
+    st.write(
+        "Turn every planned provider clip into a distinct screenplay shot. Preview the "
+        "complete shot deck, positive and negative prompts, continuity variants, audio "
+        "strategy, coverage scores, and the final ledger hash for free. Paid generation "
+        "is locked to the approved ledger."
+    )
+    try:
+        st.page_link(
+            "pages/7_Shot_Director.py",
+            label="Open Shot Director",
+            icon="🎥",
+            use_container_width=True,
+        )
+    except TypeError:
+        st.page_link(
+            "pages/7_Shot_Director.py",
+            label="Open Shot Director",
+            icon="🎥",
+        )
+
+    st.subheader("🎬 Creative Director")
     st.write(
         "Choose grounded prestige, modern spy thriller, naturalistic drama, dark "
         "psychological thriller, premium animation, or a custom visual contract. Build "
-        "the screenplay and exact provider prompts for free, inspect anti-cliche scores, "
-        "then approve the script, prompt direction, and paid call ceiling separately."
+        "the screenplay and initial provider prompts for free, inspect anti-cliche "
+        "scores, then approve the script, direction, and paid call ceiling separately."
     )
     try:
         st.page_link(
@@ -119,26 +142,6 @@ with left:
             icon="🎬",
         )
 
-    st.subheader("🎞️ Smooth an existing film")
-    st.write(
-        "Measure every clip boundary, apply match-on-action transitions, crossfade "
-        "audio, and rebuild a smoother local cinematic master without another "
-        "Replicate prediction."
-    )
-    try:
-        st.page_link(
-            "pages/4_Cinematic_Continuity.py",
-            label="Open Cinematic Continuity",
-            icon="🎞️",
-            use_container_width=True,
-        )
-    except TypeError:
-        st.page_link(
-            "pages/4_Cinematic_Continuity.py",
-            label="Open Cinematic Continuity",
-            icon="🎞️",
-        )
-
 with right:
     st.subheader("🎙️ Add voices to a saved film")
     st.write(
@@ -176,6 +179,26 @@ with right:
             "pages/2_Professional_Script_Sync.py",
             label="Open Professional Script Sync",
             icon="📝",
+        )
+
+    st.subheader("🎞️ Smooth an existing film")
+    st.write(
+        "Measure every clip boundary, apply match-on-action transitions, crossfade "
+        "audio, and rebuild a smoother local cinematic master without another "
+        "Replicate prediction."
+    )
+    try:
+        st.page_link(
+            "pages/4_Cinematic_Continuity.py",
+            label="Open Cinematic Continuity",
+            icon="🎞️",
+            use_container_width=True,
+        )
+    except TypeError:
+        st.page_link(
+            "pages/4_Cinematic_Continuity.py",
+            label="Open Cinematic Continuity",
+            icon="🎞️",
         )
 
     st.subheader("🎬 Repair a weak transition")
@@ -217,8 +240,8 @@ with col_a:
 with col_b:
     st.write(
         "All paid video work is checkpointed. Temporary Replicate 429 throttles use "
-        "the provider's Retry-After window, and targeted transition retakes preserve "
-        "the accepted original before making another paid request."
+        "the provider's Retry-After window, targeted transition retakes preserve the "
+        "accepted original, and ledger-locked runs reject unapproved prompt drift."
     )
 
 with st.sidebar:
@@ -240,8 +263,8 @@ with st.sidebar:
     )
     st.caption(
         "Replicate is required for generated video. Choose one speech provider or use "
-        "authorized finished audio tracks. Creative preview, quality gates, script "
-        "analysis, and cinematic transition assembly require no additional API."
+        "authorized finished audio tracks. Screenplay generation, prompt ledgers, "
+        "quality gates, transition analysis, and local assembly require no additional API."
     )
     with st.expander("Runtime health"):
         st.json(health_report("runs"))
@@ -257,7 +280,8 @@ with st.sidebar:
             )
 
 st.info(
-    "For the least corny result, start in **Creative Director**, choose Grounded "
-    "prestige or Modern spy thriller, keep melodrama and exposition below 15, inspect "
-    "the free prompt preview, and begin with one eight-second screen test."
+    "For the strongest controlled result, begin in **Shot Director**, keep "
+    "**Professional dub later** selected, inspect the complete free prompt ledger, "
+    "approve one eight-second screen test, and extend the same saved production only "
+    "after the lead identity, acting, camera language, and shot objective look correct."
 )

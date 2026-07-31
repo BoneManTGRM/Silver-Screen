@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "silver-screen-studio"
-version = "6.0.0"
-description = "Resumable AI-film production with creative-direction gates, cinematic continuity, targeted TGRM repair, and durable artifacts"
+version = "7.0.0"
+description = "Resumable AI-film production with shot-specific prompt ledgers, creative gates, cinematic continuity, targeted TGRM repair, and durable artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "Cody Ryan Jenkins"}]

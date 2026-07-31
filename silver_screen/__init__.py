@@ -70,15 +70,21 @@ from .production_resilience import install_production_resilience
 
 install_production_resilience()
 
-# Creative controls wrap the deterministic script engine and provider prompt
-# path. The default is grounded prestige filmmaking, while an advanced page can
-# require explicit screenplay, prompt, and budget approval before paid work.
+# Creative controls replace broad deterministic melodrama with grounded
+# screenplay profiles and preproduction approval gates.
 from .creative_control_install import install_creative_controls
 
 install_creative_controls()
 
+# Shot Director is installed last so it can preserve creative direction,
+# continuity, Director Review retakes, and TGRM repair while replacing generic
+# scene prompts with distinct shot contracts and approved prompt ledgers.
+from .shot_director_install import install_shot_director
+
+install_shot_director()
+
 # Refresh package-level exports after extension installation so callers using
-# `from silver_screen import run_pipeline` receive the patched functions.
+# `from silver_screen import run_pipeline` receive the fully patched functions.
 from .pipeline import (
     run_pipeline as run_pipeline,
     validate_brief as validate_brief,
