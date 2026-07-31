@@ -48,6 +48,14 @@ from .science import APP_VERSION, FIVE_LAWS, FORMATS, SCIENCE
 from .script_engine import build_film_from_brief, generate_outline
 from .tgrm import detect_fractures, run_msil, run_tgrm
 
+# Some hosted environments provide imageio's FFmpeg executable but no ffprobe.
+# Install a portable metadata probe before the continuity engine starts using
+# source durations, dimensions, and audio-presence information.
+from . import transition_engine as _transition_engine
+from .media_probe import probe_media as _probe_media
+
+_transition_engine.probe = _probe_media
+
 # Install the local cinematic continuity extension after the core modules have
 # finished importing. It upgrades provider prompts and final assembly without
 # changing the existing public pipeline API.
