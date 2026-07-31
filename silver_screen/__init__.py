@@ -35,12 +35,6 @@ _script_engine.TITLE_CORES.setdefault(
     ],
 )
 
-# Release metadata is patched before the operational pipeline imports it.
-from . import science as _science
-
-_science.APP_VERSION = "7.0.0"
-_science.SCIENCE["version"] = _science.APP_VERSION
-
 from .pipeline import (
     BriefValidationError,
     PipelineError,
