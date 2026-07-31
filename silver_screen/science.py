@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-APP_VERSION = "4.0.0"
+APP_VERSION = "5.1.0"
 
 SCIENCE: dict[str, Any] = {
     "studio": "Reparodynamics",
