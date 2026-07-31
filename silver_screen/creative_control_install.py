@@ -28,6 +28,32 @@ def _authored_script(raw: Any) -> str | None:
     return text
 
 
+def _direction_from_brief(brief: dict[str, Any]) -> dict[str, Any]:
+    raw = brief.get("creativeDirection") or brief.get("creative_direction")
+    direction = normalize_creative_direction(raw)
+    if not isinstance(raw, dict):
+        direction["medium"] = (
+            "cinematic image-to-video that preserves the authorized reference medium; "
+            "photorealistic for photographic references and premium animation for illustrated references"
+        )
+    return direction
+
+
+def _mature_logline(state: dict[str, Any]) -> None:
+    if state.get("scriptSource") == "authored":
+        return
+    characters = [item for item in state.get("characters") or [] if isinstance(item, dict)]
+    lead = str(characters[0].get("name") or "The lead") if characters else "The lead"
+    other = str(characters[1].get("name") or "the only useful witness") if len(characters) > 1 else "the only useful witness"
+    premise = str(state.get("premise") or "").strip().rstrip(".")
+    if premise:
+        premise = premise[0].lower() + premise[1:]
+    state["logline"] = (
+        f"{lead} realizes that {premise}. The only useful lead points to {other}, "
+        "whose silence may be protection, leverage, or control."
+    )
+
+
 def install_creative_controls() -> None:
     """Patch extension points once after core package imports complete."""
 
@@ -44,10 +70,7 @@ def install_creative_controls() -> None:
 
     def validate_brief(brief: dict[str, Any]) -> dict[str, Any]:
         normalized = original_validate(brief)
-        direction = normalize_creative_direction(
-            brief.get("creativeDirection")
-            or brief.get("creative_direction")
-        )
+        direction = _direction_from_brief(brief)
         authored = _authored_script(
             brief.get("authoredScript")
             or brief.get("authored_script")
@@ -84,10 +107,15 @@ def install_creative_controls() -> None:
             else _authored_script(context.get("authoredScript"))
         )
         state = original_build(*args, **kwargs)
-        return apply_creative_direction(
+        state = apply_creative_direction(
             state,
             direction,
             authored_script=authored,
+            render_screenplay_fn=script_engine.render_screenplay,
+        )
+        _mature_logline(state)
+        return finalize_creative_state(
+            state,
             render_screenplay_fn=script_engine.render_screenplay,
         )
 
@@ -110,11 +138,25 @@ def install_creative_controls() -> None:
         repair: dict[str, Any] | None = None,
     ) -> str:
         base = original_prompt(state, scene, shot, repair)
+        direction = normalize_creative_direction(state.get("creativeDirection"))
+        medium = str(direction.get("medium") or "").casefold()
+        if "animation" in medium or "illustrated" in medium:
+            base = base.replace(
+                "Cinematic live-action film footage",
+                "High-end animated feature-film footage",
+                1,
+            )
+        elif "reference medium" in medium or "image-to-video" in medium:
+            base = base.replace(
+                "Cinematic live-action film footage",
+                "Cinematic film footage matching the supplied reference medium",
+                1,
+            )
         contract = prompt_contract(
-            state.get("creativeDirection"),
+            direction,
             scene=scene,
             shot=shot,
-        )
+        )[:2000]
         if not contract:
             return base
         return (base[: max(0, 3500 - len(contract) - 1)] + " " + contract)[:3500]
@@ -124,10 +166,7 @@ def install_creative_controls() -> None:
         *args: Any,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        direction = normalize_creative_direction(
-            brief.get("creativeDirection")
-            or brief.get("creative_direction")
-        )
+        direction = _direction_from_brief(brief)
         render_media = bool(kwargs.get("render_media", True))
         video_mode = str(kwargs.get("video_mode", "cards"))
         if render_media and video_mode == "ai-video":
