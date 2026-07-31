@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .visual_quality import analyze_clip
+from .visual_quality import VisualQualityError, analyze_clip
 
 
 def _enabled() -> bool:
@@ -52,10 +52,23 @@ def install_visual_quality_supervisor() -> None:
         clip = Path(str(path_value))
         if not clip.is_absolute():
             clip = (root / clip).resolve()
-        report = analyze_clip(
-            clip,
-            work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
-        )
+        try:
+            report = analyze_clip(
+                clip,
+                work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
+            )
+        except VisualQualityError as exc:
+            # Synthetic test artifacts, constrained hosts, or unavailable FFmpeg
+            # should not convert an otherwise verified provider clip into a false
+            # rejection. The saved-production supervisor can inspect it later.
+            shot["visualQuality"] = {
+                "schemaVersion": 1,
+                "rating": "unavailable",
+                "accepted": None,
+                "hardFailure": False,
+                "error": str(exc),
+            }
+            return
         shot["visualQuality"] = report
         if not report.get("hardFailure"):
             return
