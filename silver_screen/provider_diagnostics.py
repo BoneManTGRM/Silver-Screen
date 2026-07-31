@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .production_resilience import retry_after_seconds
+
 
 @dataclass(frozen=True)
 class ProviderDiagnosis:
@@ -11,6 +13,7 @@ class ProviderDiagnosis:
     title: str
     detail: str
     retryable: bool
+    retry_after_seconds: int | None = None
 
 
 def diagnose_provider_error(error: object) -> ProviderDiagnosis:
@@ -24,11 +27,35 @@ def diagnose_provider_error(error: object) -> ProviderDiagnosis:
             "Open the video queue or runtime JSON and inspect the latest event.",
             False,
         )
-    if "http 402" in lower or "payment required" in lower or "billing" in lower or "credit" in lower:
+    # A 429 response can mention low credit because Replicate applies a stricter
+    # throttle below a balance threshold. It is still a temporary rate limit, not
+    # a failed payment, so classify it before the broader billing checks.
+    if "429" in lower or "rate limit" in lower or "too many requests" in lower or "throttled" in lower:
+        wait = retry_after_seconds(text, default=10)
+        low_credit = "less than $5" in lower or "less than $5.0" in lower
+        credit_note = (
+            " The account is below Replicate's stated $5 credit threshold, so adding "
+            "credit can restore a less restrictive request rate."
+            if low_credit
+            else ""
+        )
+        return ProviderDiagnosis(
+            "rate_limited",
+            "Replicate temporarily rate-limited the request",
+            (
+                f"Silver-Screen now waits up to the provider's retry window automatically "
+                f"(about {wait} seconds in this response). The saved run and verified clips "
+                "remain intact; continue the same production rather than starting over."
+                + credit_note
+            ),
+            True,
+            wait,
+        )
+    if "http 402" in lower or "payment required" in lower or "insufficient credit" in lower or "billing required" in lower:
         return ProviderDiagnosis(
             "billing_required",
-            "Replicate billing or credits are required",
-            "The website may allow selected free playground runs while API access to Veo still requires billing or usable credits. Enable billing or choose a model your account can run through the API.",
+            "Replicate billing or usable credits are required",
+            "The website may allow selected playground runs while API access to the configured video model still requires billing or usable credits. Add credit or choose a model the account can run through the API.",
             False,
         )
     if "http 401" in lower or "unauthorized" in lower or "invalid token" in lower:
@@ -58,13 +85,6 @@ def diagnose_provider_error(error: object) -> ProviderDiagnosis:
             "Replicate rejected the model input",
             "Retry once without a reference image. If that works, upload a JPEG or PNG with a 16:9 or 9:16 composition.",
             False,
-        )
-    if "429" in lower or "rate limit" in lower or "too many requests" in lower:
-        return ProviderDiagnosis(
-            "rate_limited",
-            "Replicate temporarily rate-limited the request",
-            "Wait briefly and continue the saved production. Do not start a new production.",
-            True,
         )
     if "timeout" in lower or "timed out" in lower or "could not reach" in lower or "temporar" in lower:
         return ProviderDiagnosis(

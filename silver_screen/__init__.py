@@ -63,6 +63,13 @@ from .cinematic_continuity import install_cinematic_continuity
 
 install_cinematic_continuity()
 
+# Production resilience wraps the already-installed continuity layer. It adds
+# bounded Replicate 429 backoff and consent-gated transition retakes while
+# preserving the same public pipeline functions.
+from .production_resilience import install_production_resilience
+
+install_production_resilience()
+
 __version__ = APP_VERSION
 
 __all__ = [
