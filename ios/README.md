@@ -14,7 +14,7 @@ prompt-to-clip, independent of Silver Screen's movie planner.
 
 ## Build and test
 
-On a Mac with Xcode and [XcodeGen](https://github.com/yonaskolb/XcodeGen), run:
+On a Mac with Xcode 26.3 or newer and [XcodeGen](https://github.com/yonaskolb/XcodeGen), run:
 
 ```sh
 xcodegen generate --spec ios/project.yml
