@@ -31,7 +31,19 @@ disabled. Generate a PNG and MP4, verify the clip plays and contains motion,
 and save both through the share sheet. Measure memory, render time, and
 available storage on the target iPhone before raising the video preset.
 
-For TestFlight, assign the signing team and a bundle identifier registered
-to that team, add the App Store Connect record, and upload an archived
-build. Review the SDK and model license notices and redistribution terms
-before distributing the app.
+## Install through TestFlight
+
+Review the SDK and model license notices before distribution. In your Apple
+Developer team, register `com.bonemantgrm.silverscreen` and create its iOS app
+record in App Store Connect. Create a team App Store Connect API key with
+permission to sign and upload builds for that app.
+
+In the GitHub repository's Actions settings, save `APPLE_TEAM_ID` as a
+variable. Save `APPLE_KEY_ID`, `APPLE_ISSUER_ID`, and `APPLE_PRIVATE_KEY` as
+secrets. The last secret is the full contents of the Apple-issued `.p8` file.
+
+After the workflow is on the default branch, run **Upload Silver Screen to
+TestFlight** from GitHub Actions. It creates a signed archive and uploads it
+to App Store Connect. Once Apple processes it, add your Apple account to a
+TestFlight testing group and install the app from the TestFlight invitation.
+This upload has not been verified with a live Apple Developer account.
