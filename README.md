@@ -107,6 +107,8 @@ rendering. Continuity frames and audio still use the production settings.
 
 ### Use your own ComfyUI server
 
+To run both apps together, follow the [single-pod RunPod setup](deploy/runpod/README.md).
+
 Run ComfyUI on a private GPU you control. For images, start with a
 [FLUX.1 Schnell workflow](https://docs.comfy.org/tutorials/flux/flux-1-text-to-image).
 For video, start with [Wan 2.2](https://docs.comfy.org/tutorials/video/wan/wan2_2).
