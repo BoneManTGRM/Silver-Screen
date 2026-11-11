@@ -118,7 +118,7 @@ def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     assert not app.error, [item.value for item in app.error]
     assert submissions["job-1"]["1"]["inputs"]["text"] == prompt
     assert app.session_state["direct_create_job"]["data"] == media["result.png"]
-    assert app.get("download_button")[0].proto.label == "Download image"
+    assert "Download image" in [item.proto.label for item in app.get("download_button")]
 
     app.radio[0].set_value("Video clip").run()
     app.text_area[0].set_value("Clay fox on a moonlit hill.")
@@ -129,7 +129,7 @@ def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     assert submissions["job-2"]["2"]["inputs"]["length"] == 97
     assert submissions["job-2"]["3"]["inputs"]["fps"] == 24
     assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
-    assert app.get("download_button")[0].proto.label == "Download clip"
+    assert "Download clip" in [item.proto.label for item in app.get("download_button")]
 
 
 def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_server):

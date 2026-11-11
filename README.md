@@ -93,6 +93,11 @@ Zero spend values disable estimated-spend gating. Silver-Screen does not hard-co
 
 ## Quick start
 
+### Offline on iPhone
+
+Use [Silver Screen Offline](deploy/iphone/README.md) in Draw Things to render
+images and short clips on your phone after downloading a compatible local model.
+
 ### Direct Create
 
 Open **Direct Create** to generate a PNG image with FLUX.1 Schnell or a short MP4 clip

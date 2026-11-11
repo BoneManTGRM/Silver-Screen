@@ -17,6 +17,8 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install --no-deps --no-build-isolation .
 
 COPY streamlit_app.py ./
+COPY pages ./pages
+COPY deploy/iphone/silver-screen-offline.js ./deploy/iphone/
 COPY .streamlit ./.streamlit
 
 RUN useradd --create-home --uid 10001 silver \

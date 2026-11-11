@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 from subprocess import SubprocessError
 
 import streamlit as st
@@ -26,6 +27,24 @@ from silver_screen.direct_generation import (
 st.set_page_config(page_title="Direct Create | Silver-Screen", page_icon="🎨")
 st.title("Direct Create")
 st.caption("Send your prompt to the selected model exactly as entered.")
+
+with st.expander("Create offline on iPhone"):
+    st.write(
+        "Use the Silver Screen Offline script in Draw Things to generate on your iPhone. "
+        "Download a local model first, then enter your prompt in Draw Things."
+    )
+    script = Path(__file__).resolve().parents[1] / "deploy" / "iphone" / "silver-screen-offline.js"
+    st.download_button(
+        "Download Silver Screen Offline",
+        script.read_bytes(),
+        file_name=script.name,
+        mime="application/javascript",
+    )
+    st.markdown(
+        "Open the Draw Things script editor, import or paste the script, and run it after "
+        "selecting a downloaded image or video model."
+    )
+
 
 kind = st.radio("Output", ("Image", "Video clip"), horizontal=True)
 is_image = kind == "Image"
