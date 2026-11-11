@@ -227,6 +227,7 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
         "shotPromptOverrides": normalize_shot_overrides(
             raw.get("shotPromptOverrides")
         ),
+        "useAuthoredShotPrompts": _bool_value(raw.get("useAuthoredShotPrompts"), False),
         "coverageGate": _bool_value(
             raw.get("coverageGate"),
             os.getenv("SILVER_SCREEN_SHOT_COVERAGE_GATE", "1")
@@ -387,10 +388,25 @@ def _audio_instruction(
     return instruction, bool(config["generateAudio"])
 
 
+def uses_authored_shot_prompt(
+    state: dict[str, Any], shot: dict[str, Any] | None,
+) -> bool:
+    direction = normalize_shot_direction(state.get("shotDirection"))
+    runtime_shot = shot or {}
+    order = max(1, int(runtime_shot.get("order") or runtime_shot.get("segment") or 1))
+    overrides = direction["shotPromptOverrides"]
+    return direction["useAuthoredShotPrompts"] and bool(
+        overrides.get(str(order))
+        or overrides.get(str(runtime_shot.get("id") or "").casefold())
+    )
+
+
 def render_negative_prompt(
     state: dict[str, Any],
     shot: dict[str, Any] | None = None,
 ) -> str:
+    if uses_authored_shot_prompt(state, shot):
+        return ""
     creative = _creative_config(state)
     direction = normalize_shot_direction(state.get("shotDirection"))
     items = [
@@ -458,8 +474,16 @@ def render_directed_prompt(
 
     runtime_shot = shot or {}
     blueprint = select_shot_blueprint(state, scene, runtime_shot)
-    cast = _cast_details(state, scene)
     audio_instruction, generate_audio = _audio_instruction(state, blueprint)
+    if isinstance(shot, dict):
+        shot["shotBlueprint"] = blueprint
+        shot["negativePrompt"] = render_negative_prompt(state, shot)
+        shot["generateAudioPlanned"] = generate_audio
+        shot["promptContractVersion"] = 1
+    if uses_authored_shot_prompt(state, runtime_shot):
+        return blueprint["override"]
+
+    cast = _cast_details(state, scene)
     creative = _creative_summary(state)
     continuity = prompt_directive(runtime_shot)
     retake = _retake_directive(runtime_shot)
@@ -510,11 +534,6 @@ def render_directed_prompt(
         ),
     ]
     prompt = " ".join(item for item in pieces if item)
-    if isinstance(shot, dict):
-        shot["shotBlueprint"] = blueprint
-        shot["negativePrompt"] = render_negative_prompt(state, shot)
-        shot["generateAudioPlanned"] = generate_audio
-        shot["promptContractVersion"] = 1
     return prompt[:3500]
 
 

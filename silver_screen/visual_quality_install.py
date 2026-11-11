@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from .shot_director import uses_authored_shot_prompt
+
 from .visual_quality import VisualQualityError, analyze_clip
 
 
@@ -35,6 +37,8 @@ def install_visual_quality_supervisor() -> None:
         repair: dict[str, Any] | None = None,
     ) -> str:
         prompt = previous_scene_prompt(state, scene, shot, repair)
+        if uses_authored_shot_prompt(state, shot):
+            return prompt
         directive = str(((shot or {}).get("visualQualityRetake") or {}).get("directive") or "").strip()
         if directive:
             prompt = f"{prompt} {directive}"[:3500]

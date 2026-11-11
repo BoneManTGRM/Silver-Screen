@@ -12,6 +12,7 @@ from .shot_director import (
     enforce_prompt_ledger,
     normalize_shot_direction,
     render_negative_prompt,
+    uses_authored_shot_prompt,
     verify_ledger_hash,
 )
 
@@ -131,6 +132,8 @@ def install_shot_director() -> None:
         repair: dict[str, Any] | None = None,
     ) -> str:
         base = original_render(state, scene, shot, repair)
+        if uses_authored_shot_prompt(state, shot):
+            return base
         return _compose_required_context(
             base,
             _required_scene_context(state, scene),
@@ -195,6 +198,7 @@ def install_shot_director() -> None:
             {
                 "shotId": str(runtime_shot.get("id") or ""),
                 "negativePrompt": current_negative,
+                "useAuthoredPrompt": uses_authored_shot_prompt(state, runtime_shot),
                 "generateAudio": generate_audio,
             }
         )
@@ -215,12 +219,15 @@ def install_shot_director() -> None:
             and "/predictions" in str(url)
             and isinstance(payload, dict)
             and isinstance(payload.get("input"), dict)
+            and "negative_prompt" in payload["input"]
         )
         if is_prediction and context:
             outgoing = copy.deepcopy(payload)
             inputs = outgoing["input"]
             negative = str(context.get("negativePrompt") or "").strip()
-            if negative:
+            if context.get("useAuthoredPrompt"):
+                inputs.pop("negative_prompt", None)
+            elif negative:
                 inputs["negative_prompt"] = negative
             planned_audio = context.get("generateAudio")
             # A TGRM repair may already have disabled audio. Never re-enable it.

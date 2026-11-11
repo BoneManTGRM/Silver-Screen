@@ -93,6 +93,18 @@ Zero spend values disable estimated-spend gating. Silver-Screen does not hard-co
 
 ## Quick start
 
+### Direct Create
+
+Open **Direct Create** to generate a PNG image with FLUX.1 Schnell or a short MP4 clip
+with Veo 3.1 Fast. The app sends the prompt as entered and lets you preview and download
+the result. Each generation uses a paid Replicate prediction and follows the model's
+content rules.
+
+For longer movies, open **Shot Director**, enter your clip-specific prompt overrides,
+and enable **Use clip overrides as the entire prompt**. Shots with an override use its
+wording and omit the studio's preset negative prompt. Preview the shot ledger before
+rendering. Continuity frames and audio still use the production settings.
+
 ### Streamlit studio
 
 ```bash

@@ -55,6 +55,7 @@ st.header("Specialist workspaces")
 left, right = st.columns(2)
 with left:
     pages = [
+        ("pages/0_Direct_Create.py", "Direct Create", "Generate a standalone image or short video from your own prompt."),
         ("pages/7_Shot_Director.py", "Shot Director", "Inspect and lock every clip prompt before spending."),
         ("pages/6_Creative_Director.py", "Creative Director", "Control screenplay maturity, performance, camera, pacing, and anti-cliche gates."),
         ("pages/0_Star_Vehicle_Studio.py", "Star Vehicle Studio", "Use authorized references to put yourself or another permitted subject in the lead."),

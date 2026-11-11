@@ -457,6 +457,13 @@ with st.sidebar:
             "continue the previous override."
         ),
     )
+    use_authored_prompts = st.checkbox(
+        "Use clip overrides as the entire prompt",
+        help=(
+            "Clips with an override use your wording without studio style or exclusion prompts. "
+            "Audio, reference frames, and production budgets use their existing settings."
+        ),
+    )
     maximum_similarity = st.slider(
         "Maximum allowed similarity between consecutive clip plans",
         min_value=0.55,
@@ -482,6 +489,7 @@ with st.sidebar:
     shot_direction = normalize_shot_direction(
         {
             "audioStrategy": audio_strategy,
+            "useAuthoredShotPrompts": use_authored_prompts,
             "shotPromptOverrides": parse_shot_override_text(
                 shot_override_text
             ),
