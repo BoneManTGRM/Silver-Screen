@@ -9,6 +9,7 @@ from typing import Any
 
 import streamlit as st
 
+from .cast_library import cast_library_root, saved_cast_photos
 from .comfyui import COMFYUI_MODEL, video_backend, video_backend_ready
 
 from .pipeline import BriefValidationError, PipelineError, resume_video_run, run_pipeline
@@ -364,6 +365,13 @@ def render_star_vehicle_page(
             )
             or []
         )
+        library_root = cast_library_root()
+        library_photos = saved_cast_photos(library_root) if library_root else {}
+        if library_photos:
+            selected_photos = st.multiselect(
+                "Add photos from Cast Library", list(library_photos), key=f"saved-star-photos-{key_suffix}",
+            )
+            images = [*images, *(library_photos[label] for label in selected_photos)]
         if len(images) > MAX_REFERENCE_IMAGES:
             st.error(f"Use no more than {MAX_REFERENCE_IMAGES} reference images.")
         primary_index = 0

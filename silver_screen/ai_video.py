@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 
@@ -291,6 +292,7 @@ def verify_mp4(
         "durationSeconds": None,
         "width": None,
         "height": None,
+        "frameRate": None,
     }
     ffprobe = _ffprobe_path()
     if not ffprobe:
@@ -299,8 +301,10 @@ def verify_mp4(
         ffprobe,
         "-v",
         "error",
+        "-select_streams",
+        "V:0",
         "-show_entries",
-        "format=duration:stream=codec_type,width,height",
+        "format=duration:stream=codec_type,width,height,avg_frame_rate",
         "-of",
         "json",
         str(path),
@@ -330,11 +334,16 @@ def verify_mp4(
             f"Generated clip is too short ({duration:.2f}s; expected about "
             f"{expected_duration:.2f}s)"
         )
+    try:
+        frame_rate = float(Fraction(video_stream.get("avg_frame_rate", "0"))) or None
+    except (TypeError, ValueError, ZeroDivisionError):
+        frame_rate = None
     metadata.update(
         {
             "durationSeconds": round(duration, 3),
             "width": video_stream.get("width"),
             "height": video_stream.get("height"),
+            "frameRate": frame_rate,
         }
     )
     return metadata
@@ -344,15 +353,16 @@ def _compress_image_bytes(
     image_bytes: bytes, *, max_bytes: int = 245_000
 ) -> bytes:
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps
     except Exception:
         return image_bytes
     with Image.open(io.BytesIO(image_bytes)) as image:
-        image = image.convert("RGB")
-        if image.width > 1280:
-            height = max(1, round(image.height * 1280 / image.width))
-            image = image.resize((1280, height))
-        for quality in (84, 74, 64, 54, 44, 34):
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        image.thumbnail((1280, 1280))
+        qualities = (84, 74, 64, 54, 44, 34)
+        if max_bytes > 256_000:
+            qualities = (92, *qualities)
+        for quality in qualities:
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=quality, optimize=True)
             data = buffer.getvalue()
@@ -361,7 +371,7 @@ def _compress_image_bytes(
     return data
 
 
-def image_to_data_url(image: Any) -> str | None:
+def image_to_data_url(image: Any, *, max_bytes: int = 256_000) -> str | None:
     """Encode a small authorized image as a Replicate-compatible data URL."""
 
     if image is None:
@@ -378,10 +388,10 @@ def image_to_data_url(image: Any) -> str | None:
             mime = getattr(image, "type", None) or "image/jpeg"
         else:
             return None
-        data = _compress_image_bytes(data)
-        if len(data) > 256_000:
+        data = _compress_image_bytes(data, max_bytes=max_bytes)
+        if len(data) > max_bytes:
             return None
-        if mime not in {"image/jpeg", "image/png", "image/webp"}:
+        if data.startswith(b"\xff\xd8\xff") or mime not in {"image/jpeg", "image/png", "image/webp"}:
             mime = "image/jpeg"
         return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
     except Exception:

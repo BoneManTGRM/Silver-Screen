@@ -1,16 +1,34 @@
 from __future__ import annotations
 
+import base64
+import io
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from silver_screen.ai_video import (
     ReplicateVideoClient,
     VideoGenerationError,
+    image_to_data_url,
     scene_prompt,
     verify_mp4,
 )
 from silver_screen.media import process_media
+
+
+def test_reference_photo_declares_its_encoded_format_and_keeps_orientation(tmp_path):
+    photo = tmp_path / "phone.png"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (80, 50), "blue").save(photo, exif=exif)
+
+    header, encoded = image_to_data_url(photo).split(",", 1)
+
+    assert header == "data:image/jpeg;base64"
+    with Image.open(io.BytesIO(base64.b64decode(encoded))) as result:
+        assert result.format == "JPEG"
+        assert result.size == (50, 80)
 
 
 def _state() -> dict:

@@ -23,6 +23,13 @@ WORKFLOW_ENV = {
 }
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024 * 1024
+VIDEO_SIZES = {
+    "Landscape · 832 × 480": (832, 480),
+    "Landscape HD · 1280 × 704": (1280, 704),
+    "Portrait · 480 × 832": (480, 832),
+    "Portrait HD · 704 × 1280": (704, 1280),
+}
+VIDEO_CONTROL_MARKERS = {"__WIDTH__", "__HEIGHT__", "__STEPS__", "__NEGATIVE_PROMPT__"}
 
 
 def video_backend() -> str:
@@ -63,6 +70,19 @@ def _workflow(kind: str) -> dict[str, Any]:
     ):
         raise VideoGenerationError(f"Export {setting} in ComfyUI API format.")
     return workflow
+
+
+def _markers(workflow: dict[str, Any]) -> set[str]:
+    return {value for node in workflow.values() for value in node["inputs"].values() if isinstance(value, str)}
+
+
+def video_controls_ready(kind: str) -> bool:
+    if not comfyui_ready(kind):
+        return False
+    try:
+        return VIDEO_CONTROL_MARKERS <= _markers(_workflow(kind))
+    except VideoGenerationError:
+        return False
 
 
 class ComfyUIClient:
@@ -143,6 +163,9 @@ class ComfyUIClient:
         duration: int = 8,
         image: str | None = None,
         generate_audio: bool | None = None,
+        video_size: tuple[int, int] | None = None,
+        steps: int | None = None,
+        negative_prompt: str = "",
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError("Enter a prompt before generating.")
@@ -151,18 +174,27 @@ class ComfyUIClient:
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
         if kind != "image":
+            if video_size is not None and video_size not in VIDEO_SIZES.values():
+                raise VideoGenerationError("Choose a supported Wan video size.")
+            if steps is not None and not 12 <= steps <= 32:
+                raise VideoGenerationError("Choose between 12 and 32 sampling steps.")
             try:
                 fps = int(os.getenv("SILVER_SCREEN_COMFYUI_FPS", "24"))
                 if fps not in range(4, 61, 4):
                     raise ValueError
             except ValueError as exc:
                 raise VideoGenerationError("Set SILVER_SCREEN_COMFYUI_FPS to a multiple of 4 between 4 and 60.") from exc
-            replacements.update(__FRAMES__=duration * fps + 1, __FPS__=fps)
+            width, height = video_size or (832, 480)
+            replacements.update(__FRAMES__=duration * fps + 1, __FPS__=fps,
+                                __WIDTH__=width, __HEIGHT__=height, __STEPS__=steps or 20,
+                                __NEGATIVE_PROMPT__=negative_prompt)
             required.add("__FRAMES__")
+            if video_size is not None or steps is not None or negative_prompt:
+                required.update(VIDEO_CONTROL_MARKERS)
         if image:
             required.add("__IMAGE__")
         inputs = [node["inputs"] for node in workflow.values()]
-        markers = {value for fields in inputs for value in fields.values() if isinstance(value, str)}
+        markers = _markers(workflow)
         if missing := required - markers:
             raise VideoGenerationError("Missing ComfyUI workflow inputs " + ", ".join(sorted(missing)) + ".")
         if image:

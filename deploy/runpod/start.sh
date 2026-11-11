@@ -6,8 +6,17 @@ workspace=/workspace
 comfy_dir="$workspace/ComfyUI"
 comfy_commit=0228a9d73cd7c2daf8f61fe13d56b12efe307171
 
-: "${RUNPOD_POD_ID:?Run this script in a RunPod GPU pod}"
-: "${SILVER_SCREEN_PASSWORD:?Set a private Silver Screen password in RunPod}"
+if [[ -n ${SILVER_SCREEN_PUBLIC_HOST:-} ]]; then
+    browser_host=$SILVER_SCREEN_PUBLIC_HOST
+    caddy_config="$repo_dir/deploy/ec2/Caddyfile"
+else
+    : "${RUNPOD_POD_ID:?Set SILVER_SCREEN_PUBLIC_HOST outside RunPod}"
+    browser_host="$RUNPOD_POD_ID-8080.proxy.runpod.net"
+    caddy_config="$repo_dir/deploy/runpod/Caddyfile"
+fi
+studio_venv=${SILVER_SCREEN_STUDIO_VENV:-$repo_dir/.venv}
+
+: "${SILVER_SCREEN_PASSWORD:?Set a private Silver Screen password}"
 if (( ${#SILVER_SCREEN_PASSWORD} < 11 )); then
     echo "Use a Silver Screen password of at least 11 characters." >&2
     exit 1
@@ -30,16 +39,16 @@ if [[ "$(git -C "$comfy_dir" rev-parse --verify HEAD 2>/dev/null || true)" != "$
     git -C "$comfy_dir" checkout --detach "$comfy_commit"
 fi
 
-python -c 'import torch; assert torch.cuda.is_available(), "The pod has no usable CUDA GPU"'
+python -c 'import torch; assert torch.cuda.is_available(), "No usable CUDA GPU found"'
 if [[ ! -x "$comfy_dir/.venv/bin/python" ]]; then
     python -m venv --system-site-packages "$comfy_dir/.venv"
 fi
 "$comfy_dir/.venv/bin/python" -m pip install -r "$comfy_dir/requirements.txt"
 
-if [[ ! -x "$repo_dir/.venv/bin/python" ]]; then
-    python -m venv "$repo_dir/.venv"
+if [[ ! -x "$studio_venv/bin/python" ]]; then
+    python -m venv "$studio_venv"
 fi
-"$repo_dir/.venv/bin/python" -m pip install -r "$repo_dir/requirements.txt"
+"$studio_venv/bin/python" -m pip install -r "$repo_dir/requirements.txt"
 
 download_model() {
     local url=$1 relative_path=$2
@@ -81,12 +90,12 @@ env -u SILVER_SCREEN_PASSWORD_HASH .venv/bin/python main.py --listen 127.0.0.1 -
 pids+=("$!")
 
 cd "$repo_dir"
-env -u SILVER_SCREEN_PASSWORD_HASH .venv/bin/python -m streamlit run streamlit_app.py \
+env -u SILVER_SCREEN_PASSWORD_HASH "$studio_venv/bin/python" -m streamlit run streamlit_app.py \
     --server.headless=true --server.address=127.0.0.1 --server.port=8501 \
-    --browser.serverAddress="$RUNPOD_POD_ID-8080.proxy.runpod.net" \
+    --browser.serverAddress="$browser_host" \
     --server.enableCORS=true --server.enableXsrfProtection=true &
 pids+=("$!")
 
-caddy run --adapter caddyfile --config "$repo_dir/deploy/runpod/Caddyfile" &
+caddy run --adapter caddyfile --config "$caddy_config" &
 pids+=("$!")
 wait -n "${pids[@]}"

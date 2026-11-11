@@ -37,7 +37,7 @@
         "2",
         0
       ],
-      "text": ""
+      "text": "__NEGATIVE_PROMPT__"
     }
   },
   "6": {
@@ -47,8 +47,8 @@
         "3",
         0
       ],
-      "width": 832,
-      "height": 480,
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
       "length": "__FRAMES__",
       "batch_size": 1
     }
@@ -83,7 +83,7 @@
         0
       ],
       "seed": "__SEED__",
-      "steps": 20,
+      "steps": "__STEPS__",
       "cfg": 5.0,
       "sampler_name": "uni_pc",
       "scheduler": "simple",

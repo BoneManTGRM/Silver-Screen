@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .voice_clone import render_cloned_line, voice_clone_ready
+
 OPENAI_BUILTIN_VOICES = (
     "alloy",
     "ash",
@@ -132,6 +134,7 @@ def provider_capabilities() -> dict[str, Any]:
     return {
         "openai": bool(os.getenv("OPENAI_API_KEY")),
         "elevenlabs": bool(os.getenv("ELEVENLABS_API_KEY")),
+        "private_cast": voice_clone_ready(),
         "manual": True,
         "openaiModel": os.getenv("SILVER_SCREEN_OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
         "elevenLabsModel": os.getenv("SILVER_SCREEN_ELEVENLABS_MODEL", "eleven_multilingual_v2"),
@@ -412,6 +415,17 @@ def make_voice_provider(config: dict[str, Any]):
         return OpenAITTSProvider(model=model)
     if provider == "elevenlabs":
         return ElevenLabsTTSProvider(model=model)
+    if provider == "private_cast":
+        if not config.get("authorization_confirmed"):
+            raise VoiceProviderError("Confirm that both speakers approved using their cloned voices for this film.")
+        return PrivateCastVoiceProvider()
     if provider == "manual":
         return None
     raise VoiceProviderError(f"Unsupported voice provider: {provider}")
+
+
+class PrivateCastVoiceProvider:
+    def synthesize(self, *, text: str, voice: str, destination: Path,
+                   instructions: str = "", speed: float = 1.0, seed: int | None = None) -> Path:
+        role, _, language = voice.partition(":")
+        return _atomic_write_bytes(destination, render_cloned_line(role, language, text))

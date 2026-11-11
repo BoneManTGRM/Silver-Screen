@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
+from silver_screen.cast_library import cast_library_root, saved_clone_samples
 from silver_screen.runtime import find_run_workspace, list_runs
 from silver_screen.script_sync import (
     ScriptSyncConfig,
@@ -16,6 +16,7 @@ from silver_screen.script_sync import (
     parse_script,
     render_script_production,
 )
+from silver_screen.voice_clone import LANGUAGES
 from silver_screen.voice_providers import OPENAI_BUILTIN_VOICES, provider_capabilities
 
 st.set_page_config(
@@ -89,17 +90,23 @@ with st.sidebar:
     )
 
     st.header("Voice casting")
+    caps = provider_capabilities()
+    providers = {"OpenAI": "openai", "ElevenLabs": "elevenlabs"}
+    if caps.get("private_cast"):
+        providers["Private cast voices"] = "private_cast"
     provider_label = st.selectbox(
         "Speech provider",
-        ["OpenAI", "ElevenLabs"],
+        list(providers),
     )
-    provider = provider_label.lower()
+    provider = providers[provider_label]
+    voice_map = {}
+    cast_ready = True
     if provider == "openai":
         lead_voice = st.selectbox("Lead voice", list(OPENAI_BUILTIN_VOICES), index=list(OPENAI_BUILTIN_VOICES).index("coral"))
         supporting_voice = st.selectbox("Supporting voice", list(OPENAI_BUILTIN_VOICES), index=list(OPENAI_BUILTIN_VOICES).index("onyx"))
         narrator_voice = st.selectbox("Narrator voice", list(OPENAI_BUILTIN_VOICES), index=list(OPENAI_BUILTIN_VOICES).index("cedar"))
         authorization = True
-    else:
+    elif provider == "elevenlabs":
         lead_voice = st.text_input("Lead ElevenLabs voice ID")
         supporting_voice = st.text_input("Supporting ElevenLabs voice ID")
         narrator_voice = st.text_input("Narrator ElevenLabs voice ID")
@@ -107,19 +114,33 @@ with st.sidebar:
             "I confirm I own or have explicit permission to use these voice IDs.",
             value=False,
         )
+    else:
+        lead_voice = supporting_voice = narrator_voice = ""
+        library_root = cast_library_root()
+        enrolled = list(saved_clone_samples(library_root)) if library_root else []
+        speakers = dict.fromkeys(line["speaker"] for line in parse_script(script))
+        if not enrolled:
+            st.info("Save a voice sample in Cast Library first.")
+        for speaker in (speakers if enrolled else ()):
+            with st.expander(speaker):
+                role = st.selectbox("Cast voice", enrolled, index=None, key=f"cast-role-{speaker}")
+                language = st.selectbox("Dialogue language", list(LANGUAGES), key=f"cast-language-{speaker}")
+                if role:
+                    voice_map[speaker] = f"{role}:{language}"
+        cast_ready = bool(speakers) and len(voice_map) == len(speakers)
+        authorization = st.checkbox("Every speaker approved using their cloned voice for these lines.")
 
     instructions = st.text_area(
         "Performance direction",
         "Polished animated feature-film performance, emotionally natural, precise comic timing, clear diction, no announcer exaggeration unless the line is narration.",
-        height=110,
+        height=110, disabled=provider == "private_cast",
     )
-    speed = st.slider("Speech speed", 0.7, 1.3, 1.0, 0.05)
+    speed = st.slider("Speech speed", 0.7, 1.3, 1.0, 0.05, disabled=provider == "private_cast")
     wpm = st.slider("Timing target, words per minute", 90, 220, 145, 5)
     preserve_audio = st.checkbox("Keep quiet original scene audio underneath", value=False)
     burn_captions = st.checkbox("Burn professional captions into a second MP4", value=True)
     caption_style = st.selectbox("Caption style", ["cinematic", "clean", "social"])
 
-    caps = provider_capabilities()
     provider_ready = bool(caps.get(provider))
     if not provider_ready:
         key = "OPENAI_API_KEY" if provider == "openai" else "ELEVENLABS_API_KEY"
@@ -138,7 +159,8 @@ with st.sidebar:
             not run_map
             or not script.strip()
             or not provider_ready
-            or (provider == "elevenlabs" and not authorization)
+            or not authorization
+            or not cast_ready
         ),
     )
 
@@ -147,6 +169,7 @@ config = ScriptSyncConfig(
     lead_voice=lead_voice,
     supporting_voice=supporting_voice,
     narrator_voice=narrator_voice,
+    voice_map=voice_map,
     instructions=instructions,
     speed=float(speed),
     words_per_minute=int(wpm),
@@ -236,5 +259,5 @@ if rendered:
         _download("Download timing plan JSON", rendered.get("plan_path"), "application/json", "script-sync-plan")
 else:
     st.info(
-        "Start with Analyze and time script. Rendering makes paid speech-provider calls only after the timing plan is visible."
+        "Start with Analyze and time script, then render the dialogue with your selected voices."
     )

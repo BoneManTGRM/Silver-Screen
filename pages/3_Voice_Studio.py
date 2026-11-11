@@ -8,6 +8,7 @@ from typing import Any
 
 import streamlit as st
 
+from silver_screen.cast_library import VOICE_ROLES, cast_library_root, saved_voice_takes
 from silver_screen.pipeline import PipelineError
 from silver_screen.runtime import list_runs
 from silver_screen.voice_providers import OPENAI_BUILTIN_VOICES, provider_capabilities
@@ -142,6 +143,15 @@ with st.sidebar:
             )
             or []
         )
+        library_root = cast_library_root()
+        library_takes = {
+            f"{role} · {name}": path
+            for role in VOICE_ROLES
+            for name, path in saved_voice_takes(library_root, role).items()
+        } if library_root else {}
+        if library_takes:
+            selected_takes = st.multiselect("Add saved voice takes in clip order", list(library_takes))
+            manual_tracks = [*manual_tracks, *(library_takes[name] for name in selected_takes)]
 
     instructions = st.text_area(
         "Performance direction",

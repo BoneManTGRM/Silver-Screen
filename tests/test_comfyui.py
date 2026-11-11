@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -129,7 +130,7 @@ def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     assert submissions["job-2"]["2"]["inputs"]["length"] == 97
     assert submissions["job-2"]["3"]["inputs"]["fps"] == 24
     assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
-    assert "Download clip" in [item.proto.label for item in app.get("download_button")]
+    assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
 
 
 def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_server):
@@ -143,6 +144,52 @@ def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_serve
     assert b"fake-jpeg" in uploads[0]
     assert submissions["job-1"]["5"]["inputs"]["image"] == "silver/reference.jpg"
     assert submissions["job-1"]["2"]["inputs"]["length"] == 145
+
+
+def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, monkeypatch, tmp_path):
+    submissions, uploads, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-video.json"))
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference.json"))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    app.text_area[0].set_value("  A train at dusk.  ")
+    app.text_area[1].set_value("Camera shake")
+    app.number_input[0].set_value(3)
+    app.selectbox[0].select("Portrait HD · 704 × 1280")
+    app.slider[0].set_value(27)
+    app.text_input[0].set_value("542")
+    app.button[0].click().run()
+    assert not app.exception
+    assert not app.error
+    graph = submissions["job-1"]
+    latent = next(node["inputs"] for node in graph.values() if node["class_type"] == "Wan22ImageToVideoLatent")
+    assert (latent["width"], latent["height"], latent["length"]) == (704, 1280, 73)
+    sampler = next(node["inputs"] for node in graph.values() if node["class_type"] == "KSampler")
+    assert (sampler["steps"], sampler["seed"]) == (27, 542)
+    assert {node["inputs"].get("text") for node in graph.values()} >= {"  A train at dusk.  ", "Camera shake"}
+
+    ComfyUIClient().create_prediction("Another train", seed=1, duration=2, video_size=(1280, 704),
+                                     image="data:image/jpeg;base64,ZmFrZS1qcGVn")
+    assert uploads
+    assert any(node["inputs"].get("width") == 1280 for node in submissions["job-2"].values())
+
+    if not shutil.which("ffprobe"):
+        return
+    next(button for button in app.button if button.label == "Add clip to custom film").click().run()
+    assert not app.exception
+    next(widget for widget in app.selectbox if widget.label == "Custom film frame size").select("Portrait HD · 720 × 1280")
+    next(button for button in app.button if button.label == "Export custom film").click().run()
+    assert not app.exception
+    assert not app.error
+    assert "Download custom film" in [item.proto.label for item in app.get("download_button")]
+    exported = tmp_path / "portrait.mp4"
+    exported.write_bytes(app.session_state["custom_film_export"])
+    dimensions = subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+        "-of", "csv=p=0", str(exported),
+    ], text=True).strip()
+    assert dimensions == "720,1280"
 
 
 def test_movie_uses_comfyui_and_keeps_backend_on_resume(comfy_server, tmp_path, monkeypatch):

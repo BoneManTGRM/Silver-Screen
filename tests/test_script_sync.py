@@ -80,6 +80,17 @@ def test_explicit_timecode_is_preserved():
     assert line["localStartSeconds"] == 0.1
 
 
+def test_dialogue_window_does_not_extend_across_a_cut():
+    plan = build_timing_plan(
+        "[00:02.980 --> 00:03.500] A: Stop.",
+        _video_result(duration=3),
+        ScriptSyncConfig(tail_padding_seconds=0),
+    )
+    assert plan["lines"][0]["globalEndSeconds"] == 3
+    assert plan["lines"][0]["targetDurationSeconds"] == 0.02
+    assert plan["metrics"]["fitStatus"] == "needs_timing_repair"
+
+
 def test_speech_estimate_increases_with_word_count():
     short = estimate_speech_seconds("Hello there.")
     long = estimate_speech_seconds("Hello there, welcome to the biggest premiere of the entire year.")

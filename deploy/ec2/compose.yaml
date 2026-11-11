@@ -1,0 +1,41 @@
+services:
+  studio:
+    image: runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
+    entrypoint: ["bash", "/opt/silver-screen/deploy/runpod/start.sh"]
+    init: true
+    restart: unless-stopped
+    environment:
+      SILVER_SCREEN_PUBLIC_HOST: ${SILVER_SCREEN_PUBLIC_HOST:?Set the studio DNS hostname}
+      SILVER_SCREEN_PASSWORD: ${SILVER_SCREEN_PASSWORD:?Set a private studio password}
+      SILVER_SCREEN_STUDIO_VENV: /workspace/studio-venv
+      SILVER_SCREEN_RUNS_DIR: runs
+      SILVER_SCREEN_CAST_LIBRARY_DIR: /workspace/cast
+      SILVER_SCREEN_VOICE_URL: http://voice:8765
+      XDG_DATA_HOME: /workspace/data
+      XDG_CONFIG_HOME: /workspace/config
+    volumes:
+      - ../..:/opt/silver-screen:ro
+      - studio-data:/workspace
+      - studio-runs:/opt/silver-screen/runs
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+  voice:
+    build: ./voice
+    init: true
+    restart: unless-stopped
+    volumes:
+      - studio-data:/workspace:ro
+      - voice-models:/cache
+
+volumes:
+  studio-data:
+  studio-runs:
+  voice-models:

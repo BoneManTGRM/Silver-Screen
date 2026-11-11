@@ -34,7 +34,7 @@ def verify_audio(path: Path) -> dict[str, Any]:
             "-v",
             "error",
             "-show_entries",
-            "format=duration",
+            "format=duration:stream=codec_type,duration",
             "-of",
             "json",
             str(path),
@@ -46,9 +46,14 @@ def verify_audio(path: Path) -> dict[str, Any]:
     if completed.returncode != 0:
         raise VoiceStudioError(f"FFprobe could not decode generated audio: {path}")
     try:
-        duration = float(
-            (json.loads(completed.stdout).get("format") or {}).get("duration") or 0
-        )
+        payload = json.loads(completed.stdout)
+        audio = next((stream for stream in payload.get("streams", []) if stream.get("codec_type") == "audio"), None)
+        if audio is None:
+            raise VoiceStudioError("The recording has no audio track.")
+        stream_duration = audio.get("duration")
+        if stream_duration in (None, "N/A"):
+            stream_duration = (payload.get("format") or {}).get("duration")
+        duration = float(stream_duration or 0)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         raise VoiceStudioError(
             f"Generated audio has no readable duration: {path}"
@@ -83,6 +88,41 @@ def _has_audio(path: Path) -> bool:
     return completed.returncode == 0 and bool(completed.stdout.strip())
 
 
+def combine_voice_tracks(
+    inputs: list[tuple[Path, float]], destination: Path, duration: float
+) -> Path:
+    """Place recorded or synthesized lines on a shared timeline."""
+    ffmpeg = _ffmpeg_path()
+    if not ffmpeg:
+        raise VoiceStudioError("FFmpeg is required to combine voice recordings")
+    if not inputs:
+        raise VoiceStudioError("Add at least one voice recording")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [ffmpeg, "-y"]
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, (path, delay) in enumerate(inputs):
+        command.extend(["-i", str(path)])
+        label = f"a{index}"
+        delay_ms = max(0, round(delay * 1000))
+        filters.append(f"[{index}:a]aresample=48000,adelay={delay_ms}:all=1[{label}]")
+        labels.append(f"[{label}]")
+    filters.append(
+        f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,"
+        f"apad,atrim=0:{duration:.3f},loudnorm=I=-16:TP=-1.5:LRA=11[out]"
+    )
+    command.extend([
+        "-filter_complex", ";".join(filters), "-map", "[out]", "-c:a", "pcm_s16le",
+        "-ar", "48000", str(destination),
+    ])
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    if completed.returncode != 0:
+        destination.unlink(missing_ok=True)
+        raise VoiceStudioError(f"FFmpeg voice mix failed: {completed.stderr[-1600:]}")
+    verify_audio(destination)
+    return destination
+
+
 def mix_voice_into_clip(
     video_path: Path,
     audio_path: Path,
@@ -91,6 +131,7 @@ def mix_voice_into_clip(
     duration: float,
     preserve_source_audio: bool,
     delay_seconds: float = 0.2,
+    audio_channels: int | None = None,
 ) -> Path:
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
@@ -129,6 +170,7 @@ def mix_voice_into_clip(
             "192k",
             "-ar",
             "48000",
+            *(["-ac", str(audio_channels)] if audio_channels else []),
             "-t",
             f"{duration:.3f}",
             "-movflags",

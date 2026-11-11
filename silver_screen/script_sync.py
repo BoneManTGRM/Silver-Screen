@@ -14,13 +14,14 @@ import math
 import re
 import shutil
 import subprocess
+import wave
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Callable
 
 from .ai_video import assemble_clips, verify_mp4
 from .runtime import atomic_write_json, atomic_write_text, utc_now
-from .voice_audio import mix_voice_into_clip, verify_audio
+from .voice_audio import combine_voice_tracks, mix_voice_into_clip, verify_audio
 from .voice_config import VoiceStudioError, _ffmpeg_path, _relative, _safe_path
 from .voice_providers import make_voice_provider
 
@@ -53,8 +54,8 @@ class ScriptSyncConfig:
 
     def normalized(self) -> "ScriptSyncConfig":
         provider = self.provider.strip().lower()
-        if provider not in {"openai", "elevenlabs"}:
-            raise VoiceStudioError("Script Sync supports OpenAI or ElevenLabs speech providers")
+        if provider not in {"openai", "elevenlabs", "private_cast"}:
+            raise VoiceStudioError("Choose an available Script Sync speech provider")
         if provider == "elevenlabs" and not self.authorization_confirmed:
             raise VoiceStudioError("ElevenLabs voice IDs require explicit authorization confirmation")
         return ScriptSyncConfig(
@@ -200,7 +201,7 @@ def build_timing_plan(
         ))
         window = shot_windows[shot_index]
         local_start = max(0.0, start - window["start"])
-        available = max(0.25, window["duration"] - local_start - cfg.tail_padding_seconds)
+        available = max(0.0, window["duration"] - local_start - cfg.tail_padding_seconds)
         target = min(end - start, available)
         overflow = max(0.0, estimate - target)
         record = dict(item)
@@ -240,6 +241,8 @@ def _voice_for(speaker: str, cfg: ScriptSyncConfig, index: int) -> str:
     mapping = {str(key).casefold(): str(value) for key, value in (cfg.voice_map or {}).items()}
     if speaker.casefold() in mapping:
         return mapping[speaker.casefold()]
+    if cfg.provider == "private_cast":
+        raise VoiceStudioError(f"Assign a private cast voice to the script speaker {speaker}.")
     if speaker.casefold() == "narrator":
         return cfg.narrator_voice
     return cfg.lead_voice if index == 0 else cfg.supporting_voice
@@ -318,35 +321,6 @@ def render_ass(lines: list[dict[str, Any]], style: str = "cinematic") -> str:
     return header + "\n".join(events) + ("\n" if events else "")
 
 
-def _combine_line_audio(
-    inputs: list[tuple[Path, float]], destination: Path, duration: float
-) -> Path:
-    ffmpeg = _ffmpeg_path()
-    if not ffmpeg:
-        raise VoiceStudioError("FFmpeg is required for professional script synchronization")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    command = [ffmpeg, "-y"]
-    filters: list[str] = []
-    labels: list[str] = []
-    for index, (path, delay) in enumerate(inputs):
-        command.extend(["-i", str(path)])
-        label = f"a{index}"
-        filters.append(f"[{index}:a]aresample=48000,adelay={max(0, round(delay*1000))}:all=1[{label}]")
-        labels.append(f"[{label}]")
-    filters.append(
-        f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,apad,atrim=0:{duration:.3f},loudnorm=I=-16:TP=-1.5:LRA=11[out]"
-    )
-    command.extend([
-        "-filter_complex", ";".join(filters), "-map", "[out]", "-c:a", "pcm_s16le", "-ar", "48000", str(destination)
-    ])
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=900)
-    if completed.returncode != 0:
-        destination.unlink(missing_ok=True)
-        raise VoiceStudioError(f"Script audio mix failed: {completed.stderr[-1600:]}")
-    verify_audio(destination)
-    return destination
-
-
 def _burn_ass(video: Path, ass: Path, destination: Path) -> Path:
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
@@ -376,6 +350,18 @@ def render_script_production(
     root = _safe_script_root(run_root)
     cfg = config.normalized()
     plan = build_timing_plan(script, video_result, cfg)
+    for index, line in enumerate(plan["lines"]):
+        line["voice"] = _voice_for(str(line["speaker"]), cfg, index)
+    shots = {str(shot.get("id")): shot for shot in _verified_shots(video_result)}
+    sources = {}
+    for shot_id, shot in shots.items():
+        shot_path = Path(str(shot["path"]))
+        source = _safe_path(run_root, Path("media") / shot_path)
+        if not source.is_file():
+            source = _safe_path(run_root, shot_path)
+        if not source.is_file():
+            raise VoiceStudioError(f"The saved video file for shot {shot_id} is missing.")
+        sources[shot_id] = source
     atomic_write_text(root / "authored_script.txt", script)
     atomic_write_json(root / "script_timing_plan.json", plan)
     provider_config = {
@@ -384,15 +370,14 @@ def render_script_production(
         "authorization_confirmed": cfg.authorization_confirmed,
     }
     provider = provider_factory(provider_config)
-    shots = {str(shot.get("id")): shot for shot in _verified_shots(video_result)}
     line_dir = root / "lines"
     mixed_dir = root / "mixed_shots"
     line_dir.mkdir(parents=True, exist_ok=True)
     mixed_dir.mkdir(parents=True, exist_ok=True)
     signature_base = hashlib.sha256((script + json.dumps(asdict(cfg), sort_keys=True)).encode()).hexdigest()
+    extension = ".wav" if cfg.provider == "private_cast" else ".mp3"
     for index, line in enumerate(plan["lines"]):
-        line["voice"] = _voice_for(str(line["speaker"]), cfg, index)
-        audio_path = line_dir / f"{line['id']}.mp3"
+        audio_path = line_dir / f"{line['id']}{extension}"
         signature = hashlib.sha256(f"{signature_base}|{line['id']}|{line['voice']}|{line['text']}".encode()).hexdigest()
         line["signature"] = signature
         provider.synthesize(
@@ -402,9 +387,16 @@ def render_script_production(
         metadata = verify_audio(audio_path)
         measured = float(metadata.get("durationSeconds") or line["estimatedSpeechSeconds"])
         available = float(line["targetDurationSeconds"])
-        if measured > available + 0.12:
+        shot = shots[line["shotId"]]
+        shot_duration = float(shot.get("verifiedDurationSeconds") or shot.get("plannedDurationSeconds") or 8)
+        shot_remaining = shot_duration - float(line["localStartSeconds"])
+        if "cinematicWindowEndSeconds" in line:
+            shot_remaining = min(shot_remaining, line["cinematicWindowEndSeconds"] - line["globalStartSeconds"])
+        available = max(0.0, min(available + 0.12, shot_remaining))
+        if measured > available:
             raise VoiceStudioError(
-                f"Line {line['order']} is {measured:.2f}s but only {available:.2f}s is available. Shorten the line or reduce voice speed."
+                f"Line {line['order']} is {measured:.2f}s but only {available:.2f}s is available. "
+                "Shorten the line or give it more time in the shot."
             )
         line["audioPath"] = _relative(run_root, audio_path)
         line["audioDurationSeconds"] = round(measured, 3)
@@ -414,23 +406,32 @@ def render_script_production(
         line["completedAt"] = utc_now()
         atomic_write_json(root / "script_timing_plan.json", plan)
     dubbed_paths: list[Path] = []
+    silence = root / "silence.wav"
+    if cfg.provider == "private_cast":
+        # Every shot needs a matching audio stream for the film assembly.
+        with wave.open(str(silence), "wb") as silent:
+            silent.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+            silent.writeframes(bytes(96000))
     for shot_id, shot in sorted(shots.items(), key=lambda item: int(item[1].get("order", 0) or 0)):
         shot_lines = [line for line in plan["lines"] if line.get("shotId") == shot_id]
-        source = _safe_path(run_root, str(shot.get("path")))
-        if not shot_lines:
+        source = sources[shot_id]
+        if not shot_lines and cfg.provider != "private_cast":
             dubbed_paths.append(source)
             continue
         duration = float(shot.get("verifiedDurationSeconds") or shot.get("plannedDurationSeconds") or 8)
-        combined = root / "shot_audio" / f"{shot_id}.wav"
-        _combine_line_audio(
-            [(_safe_path(run_root, line["audioPath"]), float(line["localStartSeconds"])) for line in shot_lines],
-            combined,
-            duration,
-        )
+        combined = silence
+        if shot_lines:
+            combined = root / "shot_audio" / f"{shot_id}.wav"
+            combine_voice_tracks(
+                [(_safe_path(run_root, line["audioPath"]), float(line["localStartSeconds"])) for line in shot_lines],
+                combined,
+                duration,
+            )
         dubbed = mixed_dir / f"{shot_id}.mp4"
         mix_voice_into_clip(
             source, combined, dubbed, duration=duration,
             preserve_source_audio=cfg.preserve_source_audio, delay_seconds=0.0,
+            audio_channels=2 if cfg.provider == "private_cast" else None,
         )
         dubbed_paths.append(dubbed)
     final = root / "professional_script_synced_film.mp4"

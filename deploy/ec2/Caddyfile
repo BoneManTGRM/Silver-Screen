@@ -1,0 +1,10 @@
+{
+    admin off
+}
+
+{$SILVER_SCREEN_PUBLIC_HOST} {
+    basicauth {
+        silver-screen {$SILVER_SCREEN_PASSWORD_HASH}
+    }
+    reverse_proxy 127.0.0.1:8501
+}

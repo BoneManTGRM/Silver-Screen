@@ -239,8 +239,8 @@ def _cinematic_timing_plan(
         window = windows[index]
         local = max(0.0, start - window["start"])
         available = max(
-            0.25,
-            window["duration"] - local - cfg.tail_padding_seconds,
+            0.0,
+            min(window["duration"] - local, window["end"] - start) - cfg.tail_padding_seconds,
         )
         target = min(end - start, available)
         record = dict(item)
