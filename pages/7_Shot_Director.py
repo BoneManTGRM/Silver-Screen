@@ -9,6 +9,8 @@ from typing import Any
 
 import streamlit as st
 
+from silver_screen.comfyui import video_backend, video_backend_ready
+
 from silver_screen.creative_direction import (
     PROFILE_LABELS,
     PROFILE_PRESETS,
@@ -137,7 +139,7 @@ st.info(
     "or speech-provider calls."
 )
 
-replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
+video_ready = video_backend_ready()
 clip_duration = int(os.getenv("SILVER_SCREEN_VIDEO_DURATION", "8") or 8)
 if clip_duration not in {4, 6, 8}:
     clip_duration = 8
@@ -790,16 +792,16 @@ if preview:
         not strict_gate and not coverage_audit.get("blocking")
     )
     start_disabled = bool(
-        not replicate_ready
+        not video_ready
         or not preview_current
         or not all_approved
         or not strict_ok
         or profile_error
         or len(images) > MAX_REFERENCE_IMAGES
     )
-    if not replicate_ready:
+    if not video_ready:
         st.error(
-            "Add REPLICATE_API_TOKEN to Streamlit deployment secrets before paid rendering."
+            f"Configure the {video_backend()} video backend before rendering."
         )
     start_clicked = st.button(
         "Start ledger-locked paid production",

@@ -72,7 +72,7 @@ def health_report(output_root: str | os.PathLike[str] | None = None) -> dict[str
     if not checks["moviepy"] or not checks["ffmpeg"]:
         notes.append("Local preview encoding is unavailable; AI video generation can still work when its provider is configured.")
     if not checks["aiVideoProvider"]:
-        notes.append("REPLICATE_API_TOKEN is not configured; actual AI video generation is unavailable.")
+        notes.append("The selected video backend is missing its configuration.")
     return {
         "status": status,
         "ready": critical_ok,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import streamlit as st
 
+from silver_screen.comfyui import video_backend, video_backend_ready
 from silver_screen.health import health_report
 from silver_screen.runtime import list_runs
 from silver_screen.science import SCIENCE
@@ -20,13 +21,14 @@ st.write(
     "voices, captions, evidence, and a machine-readable edit timeline. Moonie Moo remains an optional example."
 )
 
-replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN", "").strip())
+backend = video_backend()
+video_ready = video_backend_ready(backend)
 openai_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
 voice_caps = provider_capabilities()
 continuity_ready = os.getenv("SILVER_SCREEN_CINEMATIC_TRANSITIONS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 status = st.columns(6)
-status[0].metric("Video", "Ready" if replicate_ready else "Needs key")
+status[0].metric("Video", "Ready" if video_ready else "Needs setup")
 status[1].metric("Semantic QA", "Ready" if openai_ready else "Optional")
 status[2].metric("OpenAI voices", "Ready" if voice_caps.get("openai") else "Optional")
 status[3].metric("ElevenLabs", "Ready" if voice_caps.get("elevenlabs") else "Optional")
@@ -87,11 +89,11 @@ with right:
 
 with st.sidebar:
     st.header("Provider setup")
-    st.write(f"Replicate: **{'ready' if replicate_ready else 'missing'}**  \n`REPLICATE_API_TOKEN`")
+    st.write(f"Video backend: **{backend}** · {'ready' if video_ready else 'needs setup'}")
     st.write(f"OpenAI: **{'ready' if openai_ready else 'optional / missing'}**  \n`OPENAI_API_KEY`")
     st.write(f"ElevenLabs: **{'ready' if voice_caps.get('elevenlabs') else 'optional / missing'}**  \n`ELEVENLABS_API_KEY`")
     st.caption(
-        "Replicate is required for generated video. OpenAI is optional for speech and explicitly authorized semantic shot review. "
+        "Generated video uses the selected video backend. OpenAI is optional for speech and explicitly authorized semantic shot review. "
         "Free planning, project memory, prompt ledgers, visual QA, transition analysis, and local assembly require no additional API."
     )
     with st.expander("Runtime health"):

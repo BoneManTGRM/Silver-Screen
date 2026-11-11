@@ -97,13 +97,58 @@ Zero spend values disable estimated-spend gating. Silver-Screen does not hard-co
 
 Open **Direct Create** to generate a PNG image with FLUX.1 Schnell or a short MP4 clip
 with Veo 3.1 Fast. The app sends the prompt as entered and lets you preview and download
-the result. Each generation uses a paid Replicate prediction and follows the model's
-content rules.
+the result. On Replicate, each generation uses a paid prediction and follows the
+model's content rules.
 
 For longer movies, open **Shot Director**, enter your clip-specific prompt overrides,
 and enable **Use clip overrides as the entire prompt**. Shots with an override use its
 wording and omit the studio's preset negative prompt. Preview the shot ledger before
 rendering. Continuity frames and audio still use the production settings.
+
+### Use your own ComfyUI server
+
+Run ComfyUI on a private GPU you control. For images, start with a
+[FLUX.1 Schnell workflow](https://docs.comfy.org/tutorials/flux/flux-1-text-to-image).
+For video, start with [Wan 2.2](https://docs.comfy.org/tutorials/video/wan/wan2_2).
+Install the model weights on the ComfyUI server and run each workflow there once.
+Use a private network or authenticated HTTPS endpoint between Silver Screen and
+ComfyUI. A proxy that accepts a bearer token can use `SILVER_SCREEN_COMFYUI_TOKEN`.
+
+Export each workflow in **API format**. In the JSON, use these marker strings as
+entire values inside node `inputs`. Silver Screen replaces them with the correct
+types at submission.
+
+| Marker | Where it goes |
+| --- | --- |
+| `__PROMPT__` | Positive text encoder in every workflow |
+| `__SEED__` | Sampler seed or noise seed, optional |
+| `__FRAMES__` | Video latent length input in each video workflow |
+| `__FPS__` | Video assembly frame rate, optional if the workflow already uses the configured rate |
+| `__IMAGE__` | Load Image filename in the optional image-to-video workflow |
+
+Use **Save Image** for PNGs and **Save Video** with MP4/H.264 for video. Set
+`SILVER_SCREEN_COMFYUI_FPS` to the workflow frame rate (24 by default). The video
+adapter submits `seconds × FPS + 1` frames for Wan's frame-count alignment.
+
+Set these variables in the Silver Screen deployment. Each workflow variable
+accepts the JSON itself or a file path visible to the Silver Screen server.
+Model weights stay on the ComfyUI server.
+
+```text
+SILVER_SCREEN_COMFYUI_URL=https://your-private-comfyui-endpoint
+SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW=/workflows/flux-schnell.json
+SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=/workflows/wan-text-to-video.json
+SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=/workflows/wan-image-to-video.json
+SILVER_SCREEN_VIDEO_BACKEND=comfyui
+```
+
+Choose **ComfyUI** in **Direct Create** for images and short clips. Setting
+`SILVER_SCREEN_VIDEO_BACKEND=comfyui` also routes new movie runs through ComfyUI.
+Existing movie runs keep their original backend. The optional reference workflow
+enables starting images and frame-to-frame continuity. The selected workflow
+controls negative prompts, dimensions, and native audio. Wan text-to-video clips
+can be finished with dialogue and audio in Silver Screen. Keep the same server
+and its job history and outputs available while a ComfyUI production is in progress.
 
 ### Streamlit studio
 

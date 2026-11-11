@@ -65,6 +65,10 @@ def read_direct_output(prediction: dict[str, Any], *, image: bool) -> bytes:
 
     with urllib.request.build_opener(_DeliveryRedirects()).open(output, timeout=60) as response:
         data = response.read(OUTPUT_LIMIT + 1)
+    return verify_direct_output(data, image=image)
+
+
+def verify_direct_output(data: bytes, *, image: bool) -> bytes:
     if not data or len(data) > OUTPUT_LIMIT:
         raise VideoGenerationError("The generated file is empty or exceeds the 64 MiB download limit.")
 

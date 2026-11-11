@@ -204,7 +204,7 @@ with st.expander("Targeted retake direction", expanded=False):
     st.write(candidate.get("promptDirective") or "No additional direction recorded.")
 
 paid_authorized = st.checkbox(
-    "I authorize one additional paid Replicate prediction for this selected transition.",
+    "I authorize one additional video generation for this selected transition.",
     value=False,
 )
 left, right = st.columns(2)
@@ -215,7 +215,7 @@ with left:
         disabled=bool(candidate.get("active")),
         help=(
             "Preserves the existing clip and reopens the weak incoming shot. It does "
-            "not call Replicate until you continue the saved production."
+            "not submit a generation until you continue the saved production."
         ),
     )
 with right:

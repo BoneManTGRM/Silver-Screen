@@ -8,6 +8,7 @@ from typing import Any
 
 import streamlit as st
 
+from silver_screen.comfyui import video_backend_ready
 from silver_screen.pipeline import PipelineError
 from silver_screen.production_dashboard import production_view, queue_rows
 from silver_screen.render_planning import (
@@ -18,6 +19,7 @@ from silver_screen.render_planning import (
 from silver_screen.runtime import list_runs, load_run
 from silver_screen.science import FORMATS, SCIENCE
 from silver_screen.video_extension import extend_video_run
+from silver_screen.video_runtime import load_video_queue
 
 st.set_page_config(
     page_title="Silver-Screen | Extend Existing Production",
@@ -63,7 +65,6 @@ st.write(
     "the same durable queue, and generates only the missing footage."
 )
 
-replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
 clip_duration = int(os.getenv("SILVER_SCREEN_VIDEO_DURATION", "8") or 8)
 if clip_duration not in {4, 6, 8}:
     clip_duration = 8
@@ -166,8 +167,17 @@ with st.sidebar:
             value=False,
         )
 
-    if not replicate_ready:
-        st.error("REPLICATE_API_TOKEN is missing from deployment secrets.")
+    saved_backend = None
+    if run_map:
+        workspace = Path(str(run_map[selected]["workspace"]))
+        try:
+            queue = load_video_queue(workspace / "media") or {}
+            saved_backend = str(queue.get("backend") or "replicate")
+        except (OSError, ValueError):
+            pass
+    video_ready = video_backend_ready(saved_backend)
+    if saved_backend and not video_ready:
+        st.error(f"Configure the {saved_backend} backend to extend this production.")
 
     extend_clicked = st.button(
         "Extend this production",
@@ -175,7 +185,7 @@ with st.sidebar:
         use_container_width=True,
         disabled=(
             not run_map
-            or not replicate_ready
+            or (saved_backend is not None and not video_ready)
             or (confirmation_required and not continuous_confirmed)
         ),
     )
