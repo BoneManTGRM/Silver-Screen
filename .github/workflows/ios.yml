@@ -27,4 +27,8 @@ jobs:
         run: |
           xcodebuild -quiet -project ios/SilverScreen.xcodeproj -scheme SilverScreen \
             -destination 'generic/platform=iOS' -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO build
+            -derivedDataPath "$RUNNER_TEMP/silver-screen-build" CODE_SIGNING_ALLOWED=NO build
+          app="$RUNNER_TEMP/silver-screen-build/Build/Products/Debug-iphoneos/SilverScreen.app"
+          test -x "$app/SilverScreen"
+          test -s "$app/Assets.car"
+          plutil -lint "$app/PrivacyInfo.xcprivacy"

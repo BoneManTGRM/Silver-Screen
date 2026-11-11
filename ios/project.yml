@@ -10,7 +10,11 @@ targets:
   SilverScreen:
     type: application
     platform: iOS
-    sources: [SilverScreen]
+    sources:
+      - path: SilverScreen
+        excludes: [PrivacyInfo.xcprivacy]
+      - path: SilverScreen/PrivacyInfo.xcprivacy
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.bonemantgrm.silverscreen
