@@ -17,7 +17,7 @@ also covers package installation and model downloads.
 | TCP ports | Leave empty |
 | Container disk | 30 GB |
 | Network volume | 100 GB, attached at `/workspace` in the pod's region |
-| Environment variable | `SILVER_SCREEN_PASSWORD` set to a private password of at least 16 characters |
+| Environment variable | `SILVER_SCREEN_PASSWORD` set to a private password of at least 12 characters |
 
 Set the container start command to the following.
 
