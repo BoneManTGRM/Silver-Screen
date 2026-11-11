@@ -8,8 +8,8 @@ comfy_commit=0228a9d73cd7c2daf8f61fe13d56b12efe307171
 
 : "${RUNPOD_POD_ID:?Run this script in a RunPod GPU pod}"
 : "${SILVER_SCREEN_PASSWORD:?Set a private Silver Screen password in RunPod}"
-if (( ${#SILVER_SCREEN_PASSWORD} < 12 )); then
-    echo "Use a Silver Screen password of at least 12 characters." >&2
+if (( ${#SILVER_SCREEN_PASSWORD} < 11 )); then
+    echo "Use a Silver Screen password of at least 11 characters." >&2
     exit 1
 fi
 export DEBIAN_FRONTEND=noninteractive
