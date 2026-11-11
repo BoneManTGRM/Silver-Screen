@@ -1,0 +1,32 @@
+name: SilverScreen
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  MediaGenerationKit:
+    url: https://github.com/drawthingsai/media-generation-kit.git
+    revision: 8868a9685d9c299816f43ef53efd455ffca437f0
+targets:
+  SilverScreen:
+    type: application
+    platform: iOS
+    sources: [SilverScreen]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bonemantgrm.silverscreen
+        INFOPLIST_KEY_CFBundleDisplayName: Silver Screen
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+    dependencies:
+      - package: MediaGenerationKit
+        product: MediaGenerationKit
+schemes:
+  SilverScreen:
+    build:
+      targets:
+        SilverScreen: all

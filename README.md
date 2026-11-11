@@ -95,6 +95,8 @@ Zero spend values disable estimated-spend gating. Silver-Screen does not hard-co
 
 ### Offline on iPhone
 
+The [native Silver Screen iPhone app](ios/README.md) is a separate build with its own on-device renderer.
+
 Use [Silver Screen Offline](deploy/iphone/README.md) in Draw Things to render
 images and short clips on your phone after downloading a compatible local model.
 

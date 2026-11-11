@@ -1,0 +1,27 @@
+name: iPhone build
+
+on:
+  pull_request:
+    paths:
+      - ios/**
+      - .github/workflows/ios.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec ios/project.yml
+      - name: Build unsigned iPhone app
+        run: |
+          xcodebuild -project ios/SilverScreen.xcodeproj -scheme SilverScreen \
+            -destination 'generic/platform=iOS' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build
