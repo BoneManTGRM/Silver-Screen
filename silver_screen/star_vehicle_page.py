@@ -9,6 +9,8 @@ from typing import Any
 
 import streamlit as st
 
+from .comfyui import COMFYUI_MODEL, video_backend, video_backend_ready
+
 from .pipeline import BriefValidationError, PipelineError, resume_video_run, run_pipeline
 from .production_dashboard import dashboard_metrics, display_msil, production_view, queue_rows
 from .render_planning import (
@@ -225,8 +227,9 @@ def render_star_vehicle_page(
         "yourself the lead. Moonie Moo remains an optional example, not the product default."
     )
 
-    replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN"))
-    video_model = os.getenv("SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast")
+    backend = video_backend()
+    video_ready = video_backend_ready(backend)
+    video_model = COMFYUI_MODEL if backend == "comfyui" else os.getenv("SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast")
     clip_duration = int(os.getenv("SILVER_SCREEN_VIDEO_DURATION", "8") or 8)
     if clip_duration not in {4, 6, 8}:
         clip_duration = 8
@@ -520,19 +523,18 @@ def render_star_vehicle_page(
 
         with st.expander("Provider status", expanded=True):
             st.write(
-                f"Replicate: **{'ready' if replicate_ready else 'missing'}** "
-                "(`REPLICATE_API_TOKEN`)"
+                f"{backend}: **{'ready' if video_ready else 'missing configuration'}**"
             )
             st.write(f"Video model: `{video_model}`")
             st.caption(
                 "OpenAI or ElevenLabs is optional and is used later for speech. "
-                "The visual star workflow itself requires Replicate."
+                "The visual star workflow uses the configured video backend."
             )
-            if not replicate_ready:
-                st.error("Add REPLICATE_API_TOKEN to Streamlit deployment secrets.")
+            if not video_ready:
+                st.error(f"Configure the {backend} video backend.")
 
         start_disabled = bool(
-            not replicate_ready
+            not video_ready
             or profile_error
             or len(premise.strip()) < 12
             or len(images) > MAX_REFERENCE_IMAGES
@@ -570,7 +572,7 @@ def render_star_vehicle_page(
         resume_clicked = st.button(
             "Continue selected production",
             use_container_width=True,
-            disabled=not resume_map or not replicate_ready,
+            disabled=not resume_map or not video_ready,
             key=f"resume-button-{page_title}",
         )
 

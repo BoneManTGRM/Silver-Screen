@@ -8,6 +8,8 @@ from typing import Any
 
 import streamlit as st
 
+from silver_screen.comfyui import video_backend, video_backend_ready
+
 from silver_screen.autonomous_studio import (
     QUALITY_PROFILES, continue_autonomous_production,
     prepare_autonomous_plan, start_autonomous_production,
@@ -26,7 +28,7 @@ st.write(
     "Blockbuster target means maximum available orchestration; current video models still determine the visual ceiling."
 )
 
-replicate_ready = bool(os.getenv("REPLICATE_API_TOKEN", "").strip())
+video_ready = video_backend_ready()
 openai_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
 voice_caps = provider_capabilities()
 
@@ -76,7 +78,7 @@ with st.sidebar:
     jobs = [item for item in resumable if (Path(str(item.get("workspace") or "")) / "autonomous_job.json").exists()]
     run_map = {f"{item.get('runId')} | {item.get('status')} | {item.get('title') or (item.get('brief') or {}).get('title') or 'Untitled'}": item for item in jobs}
     selected_run = st.selectbox("Saved autonomous checkpoint", list(run_map) or ["No autonomous checkpoints"], disabled=not run_map)
-    continue_clicked = st.button("Continue selected job", use_container_width=True, disabled=not run_map or not replicate_ready)
+    continue_clicked = st.button("Continue selected job", use_container_width=True, disabled=not run_map)
 
 
 def _progress(stage: str, percent: int, message: str) -> None:
@@ -90,8 +92,8 @@ def _progress(stage: str, percent: int, message: str) -> None:
 
 if make_clicked:
     errors = []
-    if not replicate_ready:
-        errors.append("Add REPLICATE_API_TOKEN to Streamlit deployment secrets.")
+    if not video_ready:
+        errors.append(f"Configure the {video_backend()} video backend.")
     if len(premise.strip()) < 12:
         errors.append("Enter a premise with at least 12 characters.")
     if images and not likeness_authorized:

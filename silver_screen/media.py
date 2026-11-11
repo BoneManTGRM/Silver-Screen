@@ -6,7 +6,8 @@ import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any
-from .ai_video import generate_ai_video
+from .ai_video import DEFAULT_MODEL, generate_ai_video
+from .comfyui import COMFYUI_MODEL, video_backend, video_backend_ready
 from .voice_config import _load_json as _load_voice_json
 from .voice_config import _paths as _voice_paths
 from .voice_studio import (
@@ -42,14 +43,13 @@ VIDEO_MODES = {"cards", "preview", "preview-film", "ai-video"}
 
 
 def media_capabilities() -> dict[str, Any]:
+    backend = video_backend()
     return {
         "pillow": HAS_PIL,
         "localPreview": HAS_VIDEO,
-        "aiVideo": bool(os.getenv("REPLICATE_API_TOKEN")),
-        "aiProvider": "replicate",
-        "aiModel": os.getenv(
-            "SILVER_SCREEN_VIDEO_MODEL", "google/veo-3.1-fast"
-        ),
+        "aiVideo": video_backend_ready(backend),
+        "aiProvider": backend,
+        "aiModel": COMFYUI_MODEL if backend == "comfyui" else os.getenv("SILVER_SCREEN_VIDEO_MODEL", DEFAULT_MODEL),
         "resumableVideo": True,
         "voiceStudio": voice_capabilities(),
         "modes": sorted(VIDEO_MODES),

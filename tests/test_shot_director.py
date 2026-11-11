@@ -220,3 +220,40 @@ def test_preproduction_builds_full_ledger_without_provider_calls() -> None:
 
 def test_package_version_is_nine() -> None:
     assert silver_screen.__version__ == "9.0.0"
+
+
+def test_authored_clip_prompt_matches_ledger_and_provider_input(monkeypatch) -> None:
+    import io
+    import json
+
+    from silver_screen.ai_video import ReplicateVideoClient
+
+    authored = "Hand-drawn animation. Show the title Quiet Handoff."
+    state = _state(overrides={"1": authored})
+    state["shotDirection"]["useAuthoredShotPrompts"] = True
+    queue = _queue(state, 2)
+    ledger = build_prompt_ledger(state, queue)
+    first, second = ledger["entries"]
+    assert first["promptWithoutContinuity"] == first["promptWithContinuity"] == authored
+    assert first["negativePrompt"] == ""
+    assert "PROFESSIONAL SHOT CONTRACT" in second["promptWithoutContinuity"]
+    assert second["negativePrompt"]
+
+    state["shotDirection"].update(enforcePromptLedger=True, approvedPromptLedger=ledger)
+    shot = queue["shots"][0]
+    shot["visualQualityRetake"] = {"directive": "Change the animation style."}
+    scene = state["scenes"][shot["sourceScene"]["number"] - 1]
+    prompt = scene_prompt(state, scene, shot, {"promptSuffix": "Change the style."})
+
+    requests = []
+
+    def fake_urlopen(request, *, timeout):
+        requests.append(json.loads(request.data)["input"])
+        return io.BytesIO(b'{"id": "fake", "status": "starting"}')
+
+    monkeypatch.setattr("silver_screen.ai_video.urllib.request.urlopen", fake_urlopen)
+    ReplicateVideoClient(token="fake", model="google/veo-3.1-fast").create_prediction(
+        prompt, seed=1
+    )
+    assert requests[0]["prompt"] == authored
+    assert "negative_prompt" not in requests[0]

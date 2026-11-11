@@ -10,6 +10,7 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .comfyui import COMFYUI_MODEL, video_backend
 from .runtime import utc_now
 
 
@@ -152,6 +153,14 @@ def _rank(spec: ModelSpec, task: str, cfg: dict[str, Any], *, reference: bool, n
 def route_shot(shot: dict[str, Any], *, scene: dict[str, Any] | None = None, state: dict[str, Any] | None = None, config: dict[str, Any] | None = None, memory: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = normalize_routing_config(config)
     task = classify_shot(shot, scene, state)
+    if video_backend() == "comfyui":
+        return {
+            "schemaVersion": 1, "routedAt": utc_now(),
+            "shotId": str(shot.get("id") or ""), "order": int(shot.get("order", 0) or 0),
+            "task": task, "recommendedModel": COMFYUI_MODEL, "executionModel": COMFYUI_MODEL,
+            "fallbackModel": COMFYUI_MODEL, "reason": "Uses the configured ComfyUI workflow.",
+            "candidates": [], "qualityTier": cfg["qualityTier"], "modelIndependent": True,
+        }
     strategy = str(((state or {}).get("shotDirection") or {}).get("audioStrategy", "dub_later"))
     reference = bool(shot.get("continuityUsed") or int(shot.get("order", 0) or 0) == 1)
     native_audio = strategy == "native_dialogue" and cfg["allowNativeDialogue"]
@@ -201,7 +210,7 @@ def route_queue(queue: dict[str, Any], *, state: dict[str, Any], config: dict[st
         "schemaVersion": 1, "createdAt": utc_now(), "shots": len(routes), "routes": routes,
         "executionModels": sorted({str(item.get("executionModel") or "") for item in routes}),
         "recommendedModels": sorted({str(item.get("recommendedModel") or "") for item in routes}),
-        "specialistExecutionEnabled": normalize_routing_config(config)["executeSpecialists"],
+        "specialistExecutionEnabled": video_backend() != "comfyui" and normalize_routing_config(config)["executeSpecialists"],
     }
 
 

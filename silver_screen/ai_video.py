@@ -18,6 +18,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -641,9 +642,9 @@ def _ensure_queue(
     root: Path,
     config: VideoProductionConfig,
     *,
-    resume: bool,
+    queue: dict[str, Any] | None,
+    backend: str,
 ) -> dict[str, Any]:
-    queue = load_video_queue(root) if resume else None
     if queue is None:
         queue = create_video_queue(state, config)
         record_video_event(
@@ -661,6 +662,7 @@ def _ensure_queue(
             "production_resumed",
             detail=f"Resumed at {queue.get('metrics', {}).get('verifiedShots', 0)} verified shots",
         )
+    queue["backend"] = backend
     state["_videoShots"] = queue.get("shots") or []
     save_video_queue(root, queue)
     return queue
@@ -742,6 +744,7 @@ def _continuity_input(
     config: VideoProductionConfig,
     initial_image: str | None,
 ) -> tuple[str | None, str | None]:
+    shot["continuityUsed"] = False
     if int(shot.get("order", 0) or 0) == 1 and initial_image:
         shot["continuityUsed"] = True
         return initial_image, "operator_reference"
@@ -992,12 +995,25 @@ def generate_ai_video(
         cost_per_second_usd=cost_per_second_usd,
         use_continuity_frames=use_continuity_frames,
     )
-    queue = _ensure_queue(state, root, config, resume=resume)
+    from .comfyui import ComfyUIClient, video_backend
+
+    saved_queue = load_video_queue(root) if resume else None
+    backend = str(saved_queue.get("backend") or "replicate") if saved_queue else video_backend()
+    initial_image_data = image_to_data_url(initial_image)
+    if backend == "comfyui":
+        client = ComfyUIClient()
+        if initial_image_data and not client.supports_reference:
+            raise VideoGenerationError("Configure a ComfyUI reference workflow to use the supplied image.")
+        if not client.supports_reference:
+            config = replace(config, use_continuity_frames=False)
+    elif backend == "replicate":
+        client = client_factory(model=model)
+    else:
+        raise VideoGenerationError("SILVER_SCREEN_VIDEO_BACKEND must be replicate or comfyui.")
+    queue = _ensure_queue(state, root, config, queue=saved_queue, backend=backend)
     _reconcile_verified_files(queue, root)
     update_video_metrics(queue)
     save_video_queue(root, queue)
-    client = client_factory(model=model)
-    initial_image_data = image_to_data_url(initial_image)
     call_limit = (
         config.provider_call_budget
         if continuous or config.batch_size <= 0
@@ -1165,7 +1181,7 @@ def generate_ai_video(
         "status": queue.get("status"),
         "resumeRequired": queue.get("status") in {"partial", "blocked"},
         "stopReason": queue.get("stopReason"),
-        "provider": "replicate",
+        "provider": backend,
         "model": client.model,
         "mode": "ai-video",
         "video_paths": scene_paths,

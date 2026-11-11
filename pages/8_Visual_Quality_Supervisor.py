@@ -136,7 +136,7 @@ with st.expander("Targeted repair directive", expanded=True):
     st.write(candidate.get("repairDirective") or "No additional repair direction was generated.")
 
 paid_authorized = st.checkbox(
-    "I authorize one additional paid Replicate prediction for this selected clip.",
+    "I authorize one additional video generation for this selected clip.",
     value=False,
 )
 left, right = st.columns(2)
