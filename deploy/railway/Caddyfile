@@ -1,17 +1,38 @@
 {
-    admin off
-    auto_https off
+	admin off
+	auto_https off
 }
 
 :{$PORT:8080} {
-    @health path /_stcore/health
-    handle @health {
-        reverse_proxy 127.0.0.1:8501
-    }
-    handle {
-        basic_auth {
-            silver-screen {$SILVER_SCREEN_PASSWORD_HASH}
-        }
-        reverse_proxy 127.0.0.1:8501
-    }
+	@health {
+		method GET HEAD
+		path /_stcore/health
+	}
+	handle @health {
+		reverse_proxy 127.0.0.1:8501
+	}
+	@cross_origin_socket {
+		header Upgrade websocket
+		expression {http.request.header.Origin} != "https://" + {http.request.hostport}
+	}
+	handle @cross_origin_socket {
+		respond 403
+	}
+	@studio_session expression {cookie.silver_screen_session} == "{$SILVER_SCREEN_SESSION_KEY}"
+	handle @studio_session {
+		reverse_proxy 127.0.0.1:8501 {
+			header_up -Authorization
+		}
+	}
+	handle {
+		route {
+			basic_auth {
+				silver-screen {$SILVER_SCREEN_PASSWORD_HASH}
+			}
+			header +Set-Cookie "silver_screen_session={$SILVER_SCREEN_SESSION_KEY}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=3600"
+			reverse_proxy 127.0.0.1:8501 {
+				header_up -Authorization
+			}
+		}
+	}
 }

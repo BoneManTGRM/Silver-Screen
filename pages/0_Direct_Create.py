@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from pathlib import Path
 from subprocess import SubprocessError
@@ -209,6 +210,21 @@ if generate and not active:
         st.error(str(exc))
         generate = False
 
+with st.expander("Recover a Modal render"):
+    with st.form("recover-modal-render"):
+        previous_id = st.text_input("ComfyUI prediction ID", placeholder="fc-…").strip()
+        recover = st.form_submit_button("Find render", disabled=active)
+    if recover:
+        if not re.fullmatch(r"fc-[0-9A-Z]{26}", previous_id):
+            st.error("Enter the full ComfyUI prediction ID shown after submitting the render.")
+        else:
+            job = {
+                "backend": "ComfyUI",
+                "model": IMAGE_MODEL if is_image else CLIP_MODEL,
+                "prediction": {"id": previous_id, "status": "processing"},
+            }
+            st.session_state["direct_create_job"] = job
+
 if job:
     prediction = job["prediction"]
     prediction_id = prediction.get("id")
@@ -218,9 +234,9 @@ if job:
         st.caption(f"{job_backend} prediction {prediction_id}")
 
     modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
-    check = False
+    check = recover and modal_job and prediction_id == previous_id
     if "data" not in job and (modal_job or not generate) and prediction.get("status") not in {"failed", "canceled"}:
-        check = st.button("Check existing prediction", key="direct-check-job")
+        check = st.button("Check existing prediction", key="direct-check-job") or check
     if "data" not in job and (check or (generate and not modal_job)):
         def save_prediction(update):
             job["prediction"] = update

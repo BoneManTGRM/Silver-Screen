@@ -10,6 +10,9 @@ if [[ -z ${SILVER_SCREEN_PASSWORD_HASH:-} ]]; then
 fi
 export SILVER_SCREEN_PASSWORD_HASH
 unset SILVER_SCREEN_PASSWORD
+# Safari can omit Basic Auth on WebSocket and media requests.
+SILVER_SCREEN_SESSION_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')
+export SILVER_SCREEN_SESSION_KEY
 streamlit run streamlit_app.py --server.headless=true --server.address=127.0.0.1 --server.port=8501 &
 studio_pid=$!
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
