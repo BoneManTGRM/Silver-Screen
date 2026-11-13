@@ -9,7 +9,6 @@ import urllib.request
 
 import modal
 
-ROOT = Path(__file__).resolve().parents[2]
 COMFY = Path('/opt/ComfyUI')
 COMMIT = '0228a9d73cd7c2daf8f61fe13d56b12efe307171'
 WAN = 'https://huggingface.co/Comfy-Org/Wan-2.2/resolve/main/split_files'
@@ -33,9 +32,12 @@ image = (
         *[f'mkdir -p {COMFY}/models/{Path(path).parent} && curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {url}'
           for path, url in MODELS.items()],
     )
-    .add_local_python_source('silver_screen')
-    .add_local_dir(ROOT / 'deploy/runpod/workflows', remote_path='/opt/workflows')
 )
+if modal.is_local():
+    workflows = Path(__file__).resolve().parents[2] / 'deploy/runpod/workflows'
+    image = image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
 app = modal.App('silver-screen-renderer')
 
 
