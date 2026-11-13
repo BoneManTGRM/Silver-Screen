@@ -34,6 +34,57 @@ from silver_screen.direct_generation import (
 from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
+
+def refresh_render(job, film_shots, *, wait=False):
+    def save_prediction(update):
+        job["prediction"] = update
+
+    prediction = job["prediction"]
+    is_image = job["model"] == IMAGE_MODEL
+    job.pop("check_error", None)
+    try:
+        client = (
+            make_comfyui_client(kind="image" if is_image else "video")
+            if job.get("backend") == "ComfyUI"
+            else ReplicateVideoClient(model=job["model"])
+        )
+        if wait:
+            prediction = client.wait(prediction, on_update=save_prediction)
+        elif prediction.get("status") not in TERMINAL_STATUSES:
+            prediction = client.get_prediction(prediction["id"])
+            save_prediction(prediction)
+        if prediction.get("status") == "succeeded":
+            if isinstance(client, ComfyUIClient):
+                job["data"] = verify_direct_output(client.read_output(prediction), image=is_image)
+            else:
+                job["data"] = read_direct_output(prediction, image=is_image)
+            if "started" in job:
+                job["elapsed_seconds"] = monotonic() - job["started"]
+            if number := job.get("shot_number"):
+                existing_size = sum(len(data) for key, data in film_shots.items() if key != number)
+                if existing_size + len(job["data"]) <= FILM_LIMIT:
+                    film_shots[number] = job["data"]
+                    st.session_state.pop("action_film_export", None)
+                else:
+                    job["film_warning"] = "This shot exceeds the film workspace. Download it separately."
+    except (VideoGenerationError, OSError, SubprocessError, Image.DecompressionBombError) as exc:
+        job["check_error"] = str(exc)
+
+
+@st.fragment(run_every=5)
+def show_modal_progress(job, film_shots):
+    st.info("Render submitted to Modal. Your result will appear here when it’s ready.")
+    if "started" in job:
+        minutes, seconds = divmod(int(monotonic() - job["started"]), 60)
+        st.caption(f"Time since submission · {minutes}:{seconds:02d}")
+    st.button("Check existing prediction", key="direct-check-job")
+    refresh_render(job, film_shots)
+    if job["prediction"].get("status") in TERMINAL_STATUSES:
+        st.rerun()
+    if error := job.get("check_error"):
+        st.warning(error)
+
+
 st.set_page_config(page_title="Direct Create | Silver-Screen", page_icon="🎨")
 st.title("Direct Create")
 st.caption("Send your prompt to the selected model exactly as entered.")
@@ -210,21 +261,6 @@ if generate and not active:
         st.error(str(exc))
         generate = False
 
-with st.expander("Recover a Modal render"):
-    with st.form("recover-modal-render"):
-        previous_id = st.text_input("ComfyUI prediction ID", placeholder="fc-…").strip()
-        recover = st.form_submit_button("Find render", disabled=active)
-    if recover:
-        if not re.fullmatch(r"fc-[0-9A-Z]{26}", previous_id):
-            st.error("Enter the full ComfyUI prediction ID shown after submitting the render.")
-        else:
-            job = {
-                "backend": "ComfyUI",
-                "model": IMAGE_MODEL if is_image else CLIP_MODEL,
-                "prediction": {"id": previous_id, "status": "processing"},
-            }
-            st.session_state["direct_create_job"] = job
-
 if job:
     prediction = job["prediction"]
     prediction_id = prediction.get("id")
@@ -234,52 +270,25 @@ if job:
         st.caption(f"{job_backend} prediction {prediction_id}")
 
     modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
-    check = recover and modal_job and prediction_id == previous_id
-    if "data" not in job and (modal_job or not generate) and prediction.get("status") not in {"failed", "canceled"}:
-        check = st.button("Check existing prediction", key="direct-check-job") or check
-    if "data" not in job and (check or (generate and not modal_job)):
-        def save_prediction(update):
-            job["prediction"] = update
-
-        try:
-            client = (
-                make_comfyui_client(kind="image" if job_is_image else "video")
-                if job_backend == "ComfyUI"
-                else ReplicateVideoClient(model=job["model"])
-            )
-            with st.spinner("Checking the GPU render…" if check else "Rendering on the selected backend…"):
-                if check and prediction_id and prediction.get("status") not in TERMINAL_STATUSES:
-                    prediction = client.get_prediction(prediction_id)
-                    save_prediction(prediction)
-                if not check:
-                    prediction = client.wait(prediction, on_update=save_prediction)
-            if prediction.get("status") == "succeeded":
-                with st.spinner("Verifying the downloaded media…"):
-                    if isinstance(client, ComfyUIClient):
-                        job["data"] = verify_direct_output(client.read_output(prediction), image=job_is_image)
-                    else:
-                        job["data"] = read_direct_output(prediction, image=job_is_image)
-                if "started" in job:
-                    job["elapsed_seconds"] = monotonic() - job["started"]
-                if number := job.get("shot_number"):
-                    existing_size = sum(len(data) for key, data in film_shots.items() if key != number)
-                    if existing_size + len(job["data"]) <= FILM_LIMIT:
-                        film_shots[number] = job["data"]
-                        st.session_state.pop("action_film_export", None)
-                    else:
-                        st.warning("This shot exceeds the film workspace. Download it separately.")
-        except (VideoGenerationError, OSError, SubprocessError, Image.DecompressionBombError) as exc:
-            if job["prediction"].get("status") not in {"failed", "canceled"}:
-                st.error(str(exc))
+    auto_check = modal_job and active
+    if auto_check:
+        show_modal_progress(job, film_shots)
+    elif "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
+        check = not generate and st.button("Check existing prediction", key="direct-check-job")
+        if check or generate:
+            with st.spinner("Checking the render…" if check else "Rendering on the selected backend…"):
+                refresh_render(job, film_shots, wait=generate)
+            if check and active and job["prediction"].get("status") in TERMINAL_STATUSES:
+                st.rerun()
     if job["prediction"].get("status") in {"failed", "canceled"}:
-        if check:
-            st.rerun()
         st.error(job["prediction"].get("error") or f"{job_backend} did not complete the prediction.")
-    elif "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
-        st.info("Render submitted. The worker may be starting up, queued, or generating frames. Use Check existing prediction to update this job.")
+    elif not auto_check and (error := job.get("check_error")):
+        st.error(error)
+    elif not auto_check and "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
+        st.info("Render submitted. Use Check existing prediction to update this job.")
     if "data" in job:
-        if modal_job and check:
-            st.rerun()
+        if warning := job.get("film_warning"):
+            st.warning(warning)
         if job_is_image:
             st.image(job["data"])
             st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
@@ -370,6 +379,21 @@ if job:
                         st.session_state["custom_film_clip_order"] = [*current_order, clip_id]
                     st.session_state.pop("custom_film_export", None)
                     st.success("Clip added to your custom film.")
+
+with st.expander("Recover a Modal render"):
+    with st.form("recover-modal-render"):
+        previous_id = st.text_input("ComfyUI prediction ID", placeholder="fc-…").strip()
+        recover = st.form_submit_button("Find render", disabled=active)
+    if recover:
+        if not re.fullmatch(r"fc-[0-9A-Z]{26}", previous_id):
+            st.error("Enter the full ComfyUI prediction ID shown after submitting the render.")
+        else:
+            st.session_state["direct_create_job"] = {
+                "backend": "ComfyUI",
+                "model": IMAGE_MODEL if is_image else CLIP_MODEL,
+                "prediction": {"id": previous_id, "status": "processing"},
+            }
+            st.rerun()
 
 if not is_image and (shot or film_shots):
     with st.expander("Export Last Train Out", expanded=bool(film_shots)):

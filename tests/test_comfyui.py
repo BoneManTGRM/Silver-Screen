@@ -4,6 +4,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -153,13 +154,17 @@ def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
     monkeypatch.setenv(WORKFLOW_ENV["video"], "video.json")
     prediction = {"id": "fc-test", "status": "starting"}
-    client = SimpleNamespace(
-        create_prediction=lambda *args, **kwargs: prediction,
-        get_prediction=lambda call_id: {
-            "id": call_id,
+    results = iter([
+        {"id": "fc-test", "status": "processing"},
+        {
+            "id": "fc-test",
             "status": "failed",
             "error": "ComfyUI did not start.",
         },
+    ])
+    client = SimpleNamespace(
+        create_prediction=lambda *args, **kwargs: prediction,
+        get_prediction=lambda call_id: next(results),
     )
     monkeypatch.setattr("silver_screen.comfyui.make_comfyui_client", lambda **kwargs: client)
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
@@ -171,6 +176,48 @@ def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     assert not app.exception
     assert app.error[0].value == "ComfyUI did not start."
     assert not app.button[0].disabled
+
+
+def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, monkeypatch):
+    _, _, media = comfy_server
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    submissions = []
+    checks = []
+
+    def spawn(kind, prompt, settings):
+        submissions.append((kind, prompt))
+        return SimpleNamespace(object_id="fc-test")
+
+    def get(*, timeout):
+        assert timeout == 0
+        checks.append(timeout)
+        if len(checks) == 1:
+            raise TimeoutError
+        return media["result.mp4"]
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Function=SimpleNamespace(from_name=lambda *args: SimpleNamespace(spawn=spawn)),
+        FunctionCall=SimpleNamespace(from_id=lambda call_id: SimpleNamespace(get=get)),
+    ))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    app.text_area[0].set_value("A paper pinwheel spins.")
+    app.button[0].click().run()
+    assert app.info[0].value.startswith("Render submitted to Modal.")
+    assert app.button[0].disabled
+
+    # AppTest has no browser timer, so simulate the scheduled refresh without clicking a widget.
+    app.run()
+    assert not app.exception
+    assert not app.error
+    assert not app.button[0].disabled
+    assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert app.get("video")
+    assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
+    assert submissions == [("video", "A paper pinwheel spins.")]
+    assert len(checks) == 2
 
 
 def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, monkeypatch, tmp_path):
