@@ -66,12 +66,28 @@ class ModalComfyUIClient(ComfyUIClient):
         except TimeoutError:
             return result
         except self.modal.exception.Error as exc:
+            errors = self.modal.exception
+            # A zero-time poll raises the base SDK timeout while work is pending.
+            # FunctionTimeoutError and OutputExpiredError are terminal subclasses.
+            if type(exc) is errors.TimeoutError:
+                return result
+            if isinstance(exc, (errors.OutputExpiredError, errors.NotFoundError)):
+                return dict(result, status='failed', error='Modal no longer has a result for this render ID.')
+            if isinstance(exc, errors.FunctionTimeoutError):
+                return dict(result, status='failed', error='The GPU worker reached its time limit. Try a shorter clip.')
+            if isinstance(exc, errors.AuthError):
+                raise PredictionPending('Railway could not authenticate to Modal. Fix the Modal credentials, then check this same render ID.') from exc
             if isinstance(exc, (
-                self.modal.exception.ConnectionError, self.modal.exception.ServiceError, self.modal.exception.AuthError,
+                errors.ConnectionError, errors.ServiceError,
             )):
                 raise PredictionPending(f'Modal could not check the existing render ({type(exc).__name__}).') from exc
             return dict(result, status='failed', error=f'Modal render failed ({type(exc).__name__}).')
         except Exception as exc:
+            detail = str(exc).casefold()
+            if 'out of memory' in detail or 'allocation on device' in detail:
+                return dict(result, status='failed', error='The GPU ran out of memory. Try a shorter clip or a smaller frame size.')
+            if detail == 'comfyui did not start on the gpu worker.':
+                return dict(result, status='failed', error='ComfyUI could not start on the Modal GPU worker.')
             return dict(result, status='failed', error=f'GPU render failed ({type(exc).__name__}).')
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_OUTPUT:
             return dict(result, status='failed', error='Modal returned an invalid media file.')

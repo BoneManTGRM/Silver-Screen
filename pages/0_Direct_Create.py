@@ -55,7 +55,15 @@ def refresh_render(job, film_shots, *, wait=False):
             save_prediction(prediction)
         if prediction.get("status") == "succeeded":
             if isinstance(client, ComfyUIClient):
-                job["data"] = verify_direct_output(client.read_output(prediction), image=is_image)
+                data = client.read_output(prediction)
+                if job.get("recovered"):
+                    is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
+                    job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
+                modal_clip = not is_image and str(prediction.get("id", "")).startswith("fc-")
+                job["data"] = verify_direct_output(
+                    data, image=is_image,
+                    expected_seconds=job.get("requested_seconds") if modal_clip else None,
+                )
             else:
                 job["data"] = read_direct_output(prediction, image=is_image)
             if "started" in job:
@@ -265,7 +273,6 @@ if job:
     prediction = job["prediction"]
     prediction_id = prediction.get("id")
     job_backend = job.get("backend", "Replicate")
-    job_is_image = job["model"] == IMAGE_MODEL
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
 
@@ -289,7 +296,7 @@ if job:
     if "data" in job:
         if warning := job.get("film_warning"):
             st.warning(warning)
-        if job_is_image:
+        if job["model"] == IMAGE_MODEL:
             st.image(job["data"])
             st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
         else:
@@ -391,6 +398,7 @@ with st.expander("Recover a Modal render"):
             st.session_state["direct_create_job"] = {
                 "backend": "ComfyUI",
                 "model": IMAGE_MODEL if is_image else CLIP_MODEL,
+                "recovered": True,
                 "prediction": {"id": previous_id, "status": "processing"},
             }
             st.rerun()

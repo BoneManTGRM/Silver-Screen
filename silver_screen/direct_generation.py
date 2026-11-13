@@ -81,7 +81,9 @@ def read_direct_output(prediction: dict[str, Any], *, image: bool) -> bytes:
     return verify_direct_output(data, image=image)
 
 
-def verify_direct_output(data: bytes, *, image: bool) -> bytes:
+def verify_direct_output(
+    data: bytes, *, image: bool, expected_seconds: int | None = None,
+) -> bytes:
     if not data or len(data) > OUTPUT_LIMIT:
         raise VideoGenerationError("The generated file is empty or exceeds the 64 MiB download limit.")
 
@@ -92,7 +94,13 @@ def verify_direct_output(data: bytes, *, image: bool) -> bytes:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
             path.write_bytes(data)
-            _verified_clip(path)
+            metadata = _verified_clip(path)
+            duration = metadata["durationSeconds"]
+            frame_seconds = 1 / (metadata["frameRate"] or 24)
+            if expected_seconds and duration is not None and duration + frame_seconds + 0.001 < expected_seconds:
+                raise VideoGenerationError(
+                    f"The render returned {duration:.1f} seconds of a {expected_seconds}-second clip."
+                )
     return data
 
 

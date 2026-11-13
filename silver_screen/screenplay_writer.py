@@ -263,6 +263,12 @@ def check_screenplay(job: dict[str, Any]) -> dict[str, Any] | None:
     except (modal.exception.ConnectionError, modal.exception.ServiceError) as exc:
         raise ScreenplayStatusUnavailable("Could not check Modal. The same script job will be checked again.") from exc
     except modal.exception.Error as exc:
+        if type(exc) is modal.exception.TimeoutError:
+            return None
+        if isinstance(exc, (modal.exception.OutputExpiredError, modal.exception.NotFoundError)):
+            raise ScreenplayError("Modal no longer has this draft. Write another version.") from exc
+        if isinstance(exc, modal.exception.FunctionTimeoutError):
+            raise ScreenplayError("The screenplay writer reached its time limit. Try a shorter brief.") from exc
         raise ScreenplayError(f"Modal could not write the screenplay ({type(exc).__name__}).") from exc
     except (RuntimeError, OSError, ValueError) as exc:
         raise ScreenplayError("The screenplay model could not complete this draft. Try another draft.") from exc

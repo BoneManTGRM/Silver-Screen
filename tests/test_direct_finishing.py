@@ -26,6 +26,13 @@ def _probe(path):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg and FFprobe")
 class DirectFinishingTests(unittest.TestCase):
+    def test_short_modal_result_is_not_offered_as_full_clip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "short.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=1", "-c:v", "libx264", video)
+            with self.assertRaisesRegex(VideoGenerationError, "1.0 seconds of a 4-second clip"):
+                verify_direct_output(video.read_bytes(), image=False, expected_seconds=4)
+
     def test_rejects_media_without_expected_track(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

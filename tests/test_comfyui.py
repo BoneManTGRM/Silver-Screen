@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import imageio_ffmpeg
 import pytest
+from modal import exception as modal_errors
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
@@ -194,12 +195,13 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
         assert timeout == 0
         checks.append(timeout)
         if len(checks) == 1:
-            raise TimeoutError
+            raise modal_errors.TimeoutError
         return media["result.mp4"]
 
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         Function=SimpleNamespace(from_name=lambda *args: SimpleNamespace(spawn=spawn)),
         FunctionCall=SimpleNamespace(from_id=lambda call_id: SimpleNamespace(get=get)),
+        exception=modal_errors,
     ))
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     app.radio[0].set_value("Video clip").run()
@@ -218,6 +220,33 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
     assert submissions == [("video", "A paper pinwheel spins.")]
     assert len(checks) == 2
+
+
+def test_recover_modal_clip_with_image_selected(comfy_server, monkeypatch):
+    _, _, media = comfy_server
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    call_id = "fc-" + "1" * 26
+    checked = []
+
+    def from_id(render_id):
+        checked.append(render_id)
+        return SimpleNamespace(get=lambda **kwargs: media["result.mp4"])
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=from_id), exception=modal_errors,
+    ))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    assert app.radio[0].value == "Image"
+    next(field for field in app.text_input if field.label == "ComfyUI prediction ID").set_value(call_id)
+    next(button for button in app.button if button.label == "Find render").click().run()
+    assert not app.exception
+    assert not app.error
+    assert app.get("video")
+    assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
+    assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert checked == [call_id]
 
 
 def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, monkeypatch, tmp_path):
