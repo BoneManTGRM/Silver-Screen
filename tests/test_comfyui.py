@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import imageio_ffmpeg
@@ -144,6 +145,32 @@ def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_serve
     assert b"fake-jpeg" in uploads[0]
     assert submissions["job-1"]["5"]["inputs"]["image"] == "silver/reference.jpg"
     assert submissions["job-1"]["2"]["inputs"]["length"] == 145
+
+
+def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    monkeypatch.setenv(WORKFLOW_ENV["video"], "video.json")
+    prediction = {"id": "fc-test", "status": "starting"}
+    client = SimpleNamespace(
+        create_prediction=lambda *args, **kwargs: prediction,
+        get_prediction=lambda call_id: {
+            "id": call_id,
+            "status": "failed",
+            "error": "ComfyUI did not start.",
+        },
+    )
+    monkeypatch.setattr("silver_screen.comfyui.make_comfyui_client", lambda **kwargs: client)
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    app.text_area[0].set_value("A paper pinwheel spins.")
+    app.button[0].click().run()
+    assert app.button[0].disabled
+    app.button(key="direct-check-job").click().run()
+    assert not app.exception
+    assert app.error[0].value == "ComfyUI did not start."
+    assert not app.button[0].disabled
 
 
 def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, monkeypatch, tmp_path):

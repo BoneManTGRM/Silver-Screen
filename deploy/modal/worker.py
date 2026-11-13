@@ -55,12 +55,15 @@ def render(kind: str, prompt: str, settings: dict) -> bytes:
         SILVER_SCREEN_COMFYUI_FPS='24',
     )
     with tempfile.TemporaryDirectory(prefix='silver-render-') as directory:
-        process = subprocess.Popen([
+        command = [
             'python', 'main.py', '--listen', '127.0.0.1', '--port', '8188',
             '--disable-auto-launch', '--disable-all-custom-nodes', '--disable-metadata',
-            '--input-directory', f'{directory}/input', '--output-directory', f'{directory}/output',
-            '--temp-directory', f'{directory}/temp', '--user-directory', f'{directory}/user',
-        ], cwd=COMFY)
+        ]
+        for name in ('input', 'output', 'temp', 'user'):
+            path = Path(directory) / name
+            path.mkdir()
+            command.extend((f'--{name}-directory', str(path)))
+        process = subprocess.Popen(command, cwd=COMFY)
         try:
             deadline = time.monotonic() + 90
             while True:

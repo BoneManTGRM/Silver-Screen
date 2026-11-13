@@ -272,6 +272,8 @@ if job:
             if job["prediction"].get("status") not in {"failed", "canceled"}:
                 st.error(str(exc))
     if job["prediction"].get("status") in {"failed", "canceled"}:
+        if check:
+            st.rerun()
         st.error(job["prediction"].get("error") or f"{job_backend} did not complete the prediction.")
     elif "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
         st.info("Render submitted. The worker may be starting up, queued, or generating frames. Use Check existing prediction to update this job.")
