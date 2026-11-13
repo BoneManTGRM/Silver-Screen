@@ -18,7 +18,7 @@ from silver_screen.ai_video import (
     image_to_data_url,
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
-from silver_screen.comfyui import ComfyUIClient, VIDEO_SIZES, comfyui_ready, video_controls_ready
+from silver_screen.comfyui import ComfyUIClient, VIDEO_SIZES, comfyui_ready, make_comfyui_client, video_controls_ready
 from silver_screen.direct_generation import (
     CLIP_MODEL,
     FILM_CANVASES,
@@ -184,7 +184,7 @@ if generate:
                 image = image_to_data_url(reference, max_bytes=1_500_000)
                 if reference is not None and not image:
                     raise VideoGenerationError("The starting image could not be prepared.")
-                prediction = ComfyUIClient(kind=workflow_kind).create_prediction(
+                prediction = make_comfyui_client(kind=workflow_kind).create_prediction(
                     prompt, seed=seed, duration=duration, image=image, **video_options,
                 )
             else:
@@ -223,7 +223,7 @@ if job:
 
         try:
             client = (
-                ComfyUIClient(kind="image" if job_is_image else "video")
+                make_comfyui_client(kind="image" if job_is_image else "video")
                 if job_backend == "ComfyUI"
                 else ReplicateVideoClient(model=job["model"])
             )

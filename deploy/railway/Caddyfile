@@ -1,0 +1,17 @@
+{
+    admin off
+    auto_https off
+}
+
+:{$PORT:8080} {
+    @health path /_stcore/health
+    handle @health {
+        reverse_proxy 127.0.0.1:8501
+    }
+    handle {
+        basic_auth {
+            silver-screen {$SILVER_SCREEN_PASSWORD_HASH}
+        }
+        reverse_proxy 127.0.0.1:8501
+    }
+}

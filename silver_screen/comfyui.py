@@ -37,7 +37,20 @@ def video_backend() -> str:
 
 
 def comfyui_ready(kind: str) -> bool:
-    return bool(os.getenv("SILVER_SCREEN_COMFYUI_URL", "").strip() and os.getenv(WORKFLOW_ENV[kind], "").strip())
+    from .modal_renderer import modal_configured
+
+    endpoint_ready = modal_configured() if os.getenv("SILVER_SCREEN_MODAL_APP") else bool(
+        os.getenv("SILVER_SCREEN_COMFYUI_URL", "").strip()
+    )
+    return endpoint_ready and bool(os.getenv(WORKFLOW_ENV[kind], "").strip())
+
+
+def make_comfyui_client(*, kind: str = "video") -> ComfyUIClient:
+    if os.getenv("SILVER_SCREEN_MODAL_APP"):
+        from .modal_renderer import ModalComfyUIClient
+
+        return ModalComfyUIClient(kind=kind)
+    return ComfyUIClient(kind=kind)
 
 
 def video_backend_ready(backend: str | None = None) -> bool:

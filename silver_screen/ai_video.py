@@ -1005,13 +1005,13 @@ def generate_ai_video(
         cost_per_second_usd=cost_per_second_usd,
         use_continuity_frames=use_continuity_frames,
     )
-    from .comfyui import ComfyUIClient, video_backend
+    from .comfyui import make_comfyui_client, video_backend
 
     saved_queue = load_video_queue(root) if resume else None
     backend = str(saved_queue.get("backend") or "replicate") if saved_queue else video_backend()
     initial_image_data = image_to_data_url(initial_image)
     if backend == "comfyui":
-        client = ComfyUIClient()
+        client = make_comfyui_client()
         if initial_image_data and not client.supports_reference:
             raise VideoGenerationError("Configure a ComfyUI reference workflow to use the supplied image.")
         if not client.supports_reference:

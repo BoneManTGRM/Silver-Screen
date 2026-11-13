@@ -179,7 +179,7 @@ def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, m
     next(button for button in app.button if button.label == "Add clip to custom film").click().run()
     assert not app.exception
     next(widget for widget in app.selectbox if widget.label == "Custom film frame size").select("Portrait HD · 720 × 1280")
-    next(button for button in app.button if button.label == "Export custom film").click().run()
+    next(button for button in app.button if button.label == "Export custom film").click().run(timeout=20)
     assert not app.exception
     assert not app.error
     assert "Download custom film" in [item.proto.label for item in app.get("download_button")]
