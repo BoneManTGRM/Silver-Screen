@@ -27,7 +27,7 @@ def install_visual_quality_supervisor() -> None:
     if getattr(pipeline, "_visual_quality_supervisor_installed", False):
         return
 
-    original_process = ai_video._process_prediction
+    original_verify = ai_video._verify_prediction_output
     previous_scene_prompt = ai_video.scene_prompt
 
     def scene_prompt(
@@ -44,22 +44,16 @@ def install_visual_quality_supervisor() -> None:
             prompt = f"{prompt} {directive}"[:3500]
         return prompt
 
-    def process_prediction(**kwargs: Any) -> None:
-        original_process(**kwargs)
+    def verify_prediction_output(client, prediction, queue, root, shot, config) -> None:
+        original_verify(client, prediction, queue, root, shot, config)
         if not _enabled():
             return
-        shot = kwargs.get("shot") or {}
-        root = Path(kwargs.get("root")).resolve()
-        path_value = shot.get("path")
-        if not path_value:
-            return
-        clip = Path(str(path_value))
-        if not clip.is_absolute():
-            clip = (root / clip).resolve()
+        clip = root / Path(shot["path"])
         try:
             report = analyze_clip(
                 clip,
                 work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
+                config={"singleShot": queue.get("referenceMode") == "product"},
             )
         except VisualQualityError as exc:
             # Synthetic test artifacts, constrained hosts, or unavailable FFmpeg
@@ -85,6 +79,7 @@ def install_visual_quality_supervisor() -> None:
         shot["path"] = None
         shot["verifiedDurationSeconds"] = 0.0
         shot["verification"] = {}
+        shot.pop("completedAt", None)
         shot["lastError"] = (
             "Visual Quality Supervisor rejected the generated clip: "
             + "; ".join(str(item.get("message") or "") for item in report.get("findings") or [])
@@ -92,7 +87,7 @@ def install_visual_quality_supervisor() -> None:
         raise ai_video.VideoGenerationError(shot["lastError"])
 
     ai_video.scene_prompt = scene_prompt
-    ai_video._process_prediction = process_prediction
+    ai_video._verify_prediction_output = verify_prediction_output
     pipeline._visual_quality_supervisor_installed = True
 
 

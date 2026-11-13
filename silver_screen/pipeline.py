@@ -381,6 +381,7 @@ def run_pipeline(
     video_continuous: bool = False,
     video_use_continuity: bool | None = None,
     progress: ProgressCallback | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Run validation, story generation, TGRM, video, and persistence."""
 
@@ -414,7 +415,7 @@ def run_pipeline(
         "videoContinuous": video_continuous,
         "videoUseContinuity": video_use_continuity,
     }
-    run_id = create_run_id()
+    run_id = run_id or create_run_id()
     workspace: RunWorkspace | None = None
     warnings: list[str] = []
     timings: dict[str, float] = {}
@@ -456,6 +457,9 @@ def run_pipeline(
             scars=normalized["scars"],
             seed=normalized["seed"],
             cast=normalized["cast"],
+            creative_direction=normalized.get("creativeDirection"),
+            authored_script=normalized.get("authoredScript"),
+            shot_direction=normalized.get("shotDirection"),
         )
         _timed_stage(timings, "generationSeconds", started)
 
@@ -475,6 +479,34 @@ def run_pipeline(
         )
         repaired_state = tgrm_result.get("state") or film
         _timed_stage(timings, "repairSeconds", started)
+        if normalized.get("screenplayWriter") == "ad":
+            repaired_state["screenplayWriter"] = "ad"
+
+        result: dict[str, Any] = {
+            "status": "running",
+            "run": {
+                "id": run_id,
+                "workspace": str(workspace.path) if workspace else None,
+                "persisted": bool(workspace),
+                "briefFingerprint": brief_fingerprint(normalized),
+            },
+            "brief": normalized,
+            "options": options,
+            "film": film,
+            "tgrm": tgrm_result,
+            "state": repaired_state,
+            "metrics": tgrm_result.get("metrics", {}),
+            "msil": tgrm_result.get("msil", {}),
+            "log": tgrm_result.get("log", []),
+            "scars": tgrm_result.get("scars", []),
+            "remainingFractures": tgrm_result.get("remainingFractures", []),
+            "warnings": warnings,
+            "timings": timings,
+            "artifacts": {},
+        }
+        if workspace and render_media and video_mode == "ai-video":
+            # Keep the approved story available while its first prediction is in flight.
+            workspace.write_json("result.json", result)
 
         started = time.perf_counter()
         if render_media:
@@ -548,35 +580,11 @@ def run_pipeline(
         timings["totalSeconds"] = round(
             time.perf_counter() - pipeline_started, 4
         )
-        result: dict[str, Any] = {
-            "status": status,
-            "run": {
-                "id": run_id,
-                "workspace": (
-                    str(workspace.path) if workspace else None
-                ),
-                "persisted": bool(workspace),
-                "briefFingerprint": brief_fingerprint(normalized),
-            },
-            "brief": normalized,
-            "options": options,
-            "film": film,
-            "tgrm": tgrm_result,
-            "state": repaired_state,
-            "media": media,
-            "metrics": tgrm_result.get("metrics", {}),
-            "msil": tgrm_result.get("msil", {}),
-            "videoMetrics": media.get("metrics") or {},
-            "videoMsil": media.get("msil") or {},
-            "log": tgrm_result.get("log", []),
-            "scars": tgrm_result.get("scars", []),
-            "remainingFractures": tgrm_result.get(
-                "remainingFractures", []
-            ),
-            "warnings": warnings,
-            "timings": timings,
-            "artifacts": {},
-        }
+        result.update(
+            status=status, media=media,
+            videoMetrics=media.get("metrics") or {},
+            videoMsil=media.get("msil") or {},
+        )
         if workspace:
             _notify(
                 progress,
@@ -634,6 +642,9 @@ def resume_video_run(
         raise PipelineError(
             "The run has no persisted film state", run_id=run_id
         )
+    is_ad = (result.get("brief") or {}).get("screenplayWriter") == "ad"
+    if is_ad:
+        state["screenplayWriter"] = "ad"
     started = time.perf_counter()
     workspace.update(
         status="running",
@@ -681,9 +692,10 @@ def resume_video_run(
             video_continuous=continuous,
             video_resume=True,
             video_use_continuity=(
-                use_continuity
-                if use_continuity is not None
-                else options.get("videoUseContinuity")
+                False if is_ad else (
+                    use_continuity if use_continuity is not None
+                    else options.get("videoUseContinuity")
+                )
             ),
             video_progress=_video_progress(progress, workspace),
         )

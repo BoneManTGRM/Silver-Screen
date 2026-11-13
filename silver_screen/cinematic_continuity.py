@@ -35,6 +35,23 @@ def _transition_map(plan: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any
     }
 
 
+def _assemble_cut(
+    clips: list[Path],
+    destination: Path,
+    transitions: list[dict[str, Any]],
+    cfg: Any,
+    ai_video: Any,
+) -> dict[str, Any]:
+    if cfg.mode == "off":
+        ai_video.assemble_clips(clips, destination)
+        return {"path": str(destination), "mode": "hard_cuts"}
+    try:
+        return {**assemble(clips, destination, transitions, cfg), "mode": "cinematic"}
+    except Exception as exc:
+        ai_video.assemble_clips(clips, destination)
+        return {"path": str(destination), "mode": "safe_concat_fallback", "error": str(exc)}
+
+
 def _assemble_verified(
     queue: dict[str, Any],
     root: Path,
@@ -43,7 +60,8 @@ def _assemble_verified(
     ai_video: Any,
     mode: str = "auto",
 ) -> dict[str, Any]:
-    cfg = settings(mode)
+    is_ad = queue.get("referenceMode") == "product"
+    cfg = settings("off", analyze_frames=False) if is_ad else settings(mode)
     shots = verified_shots(queue)
     if not shots:
         return {}
@@ -74,17 +92,8 @@ def _assemble_verified(
             for a, b in zip(chapter_shots, chapter_shots[1:])
         ]
         target = chapter_dir / f"chapter_{chapter:03d}_cinematic.mp4"
-        try:
-            report = assemble(clips, target, transitions, cfg)
-            report["mode"] = "cinematic"
-        except Exception as exc:
-            fallbacks += 1
-            ai_video.assemble_clips(clips, target)
-            report = {
-                "path": str(target),
-                "mode": "safe_concat_fallback",
-                "error": str(exc),
-            }
+        report = _assemble_cut(clips, target, transitions, cfg, ai_video)
+        fallbacks += report["mode"] == "safe_concat_fallback"
         chapter_paths.append(target)
         chapter_reports.append({"chapter": chapter, "clips": len(clips), **report})
 
@@ -101,17 +110,8 @@ def _assemble_verified(
     final = root / (
         "final_cinematic_film.mp4" if complete else "partial_cinematic_film.mp4"
     )
-    try:
-        final_report = assemble(chapter_paths, final, chapter_transitions, cfg)
-        final_report["mode"] = "cinematic"
-    except Exception as exc:
-        fallbacks += 1
-        ai_video.assemble_clips(chapter_paths, final)
-        final_report = {
-            "path": str(final),
-            "mode": "safe_concat_fallback",
-            "error": str(exc),
-        }
+    final_report = _assemble_cut(chapter_paths, final, chapter_transitions, cfg, ai_video)
+    fallbacks += final_report["mode"] == "safe_concat_fallback"
 
     transition_paths = paths(root)
     key = "finalFilm" if complete else "partialFilm"
@@ -122,7 +122,7 @@ def _assemble_verified(
         "transitionRuntime": relative(root, transition_paths["runtime"]),
     }
     plan["assembly"] = {
-        "mode": "cinematic" if fallbacks == 0 else "cinematic_with_safe_fallback",
+        "mode": final_report["mode"] if fallbacks == 0 else "cinematic_with_safe_fallback",
         "fallbackCount": fallbacks,
         "chapterReports": chapter_reports,
         "finalReport": final_report,
@@ -329,7 +329,7 @@ def rebuild_run_transitions(
             "transition_runtime_path": str(paths(root)["runtime"]),
         }
     )
-    final_relative = artifacts.get("finalFilm") or artifacts.get("partialFilm")
+    final_relative = artifacts.get("finalFilm" if complete else "partialFilm")
     final = str((root / final_relative).resolve()) if final_relative else None
     media["hero_path"] = final
     media["final_video_path"] = final if complete else None

@@ -463,6 +463,7 @@ def install_autonomous_closed_loop() -> None:
         voices: list[Any] | None = None,
         output_root: str = "runs",
         progress=None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         token = _PLAN_CONTEXT.set(deepcopy(plan))
         try:
@@ -472,6 +473,7 @@ def install_autonomous_closed_loop() -> None:
                 voices=voices,
                 output_root=output_root,
                 progress=progress,
+                run_id=run_id,
             )
         finally:
             _PLAN_CONTEXT.reset(token)
@@ -495,22 +497,20 @@ def install_autonomous_closed_loop() -> None:
             config=cfg,
             project_id=project_id,
         )
-
-        # Run local finishing first but defer paid speech until picture lock.
-        first_cfg = {**cfg, "finishAudio": False, "semanticQa": False}
-        finished = original_finish(
-            run_id,
-            project_id=project_id,
-            config=first_cfg,
-            output_root=output_root,
-        )
-        repair_history: list[dict[str, Any]] = []
-        semantic: dict[str, Any] | None = None
         use_semantic = bool(cfg.get("semanticQa")) and bool(
             (cfg.get("semantic") or {}).get("useOpenAI")
         )
-        result = load_run(run_id, output_root)
+        finished: dict[str, Any] = {}
+        repair_history: list[dict[str, Any]] = []
+        semantic: dict[str, Any] | None = None
         if use_semantic:
+            # Defer paid speech until the semantic retake process locks the picture.
+            finished = original_finish(
+                run_id,
+                project_id=project_id,
+                config={**cfg, "finishAudio": False, "semanticQa": False},
+                output_root=output_root,
+            )
             try:
                 semantic = inspect_run_semantics(
                     run_id,
@@ -541,7 +541,7 @@ def install_autonomous_closed_loop() -> None:
         if (
             auto_repair
             and semantic
-            and str(result.get("status") or "") == "complete"
+            and (finished.get("result") or {}).get("status") == "complete"
             and max_repairs > 0
         ):
             for _ in range(max_repairs):

@@ -50,6 +50,8 @@ def install_gentler_transition_smoothing() -> None:
         cfg,
     ) -> dict[str, Any]:
         item = original_analyze(previous, current, root, cfg)
+        if not cfg.enabled:
+            return item
         relation = str(item.get("relation") or "")
         score = float(item.get("rawMatchScore", 0) or 0)
         seconds = float(item.get("durationSeconds", 0) or 0)

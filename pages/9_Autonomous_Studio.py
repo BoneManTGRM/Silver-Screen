@@ -13,12 +13,13 @@ from silver_screen.cast_library import cast_library_root, saved_cast_photos
 from silver_screen.comfyui import comfyui_ready, video_backend, video_backend_ready
 
 from silver_screen.autonomous_studio import (
-    QUALITY_PROFILES, continue_autonomous_production,
-    prepare_autonomous_plan, start_autonomous_production,
+    QUALITY_PROFILES, active_production, continue_autonomous_production,
+    enqueue_production, prepare_autonomous_plan, start_autonomous_production,
 )
-from silver_screen.runtime import list_resumable_runs
+from silver_screen.runtime import create_run_id, list_resumable_runs, load_run_manifest, list_runs
 from silver_screen.science import GENRES, SCIENCE, TONES
 from silver_screen.screenplay_writer import SCREENPLAY_LENGTHS
+from silver_screen.video_runtime import load_video_queue
 from silver_screen.voice_providers import provider_capabilities
 
 st.set_page_config(page_title="Silver-Screen | Autonomous Studio", page_icon="🎬", layout="wide")
@@ -28,14 +29,54 @@ video_ready = video_backend_ready()
 openai_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
 voice_caps = provider_capabilities()
 draft = st.session_state.get("screenplay-production")
+render_task = st.session_state.get("screenplay-render-task")
+
+if render_task and render_task[1].done():
+    _, future = st.session_state.pop("screenplay-render-task")
+    try:
+        result = future.result()
+        st.session_state["autonomous_result"] = result
+        if not result.get("runId"):
+            st.session_state.pop("screenplay-production-started", None)
+    except Exception as exc:
+        st.session_state.pop("screenplay-production-started", None)
+        st.error(str(exc))
+    render_task = None
+
+
+@st.fragment(run_every=3)
+def show_production_progress(run_id, future):
+    if future.done():
+        st.rerun()
+    st.info("Rendering your production. Each completed shot is saved as it finishes.")
+    try:
+        manifest = load_run_manifest(run_id)
+    except FileNotFoundError:
+        st.caption("Waiting to start.")
+        return
+    queue = load_video_queue(Path(manifest["workspace"]) / "media") or {}
+    metrics = queue.get("metrics") or {}
+    completed, total = metrics.get("verifiedShots", 0), metrics.get("plannedShots", 0)
+    if total:
+        text = f"{completed} of {total} shots finished"
+        if completed == total:
+            text = "Assembling the final MP4"
+        st.progress(completed / total, text=text)
+        st.caption(f"GPU requests used · {metrics.get('providerCalls', 0)}")
+    else:
+        st.progress(int(manifest.get("progress") or 0), text="Preparing the shot plan")
+
 
 if draft:
     is_ad = draft["kind"] == "ad"
-    started = st.session_state.get("screenplay-production-started") == draft["seed"]
+    started = st.session_state.get("screenplay-production-started") == draft["seed"] or bool(render_task)
     st.header(draft["title"])
     st.caption(f"{draft['seconds']} seconds planned · five clips · {video_backend()} video")
     st.text(draft["premise"])
-    st.text_area("Screenplay", draft["authoredScript"], height=310, disabled=True)
+    if product := draft.get("adProduct"):
+        st.text(" · ".join(part for part in (product["name"], product["appearance"]) if part))
+    with st.expander("Screenplay"):
+        st.text_area("Approved script", draft["authoredScript"], height=310, disabled=True)
     root = cast_library_root()
     photos = saved_cast_photos(root) if root else {}
     lead_photo = photos.get("Your photo") if st.session_state.get("screenplay-production-photo") else None
@@ -45,7 +86,10 @@ if draft:
             upload = st.file_uploader(
                 "Product photo (optional)" if is_ad else "Lead photo (optional)",
                 type=["png", "jpg", "jpeg", "webp"],
-                help="The video model uses this image as the starting frame.",
+                help=(
+                    "Use a tightly cropped photo of the product you want to see in the ad."
+                    if is_ad else "The video model uses this image as the first frame."
+                ),
             )
             if lead_photo:
                 st.caption("Your saved lead photo is selected. You can replace it by uploading another photo.")
@@ -54,7 +98,10 @@ if draft:
                 if is_ad else "Everyone shown in the photo agreed to this scene and its audience."
             )
             call_budget = st.number_input("Maximum video requests", min_value=5, max_value=15, value=5)
-            render_draft = st.form_submit_button("Render first shot", type="primary", disabled=not video_ready)
+            render_draft = st.form_submit_button(
+                "Render advertisement" if is_ad else "Render movie",
+                type="primary", disabled=not video_ready,
+            )
     if not video_ready:
         st.error(f"Configure the {video_backend()} video backend to render this draft.")
     if st.button("Return to the writer"):
@@ -70,25 +117,26 @@ if draft:
         elif reference is not None and not image_to_data_url(reference):
             st.error("This photo could not be opened. Choose a readable JPEG, PNG, or WebP photo.")
         else:
-            def progress(stage: str, percent: int, message: str) -> None:
-                bar.progress(max(0, min(100, percent)), text=message)
-
-            bar = st.progress(0, text="Planning five shots")
             try:
-                plan = prepare_autonomous_plan(
-                    draft, target_runtime_seconds=draft["seconds"],
-                    clip_duration_seconds=SCREENPLAY_LENGTHS[draft["seconds"]], max_shots=5,
-                    config={"qualityProfile": "cinematic", "continuous": False, "batchSize": 1,
-                            "maxProviderCalls": int(call_budget), "semanticQa": False,
-                            "transitionMode": "off"},
-                )
+                with st.spinner("Preparing the five-shot plan…"):
+                    plan = prepare_autonomous_plan(
+                        draft, target_runtime_seconds=draft["seconds"],
+                        clip_duration_seconds=SCREENPLAY_LENGTHS[draft["seconds"]], max_shots=5,
+                        config={"qualityProfile": "cinematic", "continuous": True, "batchSize": 5,
+                                "maxProviderCalls": int(call_budget), "semanticQa": False,
+                                "transitionMode": "off"},
+                    )
+                run_id = create_run_id()
                 st.session_state["autonomous_plan"] = plan
-                st.session_state["autonomous_result"] = start_autonomous_production(
-                    plan, images=[reference] if reference is not None else [], progress=progress,
+                future = enqueue_production(
+                    run_id, lambda: start_autonomous_production(
+                        plan, images=[reference] if reference is not None else [], run_id=run_id,
+                    ),
                 )
-                if st.session_state["autonomous_result"].get("runId"):
-                    st.session_state["screenplay-production-started"] = draft["seed"]
-                    st.rerun()
+                st.session_state["screenplay-render-task"] = (run_id, future)
+                st.session_state["screenplay-production-started"] = draft["seed"]
+                st.session_state.pop("autonomous_result", None)
+                st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 else:
@@ -138,9 +186,18 @@ with st.sidebar:
         make_clicked = st.button("MAKE MY MOVIE", type="primary", use_container_width=True)
 
     st.divider()
-    st.header("Continue a saved job")
+    st.header("Saved productions")
     resumable = list_resumable_runs("runs", 100)
-    jobs = [item for item in resumable if (Path(str(item.get("workspace") or "")) / "autonomous_job.json").exists()]
+    jobs = [
+        item for item in resumable
+        if (Path(item["workspace"]) / "autonomous_job.json").exists()
+        or (item.get("brief") or {}).get("screenplayWriter")
+    ]
+    jobs.extend(
+        item for item in list_runs("runs", 100)
+        if item.get("status") == "complete"
+        and (item.get("brief") or {}).get("screenplayWriter")
+    )
     run_map = {f"{item.get('runId')} | {item.get('status')} | {item.get('title') or (item.get('brief') or {}).get('title') or 'Untitled'}": item for item in jobs}
     selected_run = st.selectbox("Saved autonomous checkpoint", list(run_map) or ["No autonomous checkpoints"], disabled=not run_map)
 
@@ -198,59 +255,69 @@ if make_clicked:
             st.session_state["autonomous_status"].update(label="Production stopped with accepted work preserved", state="error")
             st.error(str(exc))
 
+if render_task:
+    show_production_progress(*render_task)
+
 if run_map:
-    continue_clicked = st.button("Continue selected job", type="primary", use_container_width=True)
+    saved = run_map[selected_run]
+    continue_clicked = st.button(
+        "Open finished production" if saved.get("status") == "complete" else "Continue selected job",
+        type="primary", disabled=bool(render_task),
+    )
 else:
     continue_clicked = False
 
 if continue_clicked:
     try:
+        run_id = str(run_map[selected_run]["runId"])
+        if (run_map[selected_run].get("brief") or {}).get("screenplayWriter"):
+            future = active_production(run_id) or enqueue_production(
+                run_id, lambda: continue_autonomous_production(run_id),
+            )
+            st.session_state["screenplay-render-task"] = (run_id, future)
+            st.session_state.pop("autonomous_plan", None)
+            st.session_state.pop("autonomous_result", None)
+            st.rerun()
         with st.spinner("Continuing the durable production and rerunning finishing..."):
             st.session_state["autonomous_result"] = continue_autonomous_production(
-                str(run_map[selected_run].get("runId") or ""), output_root="runs",
+                run_id, output_root="runs",
             )
         st.rerun()
     except Exception as exc:
         st.error(str(exc))
-
-plan = st.session_state.get("autonomous_plan")
-if plan:
-    st.header("Approved production contract")
-    render, cost = plan.get("renderPlan") or {}, plan.get("costForecast") or {}
-    columns = st.columns(6)
-    columns[0].metric("Planned clips", render.get("plannedShots", 0))
-    columns[1].metric("Runtime", f"{render.get('plannedRuntimeSeconds', 0)}s")
-    columns[2].metric("Screenplay score", (plan.get("screenplayAudit") or {}).get("score", 0))
-    columns[3].metric("Prompt floor", (plan.get("promptGate") or {}).get("score", 0))
-    columns[4].metric("Authorized calls", cost.get("authorizedCalls", 0))
-    columns[5].metric("Ledger", str((plan.get("promptLedger") or {}).get("ledgerHash") or "")[:10])
-    with st.expander("Binding screenplay"):
-        st.text_area("Screenplay", str(plan.get("screenplay") or ""), height=480, disabled=True, key="approved-screenplay")
-    with st.expander("Shot prompts"):
-        for shot in plan.get("prompts") or []:
-            st.text(f"Clip {shot['order']}")
-            st.code(shot["fallbackPrompt"], language=None)
-    with st.expander("Model-independent shot routing"):
-        st.dataframe([{"Clip": item.get("order"), "Task": item.get("task"), "Recommended": item.get("recommendedModel"), "Execution": item.get("executionModel"), "Fallback": item.get("fallbackModel"), "Reason": item.get("reason")} for item in (plan.get("modelRoutes") or {}).get("routes") or []], use_container_width=True, hide_index=True)
 
 output = st.session_state.get("autonomous_result")
 if output:
     result, quality = output.get("result") or {}, output.get("quality") or {}
     media, metrics = result.get("media") or {}, (result.get("media") or {}).get("metrics") or {}
     status = str(result.get("status") or (output.get("job") or {}).get("status") or "unknown")
-    st.header("Autonomous result")
-    short_video = ((output.get("job") or {}).get("artifacts") or {}).get("shortVideo")
     writer_kind = (result.get("brief") or {}).get("screenplayWriter")
+    st.header("Advertisement" if writer_kind == "ad" else "Production result")
+    short_path = ((output.get("job") or {}).get("artifacts") or {}).get("shortVideo")
+    short_video = Path(short_path) if short_path and Path(short_path).is_file() else None
+    audio = output.get("audio") or {}
+    playable = next((
+        Path(path) for path in (
+            short_video, audio.get("captioned_video_path"), audio.get("final_video_path"),
+            media.get("final_video_path"), media.get("partial_video_path"), media.get("hero_path"),
+        ) if path and Path(path).is_file()
+    ), None)
     if status == "complete":
         if writer_kind and not short_video:
-            st.warning("All five shots rendered. See Finishing notes for the export status.")
-        else:
+            st.warning("The final export needs attention. Open the saved production to retry the export.")
+        elif playable:
             st.success("Your MP4 is ready.")
+        else:
+            st.error("The saved MP4 is unavailable.")
     else:
         if media.get("stopReason") == "prediction_pending":
             st.info("A render is still pending. Continue the saved job to check it.")
-        elif media.get("stopReason") in {"provider_call_budget_exhausted", "shot_retry_budget_exhausted"}:
-            st.warning("The render reached its request limit. You can download any completed shots below.")
+        elif media.get("stopReason") == "provider_call_budget_exhausted":
+            st.warning("The render used all approved GPU requests. The preview contains only completed shots.")
+        elif media.get("stopReason") == "shot_retry_budget_exhausted":
+            st.warning("A shot failed its render or quality checks and used its approved retries.")
+        elif media.get("stopReason") == "assembly_failed":
+            st.error("The completed shots could not be joined. Continue the saved job to retry assembly.")
         else:
             st.warning("Checkpoint saved. Continue the existing job to render the next shot.")
         queue = media.get("queue") or {}
@@ -264,11 +331,18 @@ if output:
     columns[3].metric("Quality", f"{float(quality.get('scorePercent', 0) or 0):.1f}")
     columns[4].metric("Visual", f"{float(quality.get('visualAverage', 0) or 0) * 100:.1f}")
     columns[5].metric("Semantic", "Used" if quality.get("semanticAvailable") else "Local only")
-    playable = short_video or (output.get("audio") or {}).get("captioned_video_path") or (output.get("audio") or {}).get("final_video_path") or media.get("final_video_path") or media.get("partial_video_path") or media.get("hero_path")
-    if playable and Path(str(playable)).exists():
+    if playable:
+        if status != "complete":
+            st.caption(f"Partial preview · {metrics.get('verifiedShots', 0)} of {metrics.get('plannedShots', 0)} shots")
+            download_label = "Download preview"
+        elif writer_kind == "ad" and short_video:
+            download_label = "Download advertisement"
+        elif writer_kind and not short_video:
+            download_label = "Download assembled footage"
+        else:
+            download_label = "Download MP4"
         st.video(str(playable))
-        download_label = "Download advertisement" if writer_kind == "ad" and short_video else "Download MP4" if status == "complete" else "Download preview"
-        st.download_button(download_label, Path(str(playable)).read_bytes(), file_name=Path(str(playable)).name, mime="video/mp4", use_container_width=True)
+        st.download_button(download_label, playable.read_bytes(), file_name=playable.name, mime="video/mp4", use_container_width=True)
     if output.get("errors"):
         with st.expander("Finishing notes"):
             for item in output["errors"]:
@@ -287,3 +361,17 @@ if output:
         st.json(output.get("edl") or {})
 elif not draft:
     st.info("Enter an idea in the sidebar, then choose Make my movie.")
+
+plan = st.session_state.get("autonomous_plan")
+if plan:
+    with st.expander("Approved production plan"):
+        render, cost = plan.get("renderPlan") or {}, plan.get("costForecast") or {}
+        st.caption(
+            f"{render.get('plannedShots', 0)} clips · {render.get('plannedRuntimeSeconds', 0)}s"
+            f" · {cost.get('authorizedCalls', 0)} authorized GPU requests"
+        )
+        st.text_area("Binding screenplay", str(plan.get("screenplay") or ""), height=310, disabled=True)
+        for shot in plan.get("prompts") or []:
+            st.text(f"Clip {shot['order']}")
+            st.code(shot["fallbackPrompt"], language=None)
+        st.dataframe([{"Clip": item.get("order"), "Task": item.get("task"), "Recommended": item.get("recommendedModel"), "Execution": item.get("executionModel"), "Fallback": item.get("fallbackModel"), "Reason": item.get("reason")} for item in (plan.get("modelRoutes") or {}).get("routes") or []], use_container_width=True, hide_index=True)

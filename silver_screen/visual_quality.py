@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageFilter
 
+from .media_probe import probe_media
 from .runtime import RunWorkspace, load_run, utc_now
 from .video_runtime import load_video_queue, record_video_event, save_video_queue, update_video_metrics
 
@@ -58,7 +59,7 @@ def _ffmpeg() -> str | None:
         return None
 
 
-def _sample_frames(clip: Path, destination: Path, count: int) -> list[Path]:
+def _sample_frames(clip: Path, destination: Path, count: int, seconds: float) -> list[Path]:
     ffmpeg = _ffmpeg()
     if not ffmpeg:
         raise VisualQualityError("FFmpeg is required for visual-quality inspection")
@@ -71,7 +72,7 @@ def _sample_frames(clip: Path, destination: Path, count: int) -> list[Path]:
         "-i",
         str(clip),
         "-vf",
-        f"fps={max(1, count)}/8,scale=384:-2",
+        f"fps={count}/{seconds:.5f},scale=384:-2",
         "-frames:v",
         str(count),
         "-q:v",
@@ -83,6 +84,21 @@ def _sample_frames(clip: Path, destination: Path, count: int) -> list[Path]:
     if completed.returncode != 0 or len(frames) < 2:
         raise VisualQualityError(f"Could not sample clip frames: {completed.stderr[-900:]}")
     return frames
+
+
+def _has_unplanned_cut(clip: Path) -> bool:
+    ffmpeg = _ffmpeg()
+    if not ffmpeg:
+        raise VisualQualityError("FFmpeg is required to inspect advertisement shots.")
+    command = [
+        ffmpeg, "-v", "error", "-i", str(clip), "-an", "-sn",
+        "-vf", r"scale=192:-2,select=gt(scene\,0.55),metadata=print:key=lavfi.scene_score:file=-",
+        "-f", "null", "-",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=45)
+    if completed.returncode != 0:
+        raise VisualQualityError("Could not check the advertisement shot for abrupt cuts.")
+    return "lavfi.scene_score=" in completed.stdout
 
 
 def _array(path: Path) -> np.ndarray:
@@ -136,7 +152,8 @@ def analyze_clip(
     if not path.exists():
         raise VisualQualityError(f"Clip does not exist: {path}")
     root = Path(work_dir).resolve() if work_dir else path.parent / ".visual_quality" / path.stem
-    frames = _sample_frames(path, root, int(cfg["sampleFrames"]))
+    seconds = float(probe_media(path).get("duration") or 8.0)
+    frames = _sample_frames(path, root, int(cfg["sampleFrames"]), max(seconds, 0.1))
     arrays = [_array(frame) for frame in frames]
     sharpness_values = [_sharpness(item) for item in arrays]
     luminance = [float(item.mean()) for item in arrays]
@@ -184,6 +201,9 @@ def analyze_clip(
         add("appearance_drift", "high", "Broad appearance statistics drift from the authorized reference pack.", "Re-anchor the authorized identity, wardrobe palette, age appearance, and body proportions.")
     if internal_consistency < 0.62:
         add("intra_clip_drift", "high", "The clip changes appearance too strongly within a single shot.", "Keep one actor, wardrobe state, environment, lens, and lighting setup throughout the shot.")
+    if cfg.get("singleShot") and _has_unplanned_cut(path):
+        add("unexpected_cut", "high", "The product shot makes an abrupt visual jump.",
+            "Keep the product and setting stable during one continuous camera move.")
 
     hard_failure = any(item["severity"] == "high" for item in findings) or score < float(cfg["hardRejectScore"])
     accepted = not hard_failure and score >= float(cfg["acceptScore"])
@@ -246,6 +266,7 @@ def inspect_run(run_id: str, *, output_root: str = "runs") -> dict[str, Any]:
             clip,
             work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
             reference_paths=[str(path) for path in references],
+            config={"singleShot": queue.get("referenceMode") == "product"},
         )
         report["shotId"] = shot.get("id")
         report["order"] = shot.get("order")

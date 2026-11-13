@@ -80,6 +80,8 @@ if error := st.session_state.pop("screenplay-writer-error", None):
 if draft:
     st.header(draft["title"])
     st.text(draft["premise"])
+    if product := draft.get("adProduct"):
+        st.text(" · ".join(part for part in (product["name"], product["appearance"]) if part))
     clip_seconds = SCREENPLAY_LENGTHS[draft["seconds"]]
     st.caption(f"{draft['seconds']}-second draft · 5 shots × {clip_seconds} seconds")
     st.text_area("Screenplay", draft["authoredScript"], height=450, disabled=True)

@@ -183,7 +183,7 @@ def planned_transition(
         "fromOrder": int(previous.get("order", 0) or 0),
         "toOrder": int(current.get("order", 0) or 0),
         "relation": kind,
-        "style": style,
+        "style": style if cfg.enabled else "cut",
         "durationSeconds": round(seconds if cfg.enabled else 0.0, 3),
         "promptDirective": prompt,
         "continuityFrameUsed": bool(current.get("continuityUsed")),
@@ -359,13 +359,13 @@ def analyze(
     else:
         raw = 0.64 + continuity * 0.18 if kind == "continuation" else 0.68 if kind == "scene_change" else 0.72
     repair = "none"
-    if kind == "continuation" and raw < 0.58:
+    if cfg.enabled and kind == "continuation" and raw < 0.58:
         item.update(style="fade", durationSeconds=max(item["durationSeconds"], 0.34))
         repair = "extended_dissolve"
-    elif kind == "scene_change" and raw < 0.50:
+    elif cfg.enabled and kind == "scene_change" and raw < 0.50:
         item.update(style="fadeblack", durationSeconds=max(item["durationSeconds"], 0.46))
         repair = "dip_to_black"
-    elif kind == "scene_change" and raw < 0.64:
+    elif cfg.enabled and kind == "scene_change" and raw < 0.64:
         item.update(style="fade", durationSeconds=max(item["durationSeconds"], 0.38))
         repair = "longer_dissolve"
     bonus = {"fade": 0.035, "fadeblack": 0.12}.get(item["style"], 0)

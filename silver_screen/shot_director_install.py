@@ -16,10 +16,6 @@ from .shot_director import (
     verify_ledger_hash,
 )
 
-_SHOT_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
-    "silver_screen_shot_direction",
-    default={},
-)
 _REQUEST_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "silver_screen_provider_shot_context",
     default={},
@@ -146,9 +142,7 @@ def install_shot_director() -> None:
 
     def validate_brief(brief: dict[str, Any]) -> dict[str, Any]:
         normalized = original_validate(brief)
-        direction = _shot_direction_from_brief(brief)
-        normalized["shotDirection"] = direction
-        _SHOT_CONTEXT.set(direction)
+        normalized["shotDirection"] = _shot_direction_from_brief(brief)
         return normalized
 
     def build_film_from_brief(
@@ -156,13 +150,8 @@ def install_shot_director() -> None:
         shot_direction: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        direction = normalize_shot_direction(
-            shot_direction
-            if shot_direction is not None
-            else _SHOT_CONTEXT.get()
-        )
         state = original_build(*args, **kwargs)
-        state["shotDirection"] = direction
+        state["shotDirection"] = normalize_shot_direction(shot_direction)
         return state
 
     def scene_prompt(
@@ -171,9 +160,7 @@ def install_shot_director() -> None:
         shot: dict[str, Any] | None = None,
         repair: dict[str, Any] | None = None,
     ) -> str:
-        direction = normalize_shot_direction(
-            state.get("shotDirection") or _SHOT_CONTEXT.get()
-        )
+        direction = normalize_shot_direction(state.get("shotDirection"))
         state["shotDirection"] = direction
         runtime_shot = shot if isinstance(shot, dict) else {}
         current_prompt = shot_director.render_directed_prompt(
@@ -251,7 +238,6 @@ def install_shot_director() -> None:
         **kwargs: Any,
     ) -> dict[str, Any]:
         direction = _shot_direction_from_brief(brief)
-        _SHOT_CONTEXT.set(direction)
         render_media = bool(kwargs.get("render_media", True))
         video_mode = str(kwargs.get("video_mode", "cards"))
         if (

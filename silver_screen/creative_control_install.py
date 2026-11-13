@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextvars
 import re
 from typing import Any
 
@@ -13,12 +12,6 @@ from .creative_direction import (
     normalize_creative_direction,
     prompt_contract,
 )
-
-_CREATIVE_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
-    "silver_screen_creative_context",
-    default={},
-)
-
 
 def _authored_script(raw: Any) -> str | None:
     text = str(raw or "").replace("\x00", " ").strip()
@@ -191,12 +184,6 @@ def install_creative_controls() -> None:
                     key: " ".join(str(brief["adEndCard"].get(key) or "").split())[:limit]
                     for key, limit in (("brand", 36), ("cta", 64))
                 }
-        _CREATIVE_CONTEXT.set(
-            {
-                "creativeDirection": direction,
-                "authoredScript": authored,
-            }
-        )
         return normalized
 
     def build_film_from_brief(
@@ -205,17 +192,8 @@ def install_creative_controls() -> None:
         authored_script: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        context = _CREATIVE_CONTEXT.get() or {}
-        direction = normalize_creative_direction(
-            creative_direction
-            if creative_direction is not None
-            else context.get("creativeDirection")
-        )
-        authored = (
-            _authored_script(authored_script)
-            if authored_script is not None
-            else _authored_script(context.get("authoredScript"))
-        )
+        direction = normalize_creative_direction(creative_direction)
+        authored = _authored_script(authored_script)
         state = original_build(*args, **kwargs)
         state = apply_creative_direction(
             state,
@@ -295,15 +273,6 @@ def install_creative_controls() -> None:
                     "Paid production is blocked by preproduction approval gates: "
                     + "; ".join(errors)
                 )
-        _CREATIVE_CONTEXT.set(
-            {
-                "creativeDirection": direction,
-                "authoredScript": _authored_script(
-                    brief.get("authoredScript")
-                    or brief.get("authored_script")
-                ),
-            }
-        )
         return original_run_pipeline(brief, *args, **kwargs)
 
     pipeline.validate_brief = validate_brief

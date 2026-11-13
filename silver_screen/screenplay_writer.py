@@ -53,12 +53,12 @@ _FILM_SCHEMA = _object(
     ),
 )
 _AD_SCHEMA = _object(
-    title=_STRING, logline=_STRING,
+    title=_STRING, logline=_STRING, product=_STRING, appearance=_STRING, brand=_STRING,
     scenes=_scene_array(setting=_STRING, action=_STRING, line=_STRING),
 )
 _COMMON = """Write five ordered shots in the language of the user's brief. Use headings like 'EXT. LOCATION - NIGHT'. Each action is one 15–28 word paragraph in present tense, with visible movement and specific objects. Vary the camera angle and blocking. Keep names, wardrobe, and props consistent. Each shot has at most one very short line. Use 'none' with an empty line when silence works better. Cast names must be distinct and use ordinary name characters. If the user supplies a lead name, use it exactly. Return only the requested JSON."""
 _FILM = """You write original short films. Give the story a striking opening, an escalating problem, a reversal, a decisive choice by the lead, and a final image that pays off a physical detail from the opening. Respect the requested genre, casting, tone, and relationship. Show the lead by name in each action. If the user wants to star and leaves the name blank, invent a screen name for them. Avoid stock dialogue, generic spectacle, and reciting the brief. When the story calls for intimacy, portray consenting adults in a way that serves the characters and plot. For fictional danger, describe the visible movie action without operational instructions for real-world harm."""
-_AD = """Write five shots for a short advertisement in the language of the brief. Give it a short title and a one-sentence logline. The five shots are a hook, a reveal, a concrete product demonstration, a detail, and a final product shot. For each shot give a setting, 15–25 words of visible action, and a short voiceover line or an empty string. Vary framing and camera movement. Keep the product design and color consistent. Use only supplied facts and avoid inventing performance claims, discounts, prices, reviews, or guarantees. The final shot leaves space below the product for an end card. Its voiceover uses the supplied call to action or an invitation to learn more. Return only the requested JSON."""
+_AD = """Write a five-shot product commercial in the language of the brief. Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and visual details, without inventing product specifications or performance claims. Plan a hook, a reveal, a use demonstration, a detail, and a final product shot. Keep that same product visible in all five shots. Each shot has one physical action and one camera move, with a setting, framing, 15–25 words of visible action, and an optional short voiceover line. Use hard cuts between shots. Keep people, backgrounds, and props secondary to the product. Leave clear space below the product in the final shot for the editor's end card. Use the supplied call to action if there is one. Return only the requested JSON."""
 _SLUGLINE = re.compile(r"^(?:INT\.|EXT\.)\s+\S.*$", re.IGNORECASE)
 _SPEAKER = re.compile(r"[\w .'’-]+")
 
@@ -127,9 +127,18 @@ def screenplay_draft(
     """Validate model output and produce the exact script used by production."""
     try:
         title, logline = _text(raw["title"], 120), _text(raw["logline"], 400)
-        card = end_card if kind == "ad" and end_card else {}
+        card = {}
         if kind == "ad":
-            brand = _text(card.get("brand"), 36)
+            supplied = end_card or {}
+            brand = _text(supplied.get("brand"), 36)
+            suggested_brand = _text(raw.get("brand"), 36)
+            if not brand and suggested_brand and re.search(
+                rf"(?<!\w){re.escape(suggested_brand)}(?!\w)", idea, re.IGNORECASE,
+            ):
+                brand = suggested_brand
+            card = {"brand": brand, "cta": _text(supplied.get("cta"), 64)}
+            if not any(card.values()):
+                card = {}
             title = title or (f"{brand} advertisement" if brand else "Product advertisement")
             # The production brief and the ad preview use the user's product
             # facts. A proposed logline can contain an unsupported claim.
@@ -139,6 +148,8 @@ def screenplay_draft(
             genre, tone = "drama", "cinematic"
             names = {"lead": lead or "Narrator"}
             cast = []
+            product = _text(raw.get("product"), 100) or brand or _text(idea, 100)
+            appearance = _text(raw.get("appearance"), 320)
         else:
             genre, tone = raw["genre"], raw["tone"]
             names = {role: _text(raw[role]["name"], LEAD_LIMIT) for role in ("lead", "support")}
@@ -197,14 +208,17 @@ def screenplay_draft(
         raise ScreenplayError("The writer returned an incomplete draft. Try another version.") from exc
     shot_direction: dict[str, Any] = {"shotPromptOverrides": overrides}
     if kind == "ad":
-        product = _text(card.get("brand"), 36) or title
         shot_direction["useAuthoredShotPrompts"] = True
+        shot_direction["audioStrategy"] = "silent"
         shot_direction["shotPromptOverrides"] = {
-            order: (
-                f"Product commercial for {product}. {action} "
-                "Keep the product design and markings consistent with the reference. "
-                "Use a clean commercial composition with no added graphic overlays."
-            )
+            order: " ".join(part for part in (
+                f"Photorealistic commercial. Featured product: {product}.",
+                f"Product appearance: {appearance.rstrip('.')}." if appearance else "",
+                action,
+                "A single continuous shot with readable product motion and the product in clear focus.",
+                "Preserve its color, proportions, materials, and existing markings throughout the shot.",
+                "Clean composition without on-screen titles or added graphics.",
+            ) if part)
             for order, action in overrides.items()
         }
     return {
@@ -214,6 +228,7 @@ def screenplay_draft(
         "creativeDirection": {"scriptSource": "authored", "strictGate": False},
         "shotDirection": shot_direction,
         "seconds": seconds, "kind": kind, "screenplayWriter": kind,
+        **({"adProduct": {"name": product, "appearance": appearance}} if kind == "ad" else {}),
         **({"adEndCard": card} if card else {}),
     }
 

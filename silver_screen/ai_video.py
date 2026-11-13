@@ -23,7 +23,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable
 
-from .runtime import utc_now
+from .runtime import atomic_write_text, utc_now
 from .video_runtime import (
     VideoProductionConfig,
     budget_stop_reason,
@@ -758,7 +758,10 @@ def _continuity_input(
     initial_image: str | None,
 ) -> tuple[str | None, str | None]:
     shot["continuityUsed"] = False
-    if int(shot.get("order", 0) or 0) == 1 and initial_image:
+    if initial_image and (
+        int(shot.get("order", 0) or 0) == 1
+        or queue.get("referenceMode") == "product"
+    ):
         shot["continuityUsed"] = True
         return initial_image, "operator_reference"
     if not config.use_continuity_frames:
@@ -838,6 +841,10 @@ def _process_prediction(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
+    if repair and queue.get("referenceMode") == "product":
+        directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
+        if directive:
+            prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
     attempt_seed = (
         int(shot.get("seed", 0) or 0)
         + int((repair or {}).get("seedDelta", 0) or 0)
@@ -852,15 +859,25 @@ def _process_prediction(
     shot["startedAt"] = shot.get("startedAt") or utc_now()
     shot["lastError"] = None
     save_video_queue(root, queue)
-    prediction = client.create_prediction(
-        prompt,
-        seed=attempt_seed,
-        duration=config.clip_duration_seconds,
-        image=image,
-        generate_audio=(
-            False if (repair or {}).get("disableAudio") else None
-        ),
-    )
+    settings = {
+        "seed": attempt_seed,
+        "duration": config.clip_duration_seconds,
+        "image": image,
+        "generate_audio": False if (repair or {}).get("disableAudio") else None,
+    }
+    if queue.get("referenceMode") == "product":
+        settings["generate_audio"] = False
+        if queue.get("backend") == "comfyui":
+            from .comfyui import video_controls_ready
+
+            # Legacy custom workflows may have no negative-prompt control.
+            if video_controls_ready("reference" if image else "video"):
+                settings["negative_prompt"] = (
+                    "product morphing, changing colors, changing logos, warped geometry, "
+                    "duplicate products, jump cuts, unrelated objects, camera shake, "
+                    "unreadable lettering, subtitles, watermarks, on-screen captions"
+                )
+    prediction = client.create_prediction(prompt, **settings)
     shot["status"] = "submitted"
     _update_prediction_in_queue(queue, root, shot, prediction)
     record_video_event(
@@ -881,22 +898,7 @@ def _process_prediction(
             queue, root, shot, current
         ),
     )
-    clip_path = root / "clips" / f"{shot.get('id')}.mp4"
-    client.download_output(prediction, clip_path)
-    verification = verify_mp4(
-        clip_path, expected_duration=config.clip_duration_seconds
-    )
-    shot["path"] = _store_relative(root, clip_path)
-    shot["status"] = "verified"
-    shot["providerStatus"] = "succeeded"
-    shot["verification"] = verification
-    shot["verifiedDurationSeconds"] = float(
-        verification.get("durationSeconds")
-        or shot.get("plannedDurationSeconds")
-        or config.clip_duration_seconds
-    )
-    shot["completedAt"] = utc_now()
-    shot["lastError"] = None
+    _verify_prediction_output(client, prediction, queue, root, shot, config)
     if repair:
         shot.setdefault("repairHistory", []).append(repair)
         reinforce_video_scar(queue, shot=shot, repair=repair)
@@ -910,6 +912,41 @@ def _process_prediction(
         ),
     )
     save_video_queue(root, queue)
+
+
+def _verify_prediction_output(
+    client: ReplicateVideoClient,
+    prediction: dict[str, Any],
+    queue: dict[str, Any],
+    root: Path,
+    shot: dict[str, Any],
+    config: VideoProductionConfig,
+) -> None:
+    clip_path = root / "clips" / f"{shot.get('id')}.mp4"
+    client.download_output(prediction, clip_path)
+    verification = verify_mp4(clip_path, expected_duration=config.clip_duration_seconds)
+    duration = verification.get("durationSeconds")
+    if queue.get("referenceMode") == "product":
+        if not duration or not verification.get("width") or not verification.get("height"):
+            raise VideoGenerationError("The advertisement shot does not have a readable video track.")
+        expected_frames = config.clip_duration_seconds * 24
+        if duration < (expected_frames - 1) / 24 - 0.001:
+            raise VideoGenerationError(
+                f"Advertisement shot is {duration:.2f}s. It needs {config.clip_duration_seconds}s."
+            )
+        if round(duration * 24) != expected_frames:
+            # Normalize Wan's boundary frame to the planned edit duration.
+            from .direct_generation import finish_short_video
+
+            finish_short_video(clip_path, clip_path, seconds=config.clip_duration_seconds)
+            verification = verify_mp4(clip_path)
+            duration = verification["durationSeconds"]
+    shot.update(
+        path=_store_relative(root, clip_path), status="verified", providerStatus="succeeded",
+        verification=verification,
+        verifiedDurationSeconds=float(duration or shot.get("plannedDurationSeconds") or config.clip_duration_seconds),
+        completedAt=utc_now(), lastError=None,
+    )
 
 
 def _resume_submitted_prediction(
@@ -934,22 +971,7 @@ def _resume_submitted_prediction(
             queue, root, shot, current
         ),
     )
-    clip_path = root / "clips" / f"{shot.get('id')}.mp4"
-    client.download_output(prediction, clip_path)
-    verification = verify_mp4(
-        clip_path, expected_duration=config.clip_duration_seconds
-    )
-    shot["path"] = _store_relative(root, clip_path)
-    shot["status"] = "verified"
-    shot["providerStatus"] = "succeeded"
-    shot["verification"] = verification
-    shot["verifiedDurationSeconds"] = float(
-        verification.get("durationSeconds")
-        or shot.get("plannedDurationSeconds")
-        or config.clip_duration_seconds
-    )
-    shot["completedAt"] = utc_now()
-    shot["lastError"] = None
+    _verify_prediction_output(client, prediction, queue, root, shot, config)
     record_video_event(
         queue,
         "submitted_prediction_recovered",
@@ -1013,6 +1035,19 @@ def generate_ai_video(
     saved_queue = load_video_queue(root) if resume else None
     backend = str(saved_queue.get("backend") or "replicate") if saved_queue else video_backend()
     initial_image_data = image_to_data_url(initial_image)
+    is_ad = state.get("screenplayWriter") == "ad"
+    if is_ad:
+        config = replace(config, use_continuity_frames=False)
+        reference = root / "ad-product-reference.txt"
+        if initial_image is not None and not initial_image_data:
+            raise VideoGenerationError("The product photo could not be prepared.")
+        if initial_image_data:
+            if not reference.exists():
+                atomic_write_text(reference, initial_image_data)
+            elif reference.read_text(encoding="ascii") != initial_image_data:
+                raise VideoGenerationError("Start a new advertisement to use a different product photo.")
+        elif reference.is_file():
+            initial_image_data = reference.read_text(encoding="ascii")
     if backend == "comfyui":
         client = make_comfyui_client()
         if initial_image_data and not client.supports_reference:
@@ -1024,6 +1059,8 @@ def generate_ai_video(
     else:
         raise VideoGenerationError("SILVER_SCREEN_VIDEO_BACKEND must be replicate or comfyui.")
     queue = _ensure_queue(state, root, config, queue=saved_queue, backend=backend)
+    if is_ad:
+        queue["referenceMode"] = "product"
     _reconcile_verified_files(queue, root)
     update_video_metrics(queue)
     save_video_queue(root, queue)
@@ -1181,7 +1218,8 @@ def generate_ai_video(
         if _shot_path(root, shot) is not None
     ]
     artifacts = queue.get("artifacts") or {}
-    final_relative = artifacts.get("finalFilm") or artifacts.get("partialFilm")
+    complete = queue.get("status") == "complete"
+    final_relative = artifacts.get("finalFilm" if complete else "partialFilm")
     final_path = str((root / final_relative).resolve()) if final_relative else None
     chapter_paths = [
         str((root / path).resolve())

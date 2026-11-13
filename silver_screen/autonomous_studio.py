@@ -11,8 +11,10 @@ from __future__ import annotations
 import copy
 import json
 import math
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Callable
 
 from .cinematic_continuity import rebuild_run_transitions
@@ -29,10 +31,36 @@ from .video_runtime import load_video_queue
 from .visual_quality import inspect_run as inspect_visual_run
 
 ProgressCallback = Callable[[str, int, str], None]
+_PRODUCTION_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="silver-screen")
+_PRODUCTION_LOCK = Lock()
+_ACTIVE_PRODUCTIONS: dict[str, Future[dict[str, Any]]] = {}
 
 
 class AutonomousStudioError(RuntimeError):
     pass
+
+
+def active_production(run_id: str) -> Future[dict[str, Any]] | None:
+    with _PRODUCTION_LOCK:
+        return _ACTIVE_PRODUCTIONS.get(run_id)
+
+
+def enqueue_production(
+    run_id: str, operation: Callable[[], dict[str, Any]],
+) -> Future[dict[str, Any]]:
+    """Run a production independently of the browser session."""
+    def forget(finished: Future[dict[str, Any]]) -> None:
+        with _PRODUCTION_LOCK:
+            if _ACTIVE_PRODUCTIONS.get(run_id) is finished:
+                del _ACTIVE_PRODUCTIONS[run_id]
+
+    with _PRODUCTION_LOCK:
+        if current := _ACTIVE_PRODUCTIONS.get(run_id):
+            return current
+        future = _PRODUCTION_WORKER.submit(operation)
+        _ACTIVE_PRODUCTIONS[run_id] = future
+    future.add_done_callback(forget)
+    return future
 
 
 @dataclass(frozen=True)
@@ -239,13 +267,19 @@ def build_edit_decision_list(run_id: str, *, output_root: str = "runs") -> dict[
     workspace = RunWorkspace.open_existing(output_root, run_id)
     result = load_run(run_id, output_root)
     queue = load_video_queue(workspace.media_dir) or {}
-    transition_map = {str(item.get("toShot") or ""): item for item in ((queue.get("transitionPlan") or {}).get("transitions") or []) if isinstance(item, dict)}
+    transition_plan = queue.get("transitionPlan") or {}
+    has_transitions = (transition_plan.get("metrics") or {}).get("enabled", True)
+    transition_map = {
+        str(item.get("toShot") or ""): item
+        for item in transition_plan.get("transitions") or []
+        if isinstance(item, dict)
+    }
     cursor, clips = 0.0, []
     shots = sorted((item for item in queue.get("shots") or [] if isinstance(item, dict) and item.get("status") == "verified"), key=lambda item: int(item.get("order", 0) or 0))
     for shot in shots:
         duration = float(shot.get("verifiedDurationSeconds") or shot.get("plannedDurationSeconds") or 0)
         transition = transition_map.get(str(shot.get("id") or ""), {})
-        overlap = float(transition.get("durationSeconds", 0) or 0)
+        overlap = float(transition.get("durationSeconds", 0) or 0) if has_transitions else 0.0
         start, end = max(0.0, cursor - overlap), max(0.0, cursor - overlap) + duration
         value = shot.get("path")
         path = Path(str(value)) if value else None
@@ -381,7 +415,7 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     return {"runId": run_id, "projectId": project_id, "result": result, "transition": transition, "visual": visual, "semantic": semantic, "audio": audio, "quality": quality, "memory": memory, "edl": edl["edl"], "job": job, "errors": errors}
 
 
-def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | None = None, voices: list[Any] | None = None, output_root: str = "runs", progress: ProgressCallback | None = None) -> dict[str, Any]:
+def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | None = None, voices: list[Any] | None = None, output_root: str = "runs", progress: ProgressCallback | None = None, run_id: str | None = None) -> dict[str, Any]:
     from .pipeline import run_pipeline
     approved = copy.deepcopy(plan.get("approvedBrief") or {})
     execution = plan.get("executionPlan") or {}
@@ -389,18 +423,22 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     project_id = str(plan.get("projectId") or cfg.get("projectId") or "")
     if not approved or not project_id:
         raise AutonomousStudioError("Build the autonomous plan before paid production.")
+    is_ad = approved.get("screenplayWriter") == "ad"
+    planned_shots = int(execution.get("plannedShots", 1) or 1)
+    max_calls = int(execution.get("maxProviderCalls", 1) or 1)
     result = run_pipeline(
         approved, images=list(images or []), voices=list(voices or []),
         output_root=output_root, persist=True, render_media=True, video_mode="ai-video", max_chapters=12,
         target_runtime_seconds=int(execution.get("targetRuntimeSeconds", 8) or 8),
         video_clip_duration_seconds=execution.get("clipDurationSeconds"),
-        video_max_shots=int(execution.get("plannedShots", 1) or 1),
+        video_max_shots=planned_shots,
         video_batch_size=int(execution.get("batchSize", 1) or 1),
-        video_max_retries=int(execution.get("retriesPerShot", 1) or 1),
-        video_max_provider_calls=int(execution.get("maxProviderCalls", 1) or 1),
+        video_max_retries=int(execution["retriesPerShot"]) if execution.get("retriesPerShot") is not None else 1,
+        video_max_provider_calls=max_calls,
         video_max_spend_usd=float(cfg["maxSpendUsd"]) if cfg["maxSpendUsd"] > 0 else None,
         video_cost_per_second_usd=float(cfg["costPerSecondUsd"]) if cfg["costPerSecondUsd"] > 0 else None,
-        video_continuous=bool(execution.get("continuous", True)), video_use_continuity=True, progress=progress,
+        video_continuous=bool(execution.get("continuous", True)),
+        video_use_continuity=not is_ad, progress=progress, run_id=run_id,
     )
     run_id = _run_id(result)
     if not run_id:
@@ -408,29 +446,46 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     return finish_autonomous_run(run_id, project_id=project_id, config=cfg, output_root=output_root)
 
 
-def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool | None = None) -> dict[str, Any]:
+def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool | None = None, progress: ProgressCallback | None = None) -> dict[str, Any]:
     from .pipeline import resume_video_run
 
     workspace = RunWorkspace.open_existing(output_root, run_id)
+    result = load_run(run_id, output_root)
+    brief = result.get("brief") or workspace.manifest.get("brief") or {}
+    options = result.get("options") or {}
     job_path = workspace.path / "autonomous_job.json"
     if job_path.exists():
         job = json.loads(job_path.read_text(encoding="utf-8"))
     else:
-        result = load_run(run_id, output_root)
-        brief = result.get("brief") or workspace.manifest.get("brief") or {}
-        job = {"projectId": project_id_for(brief), "config": normalize_autonomous_config()}
+        job = {"projectId": project_id_for(brief), "config": {
+            "continuous": options.get("videoContinuous", True),
+            "batchSize": options.get("videoBatchSize"),
+            "retriesPerShot": options.get("videoMaxRetries"),
+            "maxProviderCalls": options.get("videoMaxProviderCalls"),
+            "maxSpendUsd": options.get("videoMaxSpendUsd"),
+            "costPerSecondUsd": options.get("videoCostPerSecondUsd"),
+            "transitionMode": "off" if brief.get("screenplayWriter") == "ad" else "auto",
+            "semanticQa": False,
+        }}
     cfg = normalize_autonomous_config(job.get("config"))
     queue = load_video_queue(workspace.media_dir) or {}
     qcfg = queue.get("config") or {}
-    resume_video_run(
-        run_id,
-        output_root=output_root,
-        batch_size=int(batch_size or cfg.get("batchSize") or qcfg.get("batch_size") or 1),
-        continuous=cfg["continuous"] if continuous is None else continuous,
-        max_retries=int(cfg.get("retriesPerShot") or qcfg.get("max_retries_per_shot") or 1),
-        max_provider_calls=int(cfg.get("maxProviderCalls") or qcfg.get("max_provider_calls") or 1),
-        use_continuity=True,
-    )
+    is_ad = brief.get("screenplayWriter") == "ad"
+    if continuous is None:
+        continuous = is_ad or cfg["continuous"]
+    if result.get("status") != "complete":
+        resume_video_run(
+            run_id,
+            output_root=output_root,
+            batch_size=int(batch_size or cfg.get("batchSize") or qcfg.get("batch_size") or 1),
+            continuous=continuous,
+            max_retries=int(cfg["retriesPerShot"]),
+            max_provider_calls=(
+                int(cfg.get("maxProviderCalls") or qcfg.get("max_provider_calls") or 0) or None
+            ),
+            use_continuity=not is_ad,
+            progress=progress,
+        )
     return finish_autonomous_run(run_id, project_id=str(job.get("projectId") or cfg.get("projectId") or ""), config=cfg, output_root=output_root)
 
 
