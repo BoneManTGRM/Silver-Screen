@@ -159,10 +159,11 @@ with st.form("direct_create"):
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
                 negative = st.text_area("Things to avoid (optional)")
                 video_options = {"video_size": VIDEO_SIZES[size], "steps": steps, "negative_prompt": negative}
-    generate = st.form_submit_button("Generate", type="primary")
+    job = st.session_state.get("direct_create_job")
+    active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
+    generate = st.form_submit_button("Generate", type="primary", disabled=active)
 
-job = st.session_state.get("direct_create_job")
-if generate:
+if generate and not active:
     model = IMAGE_MODEL if is_image else CLIP_MODEL
     started = monotonic()
     try:
@@ -202,6 +203,8 @@ if generate:
         if use_comfyui:
             job["seed"] = seed
         st.session_state["direct_create_job"] = job
+        if use_comfyui and str(prediction.get("id", "")).startswith("fc-"):
+            st.rerun()
     except (VideoGenerationError, OSError) as exc:
         st.error(str(exc))
         generate = False
@@ -214,10 +217,11 @@ if job:
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
 
+    modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
     check = False
-    if not generate and "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
-        check = st.button("Check existing prediction")
-    if "data" not in job and (generate or check):
+    if "data" not in job and (modal_job or not generate) and prediction.get("status") not in {"failed", "canceled"}:
+        check = st.button("Check existing prediction", key="direct-check-job")
+    if "data" not in job and (check or (generate and not modal_job)):
         def save_prediction(update):
             job["prediction"] = update
 
@@ -227,15 +231,18 @@ if job:
                 if job_backend == "ComfyUI"
                 else ReplicateVideoClient(model=job["model"])
             )
-            with st.spinner("Preparing your download…"):
+            with st.spinner("Checking the GPU render…" if check else "Rendering on the selected backend…"):
                 if check and prediction_id and prediction.get("status") not in TERMINAL_STATUSES:
                     prediction = client.get_prediction(prediction_id)
                     save_prediction(prediction)
-                complete = client.wait(prediction, on_update=save_prediction)
-                if isinstance(client, ComfyUIClient):
-                    job["data"] = verify_direct_output(client.read_output(complete), image=job_is_image)
-                else:
-                    job["data"] = read_direct_output(complete, image=job_is_image)
+                if not check:
+                    prediction = client.wait(prediction, on_update=save_prediction)
+            if prediction.get("status") == "succeeded":
+                with st.spinner("Verifying the downloaded media…"):
+                    if isinstance(client, ComfyUIClient):
+                        job["data"] = verify_direct_output(client.read_output(prediction), image=job_is_image)
+                    else:
+                        job["data"] = read_direct_output(prediction, image=job_is_image)
                 if "started" in job:
                     job["elapsed_seconds"] = monotonic() - job["started"]
                 if number := job.get("shot_number"):
@@ -250,7 +257,11 @@ if job:
                 st.error(str(exc))
     if job["prediction"].get("status") in {"failed", "canceled"}:
         st.error(job["prediction"].get("error") or f"{job_backend} did not complete the prediction.")
+    elif "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
+        st.info("Render submitted. The worker may be starting up, queued, or generating frames. Use Check existing prediction to update this job.")
     if "data" in job:
+        if modal_job and check:
+            st.rerun()
         if job_is_image:
             st.image(job["data"])
             st.download_button("Download image", job["data"], "silver-screen.png", "image/png")

@@ -184,6 +184,13 @@ def install_creative_controls() -> None:
             )
         normalized["creativeDirection"] = direction
         normalized["authoredScript"] = authored
+        if authored and brief.get("screenplayWriter") in ("film", "ad"):
+            normalized["screenplayWriter"] = brief["screenplayWriter"]
+            if brief["screenplayWriter"] == "ad" and isinstance(brief.get("adEndCard"), dict):
+                normalized["adEndCard"] = {
+                    key: " ".join(str(brief["adEndCard"].get(key) or "").split())[:limit]
+                    for key, limit in (("brand", 36), ("cta", 64))
+                }
         _CREATIVE_CONTEXT.set(
             {
                 "creativeDirection": direction,

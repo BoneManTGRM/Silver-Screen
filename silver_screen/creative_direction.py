@@ -612,7 +612,7 @@ def _script_segments(script: str) -> list[dict[str, str]]:
             body.append(line)
     if heading or any(item.strip() for item in body):
         segments.append({"heading": heading, "body": "\n".join(body).strip()})
-    if len(segments) <= 1:
+    if len(segments) <= 1 and not any(segment["heading"] for segment in segments):
         paragraphs = [item.strip() for item in text.split("\n\n") if item.strip()]
         if len(paragraphs) > 1:
             segments = [{"heading": "", "body": item} for item in paragraphs]
@@ -699,6 +699,9 @@ def _authored_dialogue(body: str) -> list[tuple[str, str]]:
         line = raw.strip()
         if not line:
             continue
+        if line.upper() in {"FADE IN:", "FADE OUT.", "THE END"}:
+            pending_speaker = None
+            continue
         parsed = _speaker_and_text(line)
         if parsed:
             result.append(parsed)
@@ -727,16 +730,28 @@ def _apply_authored_script(
         body = str(segment.get("body") or "").strip()
         dialogue = _authored_dialogue(body)
         action_lines: list[str] = []
+        next_is_dialogue = False
         for raw in body.split("\n"):
             line = raw.strip()
-            if not line or _speaker_and_text(line):
+            if not line or line.upper() in {"FADE IN:", "FADE OUT.", "THE END"}:
+                continue
+            if _speaker_and_text(line) or next_is_dialogue:
+                next_is_dialogue = False
                 continue
             if line.isupper() and len(line.split()) <= 5:
+                next_is_dialogue = True
                 continue
             action_lines.append(line)
         action = _clean_text(" ".join(action_lines) or body, 2400)
         if heading:
             scene["slugline"] = heading
+            prefix, _, setting = heading.partition(" ")
+            if prefix.upper() in {"INT.", "EXT.", "INT/EXT.", "INT./EXT.", "I/E."}:
+                place, separator, time_of_day = setting.rpartition(" - ")
+                scene["location"] = (place if separator else setting).strip()
+                if separator:
+                    scene["timeOfDay"] = time_of_day
+                scene["interior"] = prefix.upper().startswith(("INT", "I/E"))
         scene["action"] = action or (
             "The characters complete the action described in the authored script."
         )

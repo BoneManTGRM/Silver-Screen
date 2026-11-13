@@ -9,6 +9,7 @@ import streamlit as st
 
 from silver_screen.cast_library import cast_library_root, saved_clone_samples
 from silver_screen.runtime import find_run_workspace, list_runs
+from silver_screen.screenplay_writer import script_sync_text
 from silver_screen.script_sync import (
     ScriptSyncConfig,
     VoiceStudioError,
@@ -75,17 +76,26 @@ with st.sidebar:
     )
 
     st.header("Authored script")
+    run_script = ""
+    if run_map:
+        try:
+            selected_root = find_run_workspace(str(run_map[selected].get("runId")), "runs")
+            saved = _read_result(selected_root)
+            run_script = str((saved.get("brief") or {}).get("authoredScript") or "")
+            clip_seconds = (saved.get("options") or {}).get("videoClipDurationSeconds")
+            if run_script and clip_seconds and (saved.get("brief") or {}).get("screenplayWriter"):
+                run_script = script_sync_text(run_script, clip_seconds=int(clip_seconds))
+        except (OSError, ValueError, VoiceStudioError):
+            pass
     script = st.text_area(
         "Script",
-        value=(
-            "NARRATOR: Tonight, the spotlight belongs to one unforgettable star.\n"
-            "MOONIE MOO: Darling, the spotlight has always belonged to me.\n"
-            "BULLY: Keep walking. I saw the snack table first."
-        ),
+        value=run_script,
+        key=f"sync-script-{run_map.get(selected, {}).get('runId', 'manual')}",
+        placeholder="LEAD: Close the door behind you.",
         height=260,
         help=(
             "Use SPEAKER: dialogue. Optional exact cues are supported, for example "
-            "[00:00.200 --> 00:03.800] MOONIE MOO: Welcome to my premiere."
+            "[00:00.200 --> 00:03.800] LEAD: Welcome aboard."
         ),
     )
 

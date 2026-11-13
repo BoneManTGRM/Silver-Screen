@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from silver_screen.ai_video import (
+    PredictionPending,
     VideoGenerationError,
     generate_ai_video,
     video_production_status,
@@ -226,6 +227,34 @@ def test_tgrm_retries_only_failed_shot_and_reinforces_scar(
     shot = result["queue"]["shots"][0]
     assert shot["attempts"] == 2
     assert shot["status"] == "verified"
+
+
+def test_pending_prediction_can_finish_at_call_ceiling(tmp_path, monkeypatch):
+    monkeypatch.setattr("silver_screen.ai_video.assemble_clips", _fake_assemble)
+    monkeypatch.setenv("SILVER_SCREEN_VIDEO_BACKEND", "replicate")
+
+    class PendingClient(FakeClient):
+        def wait(self, prediction, *, on_update=None):
+            if not pending["checked"]:
+                pending["checked"] = True
+                if on_update:
+                    on_update({**prediction, "status": "processing"})
+                raise PredictionPending("Waiting for the existing render")
+            return super().wait(prediction, on_update=on_update)
+
+    pending = {"checked": False}
+    settings = dict(
+        target_runtime_seconds=8, max_shots=1, batch_size=1,
+        max_provider_calls=1, client_factory=PendingClient,
+    )
+    initial = generate_ai_video(_state(), tmp_path, **settings)
+    assert initial["stopReason"] == "prediction_pending"
+    assert initial["queue"]["shots"][0]["status"] == "submitted"
+
+    resumed = generate_ai_video(_state(), tmp_path, resume=True, **settings)
+    assert resumed["status"] == "complete"
+    assert resumed["metrics"]["providerCalls"] == 1
+    assert PendingClient.calls == 1
 
 
 def test_provider_call_budget_blocks_before_unapproved_spend(

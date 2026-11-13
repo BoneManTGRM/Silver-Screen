@@ -50,6 +50,10 @@ class VideoGenerationError(RuntimeError):
     """Raised when a requested AI video cannot be generated or verified."""
 
 
+class PredictionPending(VideoGenerationError):
+    """An existing prediction has no confirmed terminal result."""
+
+
 class ReplicateVideoClient:
     """Small official-model HTTP client with resumable prediction polling."""
 
@@ -184,9 +188,8 @@ class ReplicateVideoClient:
             on_update(current)
         while str(current.get("status")) not in TERMINAL_STATUSES:
             if time.monotonic() - started > self.timeout_seconds:
-                raise VideoGenerationError(
-                    f"Prediction {current.get('id', '?')} exceeded "
-                    f"{self.timeout_seconds} seconds"
+                raise PredictionPending(
+                    f"Prediction {current.get('id', '?')} is still running. Check this saved job again."
                 )
             prediction_id = str(current.get("id") or "")
             get_url = str((current.get("urls") or {}).get("get") or "")
@@ -1056,7 +1059,14 @@ def generate_ai_video(
             queue["stopReason"] = "target_runtime_reached"
             queue["completedAt"] = utc_now()
             break
-        reason = budget_stop_reason(queue, config)
+        shot = _next_incomplete_shot(queue)
+        if shot is None:
+            queue["status"] = "complete"
+            queue["stopReason"] = "target_runtime_reached"
+            queue["completedAt"] = utc_now()
+            break
+        submitted = shot.get("status") == "submitted"
+        reason = None if submitted else budget_stop_reason(queue, config)
         if reason:
             queue["status"] = "blocked"
             queue["stopReason"] = reason
@@ -1066,15 +1076,9 @@ def generate_ai_video(
             queue["status"] = "partial"
             queue["stopReason"] = "batch_checkpoint"
             break
-        shot = _next_incomplete_shot(queue)
-        if shot is None:
-            queue["status"] = "complete"
-            queue["stopReason"] = "target_runtime_reached"
-            queue["completedAt"] = utc_now()
-            break
         allowed_attempts = config.max_retries_per_shot + 1
         if (
-            shot.get("status") != "submitted"
+            not submitted
             and int(shot.get("attempts", 0) or 0) >= allowed_attempts
         ):
             shot["status"] = "blocked"
@@ -1088,7 +1092,7 @@ def generate_ai_video(
             )
             break
         try:
-            if shot.get("status") == "submitted":
+            if submitted:
                 _resume_submitted_prediction(
                     client=client,
                     queue=queue,
@@ -1106,7 +1110,13 @@ def generate_ai_video(
                     config=config,
                     initial_image=initial_image_data,
                 )
-                calls_this_run += 1
+            calls_this_run += 1
+        except PredictionPending as exc:
+            shot["lastError"] = str(exc)
+            queue["status"] = "partial"
+            queue["stopReason"] = "prediction_pending"
+            save_video_queue(root, queue)
+            break
         except Exception as exc:
             update_video_metrics(queue)
             current_calls = int(

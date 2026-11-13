@@ -154,7 +154,7 @@ def _direction(brief: dict[str, Any], cfg: dict[str, Any], memory: dict[str, Any
         **supplied,
         "profile": supplied.get("profile") or recommended_creative_profile(str(brief.get("genre") or ""), str(supplied.get("medium") or "")),
         "scriptSource": "authored" if brief.get("authoredScript") else supplied.get("scriptSource", "generated"),
-        "strictGate": True,
+        "strictGate": _bool(supplied.get("strictGate"), True),
         "enforceApprovalGates": True,
         "approvals": {"scriptApproved": True, "promptsApproved": True, "budgetApproved": True},
         "directorNotes": note,
@@ -194,7 +194,7 @@ def prepare_autonomous_plan(brief: dict[str, Any], *, target_runtime_seconds: in
 
     approved = copy.deepcopy(preview.get("brief") or working)
     direction = copy.deepcopy(preview.get("creativeDirection") or {})
-    direction.update({"enforceApprovalGates": True, "strictGate": True, "approvals": {"scriptApproved": True, "promptsApproved": True, "budgetApproved": True}})
+    direction.update({"enforceApprovalGates": True, "approvals": {"scriptApproved": True, "promptsApproved": True, "budgetApproved": True}})
     shot_direction = copy.deepcopy(preview.get("shotDirection") or {})
     ledger = copy.deepcopy(preview.get("promptLedger") or {})
     shot_direction.update({"enforcePromptLedger": True, "approvedPromptLedger": ledger, "approvedLedgerHash": str(ledger.get("ledgerHash") or "")})
@@ -293,6 +293,13 @@ def _finish_audio(workspace: RunWorkspace, result: dict[str, Any], cfg: dict[str
     script = str((result.get("state") or {}).get("script") or "").strip()
     if not script:
         return None
+    if (result.get("brief") or {}).get("screenplayWriter"):
+        from .screenplay_writer import script_sync_text
+
+        clip_seconds = int((result.get("options") or {}).get("videoClipDurationSeconds") or 8)
+        script = script_sync_text(script, clip_seconds=clip_seconds)
+        if not script:
+            return None
     sync = ScriptSyncConfig(provider=provider, lead_voice=cfg["leadVoice"], supporting_voice=cfg["supportingVoice"], narrator_voice=cfg["narratorVoice"], instructions=cfg["voiceInstructions"], speed=float(cfg["speechSpeed"]), words_per_minute=int(cfg["wordsPerMinute"]), preserve_source_audio=True, burn_captions=bool(cfg["burnCaptions"]), caption_style="cinematic", authorization_confirmed=True)
     rendered = render_script_production(workspace.path, result.get("media") or {}, script, sync)
     for key, name in (("final_video_path", "autonomousVoicedFilm"), ("captioned_video_path", "autonomousCaptionedFilm"), ("srt_path", "autonomousSrt"), ("word_alignment_path", "autonomousWordAlignment"), ("plan_path", "autonomousTimingPlan")):
@@ -305,6 +312,7 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     workspace = RunWorkspace.open_existing(output_root, run_id)
     errors: list[str] = []
     transition = visual = semantic = audio = None
+    short_video = None
     try:
         transition = rebuild_run_transitions(run_id, output_root=output_root, mode=cfg["transitionMode"])
     except Exception as exc:
@@ -323,6 +331,28 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
         audio = _finish_audio(workspace, result, cfg)
     except Exception as exc:
         errors.append(f"audio finishing: {exc}")
+    brief = result.get("brief") or {}
+    writer_kind = brief.get("screenplayWriter")
+    if result.get("status") == "complete" and writer_kind:
+        from .direct_generation import finish_short_video
+
+        card = brief.get("adEndCard") or {}
+        runtime = (result.get("options") or {}).get("targetRuntimeSeconds")
+        filename = "advertisement.mp4" if writer_kind == "ad" else "movie.mp4"
+        source = (audio or {}).get("captioned_video_path") or (audio or {}).get("final_video_path")
+        source = source or (result.get("media") or {}).get("final_video_path")
+        if not source or not runtime:
+            errors.append("Final MP4 export requires the assembled footage and requested runtime.")
+        else:
+            try:
+                workspace.relative(source)
+                short_video = str(finish_short_video(
+                    Path(source), workspace.media_dir / filename, seconds=int(runtime),
+                    brand=card.get("brand", ""), cta=card.get("cta", ""),
+                ))
+                workspace.register_artifact("shortVideo", short_video)
+            except Exception as exc:
+                errors.append(f"Final MP4 export: {exc}")
     queue = load_video_queue(workspace.media_dir) or {}
     memory = load_project_memory(project_id, output_root)
     for shot in queue.get("shots") or []:
@@ -342,7 +372,10 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     quality = _quality(result, visual, semantic)
     quality_path = workspace.write_json("quality/project_quality_report.json", quality)
     workspace.register_artifact("projectQualityReport", quality_path)
-    job = {"schemaVersion": 1, "runId": run_id, "projectId": project_id, "updatedAt": utc_now(), "status": result.get("status"), "config": cfg, "quality": quality, "audioFinished": bool(audio), "errors": errors, "artifacts": {**snapshots, "editDecisionList": edl["path"], "projectQualityReport": str(quality_path)}}
+    artifacts = {**snapshots, "editDecisionList": edl["path"], "projectQualityReport": str(quality_path)}
+    if short_video:
+        artifacts["shortVideo"] = short_video
+    job = {"schemaVersion": 1, "runId": run_id, "projectId": project_id, "updatedAt": utc_now(), "status": result.get("status"), "config": cfg, "quality": quality, "audioFinished": bool(audio), "errors": errors, "artifacts": artifacts}
     job_path = workspace.write_json("autonomous_job.json", job)
     workspace.register_artifact("autonomousJob", job_path)
     return {"runId": run_id, "projectId": project_id, "result": result, "transition": transition, "visual": visual, "semantic": semantic, "audio": audio, "quality": quality, "memory": memory, "edl": edl["edl"], "job": job, "errors": errors}
@@ -356,15 +389,28 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     project_id = str(plan.get("projectId") or cfg.get("projectId") or "")
     if not approved or not project_id:
         raise AutonomousStudioError("Build the autonomous plan before paid production.")
-    result = run_pipeline(approved, images=list(images or []), voices=list(voices or []), output_root=output_root, persist=True, render_media=True, video_mode="ai-video", max_chapters=12, target_runtime_seconds=int(execution.get("targetRuntimeSeconds", 8) or 8), video_max_shots=int(execution.get("plannedShots", 1) or 1), video_batch_size=int(execution.get("batchSize", 1) or 1), video_max_retries=int(execution.get("retriesPerShot", 1) or 1), video_max_provider_calls=int(execution.get("maxProviderCalls", 1) or 1), video_max_spend_usd=float(cfg["maxSpendUsd"]) if cfg["maxSpendUsd"] > 0 else None, video_cost_per_second_usd=float(cfg["costPerSecondUsd"]) if cfg["costPerSecondUsd"] > 0 else None, video_continuous=bool(execution.get("continuous", True)), video_use_continuity=True, progress=progress)
+    result = run_pipeline(
+        approved, images=list(images or []), voices=list(voices or []),
+        output_root=output_root, persist=True, render_media=True, video_mode="ai-video", max_chapters=12,
+        target_runtime_seconds=int(execution.get("targetRuntimeSeconds", 8) or 8),
+        video_clip_duration_seconds=execution.get("clipDurationSeconds"),
+        video_max_shots=int(execution.get("plannedShots", 1) or 1),
+        video_batch_size=int(execution.get("batchSize", 1) or 1),
+        video_max_retries=int(execution.get("retriesPerShot", 1) or 1),
+        video_max_provider_calls=int(execution.get("maxProviderCalls", 1) or 1),
+        video_max_spend_usd=float(cfg["maxSpendUsd"]) if cfg["maxSpendUsd"] > 0 else None,
+        video_cost_per_second_usd=float(cfg["costPerSecondUsd"]) if cfg["costPerSecondUsd"] > 0 else None,
+        video_continuous=bool(execution.get("continuous", True)), video_use_continuity=True, progress=progress,
+    )
     run_id = _run_id(result)
     if not run_id:
         return {"runId": "", "projectId": project_id, "result": result, "quality": {}, "errors": ["The pipeline returned no durable run ID."]}
     return finish_autonomous_run(run_id, project_id=project_id, config=cfg, output_root=output_root)
 
 
-def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool = True) -> dict[str, Any]:
+def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool | None = None) -> dict[str, Any]:
     from .pipeline import resume_video_run
+
     workspace = RunWorkspace.open_existing(output_root, run_id)
     job_path = workspace.path / "autonomous_job.json"
     if job_path.exists():
@@ -376,7 +422,15 @@ def continue_autonomous_production(run_id: str, *, output_root: str = "runs", ba
     cfg = normalize_autonomous_config(job.get("config"))
     queue = load_video_queue(workspace.media_dir) or {}
     qcfg = queue.get("config") or {}
-    resume_video_run(run_id, output_root=output_root, batch_size=int(batch_size or cfg.get("batchSize") or qcfg.get("batch_size") or 1), continuous=bool(continuous), max_retries=int(cfg.get("retriesPerShot") or qcfg.get("max_retries_per_shot") or 1), max_provider_calls=int(cfg.get("maxProviderCalls") or qcfg.get("max_provider_calls") or 1), use_continuity=True)
+    resume_video_run(
+        run_id,
+        output_root=output_root,
+        batch_size=int(batch_size or cfg.get("batchSize") or qcfg.get("batch_size") or 1),
+        continuous=cfg["continuous"] if continuous is None else continuous,
+        max_retries=int(cfg.get("retriesPerShot") or qcfg.get("max_retries_per_shot") or 1),
+        max_provider_calls=int(cfg.get("maxProviderCalls") or qcfg.get("max_provider_calls") or 1),
+        use_continuity=True,
+    )
     return finish_autonomous_run(run_id, project_id=str(job.get("projectId") or cfg.get("projectId") or ""), config=cfg, output_root=output_root)
 
 

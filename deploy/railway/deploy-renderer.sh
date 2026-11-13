@@ -7,4 +7,7 @@ if [[ -z ${SILVER_SCREEN_PASSWORD_HASH:-} ]] && (( ${#studio_password} < 12 )); 
     echo "Set a private studio password with at least 12 characters." >&2
     exit 1
 fi
-exec modal deploy deploy/modal/worker.py
+modal deploy deploy/modal/worker.py
+if ! modal deploy deploy/modal/screenplay.py; then
+    echo 'Screenplay writer deployment failed. The video studio will start and can still render.' >&2
+fi

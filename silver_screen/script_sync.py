@@ -27,7 +27,7 @@ from .voice_providers import make_voice_provider
 
 TIMECODE_LINE = re.compile(
     r"^\s*(?:\[(?P<start>\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\s*(?:-->|-|to)\s*(?P<end>\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?)\]\s*)?"
-    r"(?P<speaker>[A-Za-z0-9 ._'’-]{1,80})\s*:\s*(?P<text>.+?)\s*$"
+    r"(?P<speaker>[\w ._'’-]{1,80})\s*:\s*(?P<text>.+?)\s*$"
 )
 SCENE_LINE = re.compile(r"^\s*(?:INT\.|EXT\.|SCENE\s+\d+|#|\[SCENE).*", re.I)
 WORD_RE = re.compile(r"\S+")

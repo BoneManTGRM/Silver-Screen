@@ -5,28 +5,47 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from .ai_video import VideoGenerationError
+from .ai_video import PredictionPending, VideoGenerationError
 from .comfyui import MAX_OUTPUT, ComfyUIClient
 
 
-def modal_configured() -> bool:
+def _configured(app_setting: str) -> bool:
     return all(os.getenv(key, '').strip() for key in (
-        'SILVER_SCREEN_MODAL_APP', 'MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET',
+        app_setting, 'MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET',
     ))
+
+
+def modal_configured() -> bool:
+    return _configured('SILVER_SCREEN_MODAL_APP')
+
+
+def screenplay_writer_configured() -> bool:
+    return _configured('SILVER_SCREEN_SCREENPLAY_APP')
+
+
+def _modal_client(app_setting: str = 'SILVER_SCREEN_MODAL_APP'):
+    if not _configured(app_setting):
+        raise VideoGenerationError('Configure the Modal app and deployment credentials first.')
+    try:
+        import modal
+    except ImportError as exc:
+        raise VideoGenerationError('Install the Modal SDK to enable this renderer.') from exc
+    return modal
+
+
+def modal_function(name: str, *, app_setting: str):
+    modal = _modal_client(app_setting)
+    try:
+        return modal, modal.Function.from_name(os.environ[app_setting].strip(), name)
+    except modal.exception.Error as exc:
+        raise VideoGenerationError(f'Modal could not load {name} ({type(exc).__name__}).') from exc
 
 
 class ModalComfyUIClient(ComfyUIClient):
     timeout_seconds = 1600
 
     def __init__(self, *, kind: str = 'video') -> None:
-        if not modal_configured():
-            raise VideoGenerationError('Configure the Modal app and deployment credentials first.')
-        try:
-            import modal
-        except ImportError as exc:
-            raise VideoGenerationError('Install the Modal SDK to enable this renderer.') from exc
-
-        self.modal = modal
+        self.modal = _modal_client()
         self.kind = kind
         self.supports_reference = kind == 'video'
         self.app = os.environ['SILVER_SCREEN_MODAL_APP'].strip()
@@ -47,8 +66,10 @@ class ModalComfyUIClient(ComfyUIClient):
         except TimeoutError:
             return result
         except self.modal.exception.Error as exc:
-            if isinstance(exc, (self.modal.exception.ConnectionError, self.modal.exception.AuthError)):
-                raise VideoGenerationError(f'Modal status check failed ({type(exc).__name__}).') from exc
+            if isinstance(exc, (
+                self.modal.exception.ConnectionError, self.modal.exception.ServiceError, self.modal.exception.AuthError,
+            )):
+                raise PredictionPending(f'Modal could not check the existing render ({type(exc).__name__}).') from exc
             return dict(result, status='failed', error=f'Modal render failed ({type(exc).__name__}).')
         except Exception as exc:
             return dict(result, status='failed', error=f'GPU render failed ({type(exc).__name__}).')

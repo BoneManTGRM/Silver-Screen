@@ -6,6 +6,7 @@ import io
 import subprocess
 import urllib.request
 from pathlib import Path
+from textwrap import fill
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import urlsplit
@@ -110,16 +111,54 @@ def _clip_timing(source: Path) -> tuple[float, float | None]:
     return duration, metadata.get("frameRate")
 
 
-def _encode_video(command: list[str]) -> None:
+def _encode_video(command: list[str], *, cwd: Path | None = None) -> None:
     ffmpeg = _ffmpeg_path()
     if not ffmpeg:
         raise VideoGenerationError("FFmpeg is required to export video.")
     result = subprocess.run(
         [ffmpeg, "-nostdin", "-v", "error", "-y", *command],
-        capture_output=True, text=True, timeout=300,
+        capture_output=True, text=True, timeout=300, cwd=cwd,
     )
     if result.returncode != 0:
         raise VideoGenerationError(f"Video export failed: {result.stderr[-1000:]}")
+
+
+def finish_short_video(
+    source: Path, destination: Path, *, seconds: int, brand: str = "", cta: str = "",
+) -> Path:
+    """Export the requested runtime and optionally overlay a final end card."""
+    available, _ = _clip_timing(source)
+    if available + 0.25 < seconds:
+        raise VideoGenerationError(f"The footage is {available:.1f} seconds long. The cut requires {seconds} seconds.")
+    start = max(0, seconds - 3)
+    brand, cta = brand.strip(), cta.strip()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="short-export-", dir=destination.parent) as directory:
+        work = Path(directory)
+        filters = ["fps=24,tpad=stop_mode=clone:stop_duration=0.25"]
+        for text, size, bottom in ((brand, 22, 0.26 if cta else 0.1), (cta, 30, 0.07)):
+            if not text:
+                continue
+            # FFmpeg receives text through a file, and percent signs are literal.
+            name = f"line-{size}.txt"
+            (work / name).write_text(fill(text, width=26), encoding="utf-8")
+            filters.append(
+                f"drawtext=font=DejaVu Sans:textfile={name}:expansion=none:"
+                f"fontsize=h/{size}:fontcolor=white:box=1:boxcolor=black@0.75:boxborderw=8:"
+                f"x=(w-tw)/2:y=h-th-h*{bottom}:enable='gte(t,{start})'"
+            )
+        staged = work / "export.mp4"
+        _encode_video(
+            ["-i", str(source.resolve()), "-vf", ",".join(filters), "-c:v", "libx264",
+             "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18", "-c:a", "copy",
+             "-t", str(seconds), "-movflags", "+faststart", staged.name],
+            cwd=work,
+        )
+        duration, _ = _clip_timing(staged)
+        if abs(duration - seconds) > 1 / 24 + 0.001:
+            raise VideoGenerationError("The exported video does not match the selected length.")
+        staged.replace(destination)
+    return destination
 
 
 def _motion_filter(source_fps: float | None) -> str:

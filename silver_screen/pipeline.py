@@ -371,6 +371,7 @@ def run_pipeline(
     max_cycles: int | None = None,
     energy_budget: int | None = None,
     target_runtime_seconds: int | None = None,
+    video_clip_duration_seconds: int | None = None,
     video_max_shots: int | None = None,
     video_batch_size: int | None = None,
     video_max_retries: int | None = None,
@@ -403,6 +404,7 @@ def run_pipeline(
         "maxCycles": cycle_limit,
         "energyBudget": budget,
         "targetRuntimeSeconds": target_runtime_seconds,
+        "videoClipDurationSeconds": video_clip_duration_seconds,
         "videoMaxShots": video_max_shots,
         "videoBatchSize": video_batch_size,
         "videoMaxRetries": video_max_retries,
@@ -501,6 +503,7 @@ def run_pipeline(
                 max_chapters=chapter_limit,
                 video_mode=video_mode,
                 target_runtime_seconds=target_runtime_seconds,
+                video_clip_duration_seconds=video_clip_duration_seconds,
                 video_max_shots=video_max_shots,
                 video_batch_size=video_batch_size,
                 video_max_retries=video_max_retries,
@@ -648,6 +651,7 @@ def resume_video_run(
             target_runtime_seconds=options.get(
                 "targetRuntimeSeconds"
             ),
+            video_clip_duration_seconds=options.get("videoClipDurationSeconds"),
             video_max_shots=options.get("videoMaxShots"),
             video_batch_size=(
                 batch_size

@@ -16,8 +16,10 @@ COPY deploy/runpod/workflows ./deploy/runpod/workflows
 COPY deploy/railway/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/railway/start.sh /app/start.sh
 COPY deploy/modal/worker.py ./deploy/modal/worker.py
+COPY deploy/modal/screenplay.py ./deploy/modal/screenplay.py
 COPY deploy/railway/deploy-renderer.sh /app/deploy-renderer.sh
 ENV SILVER_SCREEN_VIDEO_BACKEND=comfyui \
+    SILVER_SCREEN_SCREENPLAY_APP=silver-screen-writer \
     SILVER_SCREEN_CAST_LIBRARY_DIR=/app/runs/cast \
     SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW=/app/deploy/runpod/workflows/flux-schnell.json \
     SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=/app/deploy/runpod/workflows/wan-video.json \
