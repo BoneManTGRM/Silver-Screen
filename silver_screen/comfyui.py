@@ -28,6 +28,7 @@ WAN_LANDSCAPE_HD = (1280, 704)
 WAN_PORTRAIT_HD = (704, 1280)
 WAN_14B_LANDSCAPE_HD = (1280, 720)
 WAN_14B_MAX_SECONDS = 5
+MOTION_REFERENCE_LIMIT = 12 * 1024 * 1024
 WAN_14B_FPS = 16
 WAN_14B_STEPS = 40
 WAN_MOTION_NEGATIVE_PROMPT = (
@@ -80,12 +81,12 @@ def _valid_wan_reference_size(size: tuple[int, int], *, wan_14b: bool) -> bool:
     return width * height <= pixel_limit and all(256 <= side <= 1280 and side % stride == 0 for side in (width, height))
 
 
-def _wan_14b_split_step(steps: int) -> int:
+def _wan_14b_split_step(steps: int, *, boundary: float = 0.9) -> int:
     # ComfyUI's simple scheduler samples 1,000 shifted timesteps from high to low.
-    # Wan I2V switches experts at the first shifted timestep below 0.900.
+    # Switch experts at the first shifted timestep below the model's boundary.
     for step in range(1, steps):
         time = (1000 - step * 1000 // steps) / 1000
-        if 5 * time / (1 + 4 * time) < 0.9:
+        if 5 * time / (1 + 4 * time) < boundary:
             return step
     return steps - 1
 
@@ -239,6 +240,7 @@ class ComfyUIClient:
         video_size: tuple[int, int] | None = None,
         steps: int | None = None,
         negative_prompt: str = "",
+        control_video_name: str | None = None,
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError("Enter a prompt before generating.")
@@ -257,6 +259,9 @@ class ComfyUIClient:
             workflow[end_node] = {"class_type": "LoadImage", "inputs": {"image": "__END_IMAGE__"}}
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
+        if control_video_name:
+            required.add("__CONTROL_VIDEO__")
+            replacements["__CONTROL_VIDEO__"] = control_video_name
         if kind != "image":
             if video_size is not None and not (
                 video_size in self.video_sizes.values()
@@ -279,7 +284,9 @@ class ComfyUIClient:
                                 __SPLIT_STEP__=sampling_steps // 2,
                                 __NEGATIVE_PROMPT__=negative_prompt)
             if wan_14b:
-                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(sampling_steps)
+                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(
+                    sampling_steps, boundary=0.875 if kind == "video" else 0.9,
+                )
             required.add("__FRAMES__")
             if video_size is not None or steps is not None or negative_prompt:
                 required.update(VIDEO_CONTROL_MARKERS)

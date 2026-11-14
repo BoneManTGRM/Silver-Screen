@@ -13,7 +13,7 @@ import urllib.request
 import modal
 
 from silver_screen.ai_video import PredictionPending, VideoGenerationError
-from silver_screen.comfyui import WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
+from silver_screen.comfyui import MOTION_REFERENCE_LIMIT, WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
 from silver_screen.hand_review import HAND_REVIEW_UNAVAILABLE, MODEL_DIR, HandReviewer
 from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip
 
@@ -34,6 +34,7 @@ WAN_14B_MODELS = (
     'diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors',
     'vae/wan_2.1_vae.safetensors',
 )
+WAN_MOTION_MODELS = 'https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/9d61793228f8e5228202f3935eee5e4cf3760aa3/split_files'
 STANDARD_TIMEOUT = 1500
 WAN_14B_TIMEOUT = 2700
 WAN_14B_GPUS = ['H100', 'L40S']
@@ -80,6 +81,22 @@ wan_14b_image = image.run_commands(*[
     f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
     for path in WAN_14B_MODELS
 ])
+motion_image = image.run_commands(*[
+    f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {source}/{path}'
+    for path, source in (
+        ('diffusion_models/wan2.2_fun_control_high_noise_14B_fp8_scaled.safetensors', WAN_MOTION_MODELS),
+        ('diffusion_models/wan2.2_fun_control_low_noise_14B_fp8_scaled.safetensors', WAN_MOTION_MODELS),
+        ('vae/wan_2.1_vae.safetensors', WAN_14B),
+    )
+])
+wan_text_image = image.run_commands(*[
+    f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
+    for path in (
+        'diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+        'diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+        'vae/wan_2.1_vae.safetensors',
+    )
+])
 image = _with_hand_review(image)
 wan_14b_image = _with_hand_review(wan_14b_image)
 if modal.is_local():
@@ -90,7 +107,13 @@ if modal.is_local():
     wan_14b_image = wan_14b_image.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
-app = modal.App('silver-screen-renderer')
+    motion_image = motion_image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
+    wan_text_image = wan_text_image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
+app = modal.App(os.getenv('SILVER_SCREEN_RENDERER_DEPLOY_APP', 'silver-screen-renderer'))
 clips_volume = modal.Volume.from_name(CLIPS_VOLUME, create_if_missing=True)
 
 
@@ -112,6 +135,62 @@ def render_wan14(kind: str, prompt: str, settings: dict) -> bytes | dict:
     if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
         raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
     return _render(kind, prompt, settings, wan_14b=True)
+
+
+@app.function(
+    image=motion_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def render_wan14_motion(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    if kind != 'video' or not settings.get('image') or settings.get('end_image'):
+        raise VideoGenerationError('Motion reference requires a look image and a reference clip.')
+    if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
+        raise VideoGenerationError('Choose a 2- to 5-second render for motion reference.')
+    reference = settings.get('motion_reference')
+    if not isinstance(reference, bytes) or not 0 < len(reference) <= MOTION_REFERENCE_LIMIT:
+        raise VideoGenerationError('Choose a motion reference video up to 12 MiB.')
+    return _render(kind, prompt, settings, wan_14b=True, allow_retake=False)
+
+
+@app.function(
+    image=wan_text_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def render_wan14_text(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    if kind != 'video' or any(settings.get(key) is not None for key in ('image', 'end_image', 'motion_reference')):
+        raise VideoGenerationError('Use a text prompt for this render.')
+    if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
+        raise VideoGenerationError('Choose a 2- to 5-second clip for Wan 2.2 14B.')
+    return _render(kind, prompt, settings, wan_14b=True)
+
+
+@app.local_entrypoint()
+def check_prompt_only(model: str = '14b', seed: int = 341597):
+    """Run one prompt-only take and print the recoverable render ID."""
+    from silver_screen.comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT
+    from silver_screen.direct_generation import direct_video_prompt
+
+    if model not in {'14b', '5b'}:
+        raise ValueError('Choose 14b or 5b.')
+    if not 0 <= seed < 2**53:
+        raise ValueError('Choose a whole-number seed from 0 to 9007199254740991.')
+    prompt = direct_video_prompt(
+        'A continuous, locked, full-body shot of two adult dancers in a sunlit rehearsal room. '
+        'They step apart once and plant both feet, then raise their open hands to shoulder height. '
+        'Their faces, hands, and shoes stay in view. Natural daylight and realistic movement.',
+        natural_pace=True,
+    )
+    renderer = render_wan14_text if model == '14b' else render
+    call = renderer.spawn('video', prompt, {
+        'duration': 5, 'seed': seed, 'steps': 40 if model == '14b' else 24,
+        'video_size': WAN_14B_LANDSCAPE_HD if model == '14b' else WAN_LANDSCAPE_HD,
+        'negative_prompt': WAN_MOTION_NEGATIVE_PROMPT, 'save_clip': True,
+    })
+    print(f'Modal render ID: {call.object_id}', flush=True)
+    result = call.get()
+    if not isinstance(result, dict) or not result.get('archived'):
+        raise RuntimeError('Modal could not confirm that the test clip was saved.')
+    print(f'Five-second test clip saved: {call.object_id}', flush=True)
 
 
 @app.function(
@@ -198,18 +277,24 @@ def _render(
     if kind not in {'image', 'video'}:
         raise ValueError('Unsupported render type.')
     settings = dict(settings)
+    motion_reference = settings.pop('motion_reference', None)
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     check_hands = settings.pop('check_hands', False) and kind == 'video'
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
-    reference = settings.get('image') if save_clip or check_hands else None
+    reference = settings.get('image') if (save_clip or check_hands) and motion_reference is None else None
     hand_review = None
     reference_workflow = 'wan-reference-14b.json' if wan_14b else 'wan-reference.json'
+    if motion_reference is not None:
+        reference_workflow = 'wan-motion-control-14b.json'
     fps = WAN_14B_FPS if wan_14b else 24
     os.environ.update(
         SILVER_SCREEN_COMFYUI_URL='http://127.0.0.1:8188',
         SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW='/opt/workflows/flux-schnell.json',
-        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW='/opt/workflows/wan-video.json',
+        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=(
+            '/opt/workflows/wan-text-14b.json' if wan_14b and not settings.get('image')
+            else '/opt/workflows/wan-video.json'
+        ),
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
         SILVER_SCREEN_COMFYUI_FPS=str(fps),
     )
@@ -222,6 +307,15 @@ def _render(
             path = Path(directory) / name
             path.mkdir()
             command.extend((f'--{name}-directory', str(path)))
+        if motion_reference is not None:
+            from silver_screen.direct_generation import prepare_motion_reference
+
+            control = Path(directory) / 'input' / 'motion.mp4'
+            prepare_motion_reference(
+                motion_reference, control, settings.get('video_size') or (832, 480),
+                seconds=settings['duration'],
+            )
+            settings['control_video_name'] = control.name
         process = subprocess.Popen(command, cwd=COMFY)
         try:
             deadline = time.monotonic() + 90

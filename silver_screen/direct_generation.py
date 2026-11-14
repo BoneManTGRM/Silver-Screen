@@ -17,7 +17,7 @@ from .ai_video import (
     DEFAULT_MODEL, ReplicateVideoClient, VideoGenerationError, _ffmpeg_path,
     _ffprobe_path, verify_mp4,
 )
-from .comfyui import WAN_14B_FPS, wan_reference_size
+from .comfyui import MOTION_REFERENCE_LIMIT, WAN_14B_FPS, wan_reference_size
 from .voice_audio import _has_audio, combine_voice_tracks, mix_voice_into_clip, verify_audio
 
 IMAGE_MODEL = "black-forest-labs/flux-schnell"
@@ -31,6 +31,19 @@ FILM_CANVASES = {
     "Portrait HD · 720 × 1280": (720, 1280),
     "Landscape compact · 960 × 540": (960, 540),
 }
+
+
+def direct_video_prompt(prompt: str, *, natural_pace: bool) -> str:
+    """Add real-time direction while preserving the shot's user-written action."""
+    if not natural_pace or not prompt.strip():
+        return prompt
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "Play the described action once, in order, at natural real-time speed. "
+        "Start the first movement promptly and carry it through to a clear finish. "
+        "For steps, show each foot plant and the weight transfer before the next step. "
+        "For gestures, use a clear start and finish with natural acceleration and settling."
+    )
 
 
 def prepare_wan_reference(
@@ -181,6 +194,36 @@ def _verified_clip(source: Path) -> dict[str, Any]:
     if _ffprobe_path() and not (metadata["width"] and metadata["height"]):
         raise VideoGenerationError("The generated MP4 has no readable video track.")
     return metadata
+
+
+def prepare_motion_reference(
+    data: bytes, destination: Path, size: tuple[int, int], *, seconds: int,
+) -> None:
+    """Sample the driving clip by timestamp at the model's native cadence."""
+    if not 0 < len(data) <= MOTION_REFERENCE_LIMIT:
+        raise VideoGenerationError("Choose a motion reference video up to 12 MiB.")
+    width, height = size
+    with TemporaryDirectory() as directory:
+        source = Path(directory) / "reference.mp4"
+        source.write_bytes(data)
+        try:
+            _encode_video([
+                "-protocol_whitelist", "file", "-f", "mov", "-i", str(source),
+                "-map", "0:V:0", "-an", "-sn", "-dn",
+                "-vf", (
+                    f"setpts=PTS-STARTPTS,fps={WAN_14B_FPS},"
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,"
+                    f"tpad=stop=1:stop_mode=clone"
+                ),
+                "-frames:v", str(seconds * WAN_14B_FPS + 1), "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", str(destination),
+            ])
+        except (subprocess.SubprocessError, OSError, VideoGenerationError) as exc:
+            raise VideoGenerationError("The motion reference could not be converted.") from exc
+        duration, _ = _clip_timing(destination)
+        if duration + 0.001 < seconds + 1 / WAN_14B_FPS:
+            raise VideoGenerationError("The motion reference is shorter than the requested clip.")
 
 
 def _clip_timing(source: Path) -> tuple[float, float | None]:

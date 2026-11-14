@@ -164,6 +164,74 @@ def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_serve
     assert submissions["job-1"]["2"]["inputs"]["length"] == 145
 
 
+def test_motion_reference_reaches_the_wan_control_graph(comfy_server, monkeypatch):
+    submissions, _, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-motion-control-14b.json"))
+    monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
+    ComfyUIClient().create_prediction(
+        "Two performers step apart.", seed=7, duration=5,
+        image="data:image/jpeg;base64,ZmFrZS1qcGVn", control_video_name="motion.mp4",
+    )
+    graph = submissions["job-1"]
+    assert graph["16"]["inputs"]["file"] == "motion.mp4"
+    assert graph["8"]["inputs"]["control_video"] == ["18", 0]
+    assert graph["8"]["inputs"]["ref_image"] == ["7", 0]
+    assert graph["8"]["inputs"]["length"] == 81
+    assert graph["14"]["inputs"]["fps"] == 16
+
+
+def test_text_only_routes_to_the_wan_14b_graph(comfy_server, monkeypatch):
+    submissions, uploads, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-text-14b.json"))
+    monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
+    client = ComfyUIClient()
+    client.video_sizes = WAN_14B_VIDEO_SIZES
+    client.create_prediction("Two performers step apart.", seed=7, duration=5, video_size=(1280, 720))
+    graph = submissions["job-1"]
+    assert not uploads
+    assert graph["8"]["inputs"] == {"width": 1280, "height": 720, "length": 81, "batch_size": 1}
+    assert graph["11"]["inputs"]["end_at_step"] == graph["12"]["inputs"]["start_at_step"] == 17
+    assert graph["14"]["inputs"]["fps"] == 16
+
+
+def test_direct_create_accepts_only_a_prompt_for_hd_14b(comfy_server, monkeypatch):
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-video.json"))
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference.json"))
+    monkeypatch.setenv("SILVER_SCREEN_TEXT_14B", "1")
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    submissions = []
+
+    def lookup(app, function):
+        def spawn(kind, prompt, settings):
+            submissions.append((function, prompt, settings))
+            return SimpleNamespace(object_id="fc-" + "4" * 26)
+        return SimpleNamespace(spawn=spawn)
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Function=SimpleNamespace(from_name=lookup), exception=modal_errors,
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=lambda **_: None)),
+    ))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    app.text_area[0].set_value("Two dancers step apart in a rain-soaked courtyard.")
+    generate_button(app).click().run()
+
+    assert not app.exception
+    (function, prompt, settings), = submissions
+    assert function == "render_wan14_text"
+    assert prompt.startswith("Two dancers step apart in a rain-soaked courtyard.")
+    assert "natural real-time speed" in prompt
+    assert settings["image"] is None
+    assert settings["duration"] == 5
+    assert settings["video_size"] == (1280, 720)
+    assert settings["save_clip"] is True
+
+
 def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
@@ -455,7 +523,8 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     app_name, function, kind, prompt, settings = submissions[0]
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
-    assert prompt == "The runner lifts both hands."
+    assert prompt.startswith("The runner lifts both hands.\n\n")
+    assert "at natural real-time speed" in prompt
     assert "camera shake" in settings["negative_prompt"]
     assert "blurry subject" in settings["negative_prompt"]
     assert "wrist stumps" in settings["negative_prompt"]

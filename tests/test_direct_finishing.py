@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 
 from silver_screen.ai_video import VideoGenerationError
-from silver_screen.direct_generation import assemble_direct_film, finish_direct_clip, verify_direct_clip, verify_direct_output
+from silver_screen.direct_generation import (
+    assemble_direct_film, finish_direct_clip, prepare_motion_reference, verify_direct_clip, verify_direct_output,
+)
 from silver_screen.voice_audio import verify_audio
 from silver_screen.voice_config import VoiceStudioError
 
@@ -28,6 +30,26 @@ def _probe(path):
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg and FFprobe")
 class DirectFinishingTests(unittest.TestCase):
+    def test_motion_reference_follows_timestamps_and_keeps_full_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, control = root / "source.mp4", root / "control.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=240x320:r=30:d=5",
+                    "-c:v", "libx264", source)
+            prepare_motion_reference(source.read_bytes(), control, (352, 480), seconds=5)
+            stream, = _probe(control)["streams"]
+            self.assertEqual(stream["avg_frame_rate"], "16/1")
+            self.assertEqual(stream["nb_frames"], "81")
+            self.assertAlmostEqual(float(_probe(control)["format"]["duration"]), 5.0625, places=3)
+
+    def test_motion_reference_rejects_short_footage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, control = root / "source.mp4", root / "control.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x240:r=30:d=2", "-c:v", "libx264", source)
+            with self.assertRaisesRegex(VideoGenerationError, "shorter than the requested clip"):
+                prepare_motion_reference(source.read_bytes(), control, (320, 240), seconds=5)
+
     def test_short_modal_result_is_not_offered_as_full_clip(self):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory) / "short.mp4"

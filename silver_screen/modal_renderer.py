@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
-from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient
+from .comfyui import MAX_OUTPUT, MOTION_REFERENCE_LIMIT, WAN_14B_MAX_SECONDS, ComfyUIClient
 from .hand_review import HAND_REVIEW_UNAVAILABLE
 from .modal_clip_archive import CLIPS_VOLUME, MODAL_RENDER_ID, latest_saved_clips, read_saved_clip, read_saved_hand_review
 
@@ -69,11 +69,19 @@ class ModalComfyUIClient(ComfyUIClient):
             raise VideoGenerationError('An ending image requires Wan 2.2 14B.')
         function = 'render'
         if wan_14b:
-            if self.kind != 'video' or not settings.get('image'):
-                raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
+            if self.kind != 'video':
+                raise VideoGenerationError('Wan 2.2 14B is a video renderer.')
             if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
                 raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
-            function = 'render_wan14'
+            function = 'render_wan14' if settings.get('image') else 'render_wan14_text'
+            if settings.get('end_image') and not settings.get('image'):
+                raise VideoGenerationError('An ending image requires a starting photo.')
+        if (reference := settings.get('motion_reference')) is not None:
+            if not wan_14b or not settings.get('image') or settings.get('end_image'):
+                raise VideoGenerationError('Motion reference requires Wan 2.2 14B and a look image.')
+            if not isinstance(reference, bytes) or not 0 < len(reference) <= MOTION_REFERENCE_LIMIT:
+                raise VideoGenerationError('Choose a motion reference video up to 12 MiB.')
+            function = 'render_wan14_motion'
         try:
             call = self.modal.Function.from_name(self.app, function).spawn(self.kind, prompt, settings)
         except self.modal.exception.Error as exc:
