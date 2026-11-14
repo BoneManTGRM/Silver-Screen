@@ -30,3 +30,9 @@ For 14B renders Modal tries an H100 first and falls back to an L40S when needed.
 For a repeatable GPU check, the private Modal dashboard exposes **check_wan14_motion**. Run it with seed `341597` to render one three-second shot from the public MediaPipe pose sample. It uses the same renderer as Direct Create and allows up to 30 minutes for one full-quality attempt. Use the returned ID in **Recover a Modal render** or open the take in **Saved clips**, then review movement and hand detail. The check consumes Modal compute credits when invoked.
 
 **check_wan14_duet** uses the same settings and accepts a seed for a three-second two-person motion check. It adapts [a reference photo by Shixart1985](https://commons.wikimedia.org/wiki/File:Two_individuals_share_a_playful_and_lively_moment_outside_a_building,_engaging_in_a_dance_as_they_smile_and_hold_hands.jpg) under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/).
+
+### Preview motion-guided shots
+
+Deploy the worker to a test app with `SILVER_SCREEN_RENDERER_DEPLOY_APP=silver-screen-motion-preview modal deploy deploy/modal/worker.py`. In the matching private studio, set `SILVER_SCREEN_MODAL_APP=silver-screen-motion-preview` and `SILVER_SCREEN_MOTION_REFERENCE=1`. Open Direct Create, select the 14B video model, add a starting photo for the look, and upload a motion reference. Use a 2- to 5-second MP4 or MOV up to 12 MiB, at least as long as the shot. Matching the look image and video framing gives the two inputs compatible compositions.
+
+The worker samples the reference by timestamp at Wan's native 16 fps, pads to fit the canvas without cropping, and uses edge conditioning for the whole frame. It drops source audio. Choose a five-second test with two visible people and check that both performers follow the source timing, retain distinct faces and hands, and keep their feet steady during pauses. Check playback again from Saved clips on an iPhone before enabling the option in production.

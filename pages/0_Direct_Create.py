@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from silver_screen.ai_video import (
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
 from silver_screen.comfyui import (
-    ComfyUIClient, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
+    ComfyUIClient, MOTION_REFERENCE_LIMIT, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
     WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, comfyui_ready, make_comfyui_client, video_controls_ready,
 )
 from silver_screen.direct_generation import (
@@ -299,6 +300,7 @@ if reference_ready and not is_image:
             if reference_label != "No photo":
                 reference = library_photos[reference_label]
 wan_14b = False
+motion_reference = None
 if use_modal and not is_image:
     if video_controls and reference is not None:
         wan_14b = st.selectbox(
@@ -307,6 +309,15 @@ if use_modal and not is_image:
         ) == WAN_14B_LABEL
     else:
         st.caption(WAN_5B_LABEL)
+    if wan_14b and os.getenv("SILVER_SCREEN_MOTION_REFERENCE") == "1":
+        motion_reference = st.file_uploader(
+            "Motion reference (optional)", type=["mp4", "mov"], key="wan-motion-reference",
+            help="Use a clip at least as long as the shot. The starting photo guides the look. "
+                 "The reference video guides movement and framing, and its audio is omitted.",
+        )
+        if motion_reference is not None and motion_reference.size > MOTION_REFERENCE_LIMIT:
+            reference_error = "Choose a motion reference video up to 12 MiB."
+            st.error(reference_error)
 if video_controls:
     with st.expander("Starting frame and render size", expanded=reference is not None):
         sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
@@ -323,7 +334,7 @@ if video_controls:
                 st.error(reference_error)
             else:
                 st.image(prepared_reference, caption=f"Starting frame · {frame_size[0]} × {frame_size[1]}", width=320)
-                if wan_14b:
+                if wan_14b and motion_reference is None:
                     end_image = st.file_uploader(
                         "Ending image (optional)", type=["png", "jpg", "jpeg", "webp"], key="wan-ending-image",
                         help="Guide the final pose with a second photo of the same subject and scene.",
@@ -358,13 +369,13 @@ with st.form("direct_create"):
     if not is_image:
         if video_controls:
             maximum = WAN_14B_MAX_SECONDS if wan_14b else 12
-            default_duration = 3 if wan_14b else (5 if use_modal else 8)
+            default_duration = 5 if motion_reference is not None else (3 if wan_14b else (5 if use_modal else 8))
             duration = st.number_input(
                 "Clip length in seconds", min_value=2, max_value=maximum,
                 value=min(shot.seconds if shot else default_duration, maximum),
                 key=f"wan-clip-length-{shot_number}-{maximum}",
             )
-            if use_modal:
+            if use_modal and motion_reference is None:
                 natural_pace = st.selectbox(
                     "Action timing", ("Natural real time", "Follow my prompt"),
                     index=1 if shot else 0,
@@ -422,6 +433,8 @@ if generate and not active:
                     video_options["save_clip"] = True
                 if wan_14b:
                     video_options["wan_14b"] = True
+                if motion_reference is not None:
+                    video_options["motion_reference"] = motion_reference.getvalue()
                 if prepared_end is not None:
                     video_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
                 prediction = make_comfyui_client(kind=workflow_kind).create_prediction(

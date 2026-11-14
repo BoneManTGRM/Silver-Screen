@@ -164,6 +164,23 @@ def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_serve
     assert submissions["job-1"]["2"]["inputs"]["length"] == 145
 
 
+def test_motion_reference_reaches_the_wan_control_graph(comfy_server, monkeypatch):
+    submissions, _, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-motion-control-14b.json"))
+    monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
+    ComfyUIClient().create_prediction(
+        "Two performers step apart.", seed=7, duration=5,
+        image="data:image/jpeg;base64,ZmFrZS1qcGVn", control_video_name="motion.mp4",
+    )
+    graph = submissions["job-1"]
+    assert graph["16"]["inputs"]["file"] == "motion.mp4"
+    assert graph["8"]["inputs"]["control_video"] == ["18", 0]
+    assert graph["8"]["inputs"]["ref_image"] == ["7", 0]
+    assert graph["8"]["inputs"]["length"] == 81
+    assert graph["14"]["inputs"]["fps"] == 16
+
+
 def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")

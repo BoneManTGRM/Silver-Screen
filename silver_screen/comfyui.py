@@ -28,6 +28,7 @@ WAN_LANDSCAPE_HD = (1280, 704)
 WAN_PORTRAIT_HD = (704, 1280)
 WAN_14B_LANDSCAPE_HD = (1280, 720)
 WAN_14B_MAX_SECONDS = 5
+MOTION_REFERENCE_LIMIT = 12 * 1024 * 1024
 WAN_14B_FPS = 16
 WAN_14B_STEPS = 40
 WAN_MOTION_NEGATIVE_PROMPT = (
@@ -239,6 +240,7 @@ class ComfyUIClient:
         video_size: tuple[int, int] | None = None,
         steps: int | None = None,
         negative_prompt: str = "",
+        control_video_name: str | None = None,
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError("Enter a prompt before generating.")
@@ -257,6 +259,9 @@ class ComfyUIClient:
             workflow[end_node] = {"class_type": "LoadImage", "inputs": {"image": "__END_IMAGE__"}}
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
+        if control_video_name:
+            required.add("__CONTROL_VIDEO__")
+            replacements["__CONTROL_VIDEO__"] = control_video_name
         if kind != "image":
             if video_size is not None and not (
                 video_size in self.video_sizes.values()
