@@ -184,12 +184,13 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    call_id = "fc-" + "1" * 26
     submissions = []
     checks = []
 
     def spawn(kind, prompt, settings):
         submissions.append((kind, prompt))
-        return SimpleNamespace(object_id="fc-test")
+        return SimpleNamespace(object_id=call_id)
 
     def get(*, timeout):
         assert timeout == 0
@@ -207,8 +208,9 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     app.radio[0].set_value("Video clip").run()
     app.text_area[0].set_value("A paper pinwheel spins.")
     app.button[0].click().run()
-    assert app.info[0].value.startswith("Render submitted to Modal.")
+    assert app.info[0].value.startswith("Waiting for Modal.")
     assert app.button[0].disabled
+    assert app.query_params == {"render": call_id, "render_seconds": "8"}
 
     # AppTest has no browser timer, so simulate the scheduled refresh without clicking a widget.
     app.run()
@@ -220,6 +222,52 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
     assert submissions == [("video", "A paper pinwheel spins.")]
     assert len(checks) == 2
+
+
+def test_direct_create_reloads_modal_job_and_reports_a_manual_check(comfy_server, monkeypatch):
+    _, _, media = comfy_server
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    call_id = "fc-" + "2" * 26
+    lookups = []
+
+    def from_id(render_id):
+        lookups.append(render_id)
+
+        def get(*, timeout):
+            assert timeout == 0
+            if len(lookups) < 3:
+                raise modal_errors.TimeoutError
+            return media["result.mp4"]
+
+        return SimpleNamespace(get=get)
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=from_id), exception=modal_errors,
+    ))
+    page = Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py"
+    app = AppTest.from_file(page)
+    app.query_params.update({"render": call_id, "render_seconds": "8"})
+    app.run()
+    assert app.radio[0].value == "Video clip"
+    assert app.button[0].disabled
+    app.button(key="direct-check-job").click().run()
+    assert any(caption.value.startswith("Last manual check") for caption in app.caption)
+    assert app.info[0].value.startswith("Waiting for Modal.")
+
+    # A new connection has no session state and still retrieves the existing job.
+    reopened = AppTest.from_file(page)
+    reopened.query_params.update(app.query_params)
+    reopened.run()
+    assert not reopened.exception
+    assert not reopened.error
+    assert not reopened.button[0].disabled
+    assert reopened.get("video")
+    assert "Download original clip" in [item.proto.label for item in reopened.get("download_button")]
+    assert reopened.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert "8-second clip" in [caption.value for caption in reopened.caption]
+    assert lookups == [call_id] * 3
 
 
 def test_recover_modal_clip_with_image_selected(comfy_server, monkeypatch):
@@ -246,6 +294,7 @@ def test_recover_modal_clip_with_image_selected(comfy_server, monkeypatch):
     assert app.get("video")
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
     assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert app.query_params == {"render": call_id}
     assert checked == [call_id]
 
 

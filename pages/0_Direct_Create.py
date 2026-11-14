@@ -35,6 +35,36 @@ from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
 
+MODAL_RENDER_ID = re.compile(r"fc-[0-9A-Z]{26}")
+
+
+def save_render_job(job: dict) -> None:
+    st.session_state["direct_create_job"] = job
+    render_id = job["prediction"].get("id") or ""
+    if job["backend"] == "ComfyUI" and MODAL_RENDER_ID.fullmatch(render_id):
+        seconds = job.get("requested_seconds") if job["model"] != IMAGE_MODEL else None
+        if seconds is None:
+            st.query_params.pop("render_seconds", None)
+            st.query_params["render"] = render_id
+        else:
+            st.query_params.update({"render": render_id, "render_seconds": str(seconds)})
+    else:
+        st.query_params.pop("render", None)
+        st.query_params.pop("render_seconds", None)
+
+
+def recover_modal_job(render_id: str, seconds: str = "") -> dict:
+    job = {
+        "backend": "ComfyUI",
+        "model": CLIP_MODEL,
+        "recovered": True,
+        "prediction": {"id": render_id, "status": "processing"},
+    }
+    if re.fullmatch(r"[2-9]|1[0-2]", seconds):
+        job["requested_seconds"] = int(seconds)
+    return job
+
+
 def refresh_render(job, film_shots, *, wait=False):
     def save_prediction(update):
         job["prediction"] = update
@@ -81,16 +111,25 @@ def refresh_render(job, film_shots, *, wait=False):
 
 @st.fragment(run_every=5)
 def show_modal_progress(job, film_shots):
-    st.info("Render submitted to Modal. Your result will appear here when it’s ready.")
+    status = st.empty()
     if "started" in job:
         minutes, seconds = divmod(int(monotonic() - job["started"]), 60)
         st.caption(f"Time since submission · {minutes}:{seconds:02d}")
-    st.button("Check existing prediction", key="direct-check-job")
-    refresh_render(job, film_shots)
+    if st.button("Check render status", key="direct-check-job"):
+        with st.spinner("Checking Modal…"):
+            refresh_render(job, film_shots)
+        job["last_manual_check"] = monotonic()
+    else:
+        refresh_render(job, film_shots)
     if job["prediction"].get("status") in TERMINAL_STATUSES:
         st.rerun()
     if error := job.get("check_error"):
-        st.warning(error)
+        status.warning(error)
+    else:
+        status.info("Waiting for Modal. Your result will appear here automatically when it’s ready.")
+    if checked := job.get("last_manual_check"):
+        seconds_ago = int(monotonic() - checked)
+        st.caption(f"Last manual check · {seconds_ago}s ago")
 
 
 st.set_page_config(page_title="Direct Create | Silver-Screen", page_icon="🎨")
@@ -115,7 +154,17 @@ with st.expander("Create offline on iPhone"):
     )
 
 
-kind = st.radio("Output", ("Image", "Video clip"), horizontal=True)
+job = st.session_state.get("direct_create_job")
+render_id = st.query_params.get("render", "")
+if job is None and MODAL_RENDER_ID.fullmatch(render_id):
+    job = recover_modal_job(render_id, st.query_params.get("render_seconds", ""))
+    st.session_state["direct_create_job"] = job
+elif job and not render_id and MODAL_RENDER_ID.fullmatch(job["prediction"].get("id") or ""):
+    save_render_job(job)
+
+if job and job.get("requested_seconds") and job["model"] == CLIP_MODEL:
+    st.session_state.setdefault("direct_create_output", "Video clip")
+kind = st.radio("Output", ("Image", "Video clip"), horizontal=True, key="direct_create_output")
 is_image = kind == "Image"
 workflow_kind = "image" if is_image else "video"
 backend = st.radio(
@@ -219,7 +268,6 @@ with st.form("direct_create"):
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
                 negative = st.text_area("Things to avoid (optional)")
                 video_options = {"video_size": VIDEO_SIZES[size], "steps": steps, "negative_prompt": negative}
-    job = st.session_state.get("direct_create_job")
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
     generate = st.form_submit_button("Generate", type="primary", disabled=active)
 
@@ -262,7 +310,7 @@ if generate and not active:
             job["shot_number"] = shot_number
         if use_comfyui:
             job["seed"] = seed
-        st.session_state["direct_create_job"] = job
+        save_render_job(job)
         if use_comfyui and str(prediction.get("id", "")).startswith("fc-"):
             st.rerun()
     except (VideoGenerationError, OSError) as exc:
@@ -281,7 +329,7 @@ if job:
     if auto_check:
         show_modal_progress(job, film_shots)
     elif "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
-        check = not generate and st.button("Check existing prediction", key="direct-check-job")
+        check = not generate and st.button("Check render status", key="direct-check-job")
         if check or generate:
             with st.spinner("Checking the render…" if check else "Rendering on the selected backend…"):
                 refresh_render(job, film_shots, wait=generate)
@@ -292,7 +340,7 @@ if job:
     elif not auto_check and (error := job.get("check_error")):
         st.error(error)
     elif not auto_check and "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
-        st.info("Render submitted. Use Check existing prediction to update this job.")
+        st.info("Render submitted. Use Check render status to update this job.")
     if "data" in job:
         if warning := job.get("film_warning"):
             st.warning(warning)
@@ -302,10 +350,10 @@ if job:
         else:
             filename = job.get("filename", "silver-screen.mp4")
             st.video(job["data"], format="video/mp4")
-            if "elapsed_seconds" in job:
-                st.caption(
-                    f"{job['requested_seconds']}-second clip · ready in {job['elapsed_seconds']:.1f} seconds"
-                )
+            if seconds := job.get("requested_seconds"):
+                elapsed = job.get("elapsed_seconds")
+                timing = f" · ready in {elapsed:.1f} seconds" if elapsed is not None else ""
+                st.caption(f"{seconds}-second clip{timing}")
             if "seed" in job:
                 st.caption(f"Seed {job['seed']}")
             st.download_button("Download original clip", job["data"], filename, "video/mp4")
@@ -392,15 +440,10 @@ with st.expander("Recover a Modal render"):
         previous_id = st.text_input("ComfyUI prediction ID", placeholder="fc-…").strip()
         recover = st.form_submit_button("Find render", disabled=active)
     if recover:
-        if not re.fullmatch(r"fc-[0-9A-Z]{26}", previous_id):
+        if not MODAL_RENDER_ID.fullmatch(previous_id):
             st.error("Enter the full ComfyUI prediction ID shown after submitting the render.")
         else:
-            st.session_state["direct_create_job"] = {
-                "backend": "ComfyUI",
-                "model": IMAGE_MODEL if is_image else CLIP_MODEL,
-                "recovered": True,
-                "prediction": {"id": previous_id, "status": "processing"},
-            }
+            save_render_job(recover_modal_job(previous_id))
             st.rerun()
 
 if not is_image and (shot or film_shots):
