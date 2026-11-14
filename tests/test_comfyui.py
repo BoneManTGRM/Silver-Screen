@@ -455,7 +455,8 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     app_name, function, kind, prompt, settings = submissions[0]
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
-    assert prompt == "The runner lifts both hands."
+    assert prompt.startswith("The runner lifts both hands.\n\n")
+    assert "at natural real-time speed" in prompt
     assert "camera shake" in settings["negative_prompt"]
     assert "blurry subject" in settings["negative_prompt"]
     assert "wrist stumps" in settings["negative_prompt"]
