@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import io
 import json
 import shutil
@@ -18,7 +19,9 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 from silver_screen.ai_video import generate_ai_video
-from silver_screen.comfyui import ComfyUIClient, WORKFLOW_ENV
+from silver_screen.cast_library import PHOTO_SLOTS
+from silver_screen.comfyui import ComfyUIClient, WAN_14B_VIDEO_SIZES, WORKFLOW_ENV
+from silver_screen.modal_clip_archive import CLIPS_VOLUME
 from test_long_video import _fake_assemble, _state
 
 
@@ -342,6 +345,186 @@ def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, m
         "-of", "csv=p=0", str(exported),
     ], text=True).strip()
     assert dimensions == "720,1280"
+
+
+def test_direct_create_previews_full_photo_and_guides_hand_motion(comfy_server, monkeypatch, tmp_path):
+    submissions, uploads, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-video.json"))
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference.json"))
+    monkeypatch.setenv("SILVER_SCREEN_CAST_LIBRARY_DIR", str(tmp_path))
+    photo = Image.new("RGB", (600, 1000), "green")
+    photo.paste("red", (0, 0, 600, 100))
+    photo.paste("blue", (0, 900, 600, 1000))
+    photo.save(tmp_path / f"{PHOTO_SLOTS['Your photo']}.jpg")
+
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
+    assert any(image.proto.imgs[0].caption == "Starting frame · 704 × 1280" for image in app.image)
+    next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
+    app.text_area[0].set_value("A runner warms up.")
+    app.text_area[1].set_value("camera shake")
+    app.button[0].click().run()
+    assert not app.exception
+    assert not app.error
+
+    graph = submissions["job-1"]
+    assert graph["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
+    assert graph["6"]["inputs"]["width"] == 704
+    assert graph["6"]["inputs"]["height"] == 1280
+    assert "Keep both hands visible" in graph["4"]["inputs"]["text"]
+    assert "camera shake, hands out of frame, missing hands" in graph["5"]["inputs"]["text"]
+    jpeg = uploads[0].split(b"\r\n\r\n", 1)[1].split(b"\r\n--", 1)[0]
+    with Image.open(io.BytesIO(jpeg)) as fitted:
+        assert fitted.size == (704, 1280)
+        assert fitted.getpixel((352, 70))[0] > 230
+        assert fitted.getpixel((352, 1210))[2] > 230
+
+
+def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypatch, tmp_path):
+    _, _, media = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-video.json"))
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference.json"))
+    monkeypatch.setenv("SILVER_SCREEN_CAST_LIBRARY_DIR", str(tmp_path))
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    Image.new("RGB", (720, 1280), "blue").save(tmp_path / f"{PHOTO_SLOTS['Your photo']}.jpg")
+    call_id = "fc-" + "5" * 26
+    submissions = []
+
+    def lookup(app_name, function):
+        def spawn(kind, prompt, settings):
+            submissions.append((app_name, function, kind, prompt, settings))
+            return SimpleNamespace(object_id=call_id)
+        return SimpleNamespace(spawn=spawn)
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Function=SimpleNamespace(from_name=lookup),
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=lambda **_: media["result.mp4"])),
+        exception=modal_errors,
+    ))
+    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    assert not any(box.label == "Render model" for box in app.selectbox)
+    next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
+    models = next(box for box in app.selectbox if box.label == "Render model")
+    assert models.value == "Wan 2.2 5B · 24 fps"
+    models.select("Wan 2.2 14B · 16 fps").run()
+    assert app.number_input[0].max == 5
+    assert any(image.proto.imgs[0].caption == "Starting frame · 720 × 1280" for image in app.image)
+    assert app.slider[0].value == 20
+    next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
+    app.text_area[0].set_value("The runner lifts both hands.")
+    app.button[0].click().run()
+    assert not app.exception
+    assert not app.error
+    assert app.get("video")
+    app_name, function, kind, prompt, settings = submissions[0]
+    assert len(submissions) == 1
+    assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
+    assert "Keep both hands visible" in prompt
+    assert "blurry subject" in settings["negative_prompt"]
+    assert "missing hands" in settings["negative_prompt"]
+    assert settings["video_size"] == (720, 1280)
+    assert settings["save_clip"] is True
+    assert settings["duration"] == 5
+    assert settings["image"].startswith("data:image/jpeg;base64,")
+    assert "wan_14b" not in settings
+
+
+def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypatch):
+    submissions, _, _ = comfy_server
+    workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference-14b.json"))
+    monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
+    client = ComfyUIClient()
+    client.video_sizes = WAN_14B_VIDEO_SIZES
+    client.create_prediction("Slow movement", seed=42, duration=5, video_size=(1280, 720), steps=25,
+                             image="data:image/jpeg;base64,ZmFrZS1qcGVn")
+    graph = submissions["job-1"]
+    conditioning = graph["8"]["inputs"]
+    assert (conditioning["width"], conditioning["height"], conditioning["length"]) == (1280, 720, 81)
+    high_noise = graph["11"]["inputs"]
+    low_noise = graph["12"]["inputs"]
+    assert high_noise["noise_seed"] == 42
+    assert high_noise["end_at_step"] == low_noise["start_at_step"] == 12
+    assert high_noise["steps"] == low_noise["steps"] == low_noise["end_at_step"] == 25
+    assert high_noise["return_with_leftover_noise"] == "enable"
+    assert low_noise["add_noise"] == "disable"
+    assert low_noise["latent_image"] == ["11", 0]
+    assert graph["14"]["inputs"]["fps"] == 16
+
+
+@pytest.mark.parametrize("archive_fails", [False, True])
+def test_modal_worker_archives_completed_clip_without_a_viewer(comfy_server, monkeypatch, tmp_path, archive_fails):
+    from deploy.modal import worker
+
+    _, _, media = comfy_server
+    render_id = "fc-" + "3" * 26
+    clip = media["result.mp4"]
+    archive = tmp_path / f"{render_id}.mp4"
+    commits = []
+
+    def commit():
+        assert archive.read_bytes() == clip
+        commits.append(archive)
+        if archive_fails:
+            raise RuntimeError("test archive failure")
+
+    def submit(prompt, **settings):
+        assert settings == {"duration": 8}
+        return {"id": "comfy-job", "status": "succeeded"}
+
+    client = SimpleNamespace(create_prediction=submit, wait=lambda prediction: prediction,
+                             read_output=lambda prediction: clip)
+    process = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda **kwargs: None)
+    monkeypatch.setattr(worker, "CLIPS_MOUNT", tmp_path)
+    monkeypatch.setattr(worker, "clips_volume", SimpleNamespace(commit=commit))
+    monkeypatch.setattr(worker.modal, "current_function_call_id", lambda: render_id)
+    monkeypatch.setattr(worker, "subprocess", SimpleNamespace(Popen=lambda *args, **kwargs: process))
+    monkeypatch.setattr(worker.urllib.request, "urlopen", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("silver_screen.comfyui.ComfyUIClient", lambda **kwargs: client)
+    # The remote worker has no browser or Streamlit session.
+    with pytest.warns(UserWarning, match="executing locally"):
+        result = worker.render.local("video", "The runner moves.", {"duration": 8, "save_clip": True})
+    assert result == {"data": clip, "archive_failed" if archive_fails else "archived": True}
+    assert commits == [archive]
+    assert list(tmp_path.glob(".render-*")) == []
+
+
+def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monkeypatch):
+    _, _, media = comfy_server
+    for key, value in {"MODAL_TOKEN_ID": "test-id", "MODAL_TOKEN_SECRET": "test-secret",
+                       "SILVER_SCREEN_MODAL_APP": "test-renderer"}.items():
+        monkeypatch.setenv(key, value)
+    render_id = "fc-" + "4" * 26
+
+    def read_file(path):
+        assert path == f"{render_id}.mp4"
+        yield media["result.mp4"]
+
+    def from_name(name):
+        assert name == CLIPS_VOLUME
+        return SimpleNamespace(
+            iterdir=lambda *args, **kwargs: [SimpleNamespace(path=f"/{render_id}.mp4", size=10, mtime=7)],
+            read_file=read_file,
+        )
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Volume=SimpleNamespace(from_name=from_name), exception=modal_errors,
+    ))
+    reopened = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    next(button for button in reopened.button if button.label == "Load saved clips").click().run()
+    next(box for box in reopened.selectbox if box.label == "Recent clips").select(render_id).run()
+    next(button for button in reopened.button if button.label == "Open saved clip").click().run()
+    assert not reopened.exception
+    assert not reopened.error
+    assert reopened.get("video")
+    assert reopened.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert "Saved in your studio" in [caption.value for caption in reopened.caption]
 
 
 def test_movie_uses_comfyui_and_keeps_backend_on_resume(comfy_server, tmp_path, monkeypatch):

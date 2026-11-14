@@ -23,11 +23,24 @@ WORKFLOW_ENV = {
 }
 MAX_RESPONSE = 2 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024 * 1024
-VIDEO_SIZES = {
+WAN_LANDSCAPE_HD = (1280, 704)
+WAN_PORTRAIT_HD = (704, 1280)
+WAN_14B_LANDSCAPE_HD = (1280, 720)
+WAN_14B_MAX_SECONDS = 5
+WAN_14B_NEGATIVE_PROMPT = "blurry subject, smeared movement, flicker, distorted anatomy, warped objects"
+COMPACT_VIDEO_SIZES = {
     "Landscape · 832 × 480": (832, 480),
-    "Landscape HD · 1280 × 704": (1280, 704),
     "Portrait · 480 × 832": (480, 832),
-    "Portrait HD · 704 × 1280": (704, 1280),
+}
+VIDEO_SIZES = {
+    "Landscape HD · 1280 × 704": WAN_LANDSCAPE_HD,
+    "Portrait HD · 704 × 1280": WAN_PORTRAIT_HD,
+    **COMPACT_VIDEO_SIZES,
+}
+WAN_14B_VIDEO_SIZES = {
+    "Landscape HD · 1280 × 720": WAN_14B_LANDSCAPE_HD,
+    "Portrait HD · 720 × 1280": WAN_14B_LANDSCAPE_HD[::-1],
+    **COMPACT_VIDEO_SIZES,
 }
 VIDEO_CONTROL_MARKERS = {"__WIDTH__", "__HEIGHT__", "__STEPS__", "__NEGATIVE_PROMPT__"}
 
@@ -102,6 +115,7 @@ class ComfyUIClient:
     model = COMFYUI_MODEL
     timeout_seconds = 1200
     poll_seconds = 3.0
+    video_sizes = VIDEO_SIZES
 
     def __init__(self, *, kind: str = "video") -> None:
         self.kind = kind
@@ -187,7 +201,7 @@ class ComfyUIClient:
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
         if kind != "image":
-            if video_size is not None and video_size not in VIDEO_SIZES.values():
+            if video_size is not None and video_size not in self.video_sizes.values():
                 raise VideoGenerationError("Choose a supported Wan video size.")
             if steps is not None and not 12 <= steps <= 32:
                 raise VideoGenerationError("Choose between 12 and 32 sampling steps.")
@@ -198,8 +212,10 @@ class ComfyUIClient:
             except ValueError as exc:
                 raise VideoGenerationError("Set SILVER_SCREEN_COMFYUI_FPS to a multiple of 4 between 4 and 60.") from exc
             width, height = video_size or (832, 480)
+            sampling_steps = steps or 20
             replacements.update(__FRAMES__=duration * fps + 1, __FPS__=fps,
-                                __WIDTH__=width, __HEIGHT__=height, __STEPS__=steps or 20,
+                                __WIDTH__=width, __HEIGHT__=height, __STEPS__=sampling_steps,
+                                __SPLIT_STEP__=sampling_steps // 2,
                                 __NEGATIVE_PROMPT__=negative_prompt)
             required.add("__FRAMES__")
             if video_size is not None or steps is not None or negative_prompt:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import SubprocessError
 from time import monotonic
@@ -19,7 +21,10 @@ from silver_screen.ai_video import (
     image_to_data_url,
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
-from silver_screen.comfyui import ComfyUIClient, VIDEO_SIZES, comfyui_ready, make_comfyui_client, video_controls_ready
+from silver_screen.comfyui import (
+    ComfyUIClient, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_NEGATIVE_PROMPT, WAN_14B_VIDEO_SIZES, WAN_LANDSCAPE_HD,
+    comfyui_ready, make_comfyui_client, video_controls_ready,
+)
 from silver_screen.direct_generation import (
     CLIP_MODEL,
     FILM_CANVASES,
@@ -27,15 +32,22 @@ from silver_screen.direct_generation import (
     IMAGE_MODEL,
     assemble_direct_film,
     finish_direct_clip,
+    guide_wan_hands,
+    prepare_wan_reference,
     read_direct_output,
     submit_direct_generation,
+    verify_direct_clip,
     verify_direct_output,
 )
+from silver_screen.modal_clip_archive import MODAL_RENDER_ID
+from silver_screen.modal_renderer import ModalComfyUIClient, modal_configured, saved_clips
 from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
 
-MODAL_RENDER_ID = re.compile(r"fc-[0-9A-Z]{26}")
+AUTO_FRAME = "Auto · HD, match starting photo"
+WAN_5B_LABEL = "Wan 2.2 5B · 24 fps"
+WAN_14B_LABEL = "Wan 2.2 14B · 16 fps"
 
 
 def save_render_job(job: dict) -> None:
@@ -78,7 +90,10 @@ def refresh_render(job, film_shots, *, wait=False):
             if job.get("backend") == "ComfyUI"
             else ReplicateVideoClient(model=job["model"])
         )
-        if wait:
+        if isinstance(client, ModalComfyUIClient) and job.get("read_saved_clip"):
+            prediction = client.get_saved_prediction(prediction["id"])
+            save_prediction(prediction)
+        elif wait:
             prediction = client.wait(prediction, on_update=save_prediction)
         elif prediction.get("status") not in TERMINAL_STATUSES:
             prediction = client.get_prediction(prediction["id"])
@@ -89,11 +104,12 @@ def refresh_render(job, film_shots, *, wait=False):
                 if job.get("recovered"):
                     is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
                     job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
-                modal_clip = not is_image and str(prediction.get("id", "")).startswith("fc-")
-                job["data"] = verify_direct_output(
-                    data, image=is_image,
-                    expected_seconds=job.get("requested_seconds") if modal_clip else None,
-                )
+                if is_image:
+                    verify_direct_output(data, image=True)
+                else:
+                    expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
+                    job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
+                job["data"] = data
             else:
                 job["data"] = read_direct_output(prediction, image=is_image)
             if "started" in job:
@@ -134,7 +150,7 @@ def show_modal_progress(job, film_shots):
 
 st.set_page_config(page_title="Direct Create | Silver-Screen", page_icon="🎨")
 st.title("Direct Create")
-st.caption("Send your prompt to the selected model exactly as entered.")
+st.caption("Describe the subject, one clear action, and how the camera should frame it.")
 
 with st.expander("Create offline on iPhone"):
     st.write(
@@ -173,6 +189,8 @@ backend = st.radio(
     horizontal=True,
 )
 use_comfyui = backend == "ComfyUI"
+modal_ready = modal_configured()
+use_modal = use_comfyui and modal_ready
 reference_ready = use_comfyui and comfyui_ready("reference")
 video_controls = (
     not is_image and use_comfyui and video_controls_ready("video")
@@ -212,31 +230,82 @@ if not is_image:
         if shot and shot.intimate:
             intimacy_permission = st.checkbox("My co-star agreed to this intimate scene and who can see it.")
 
-if use_comfyui:
-    st.caption("Your ComfyUI workflow controls the model, dimensions, and audio.")
-else:
+if use_modal and is_image:
+    st.caption("FLUX.1 Schnell")
+if not use_comfyui:
     st.caption("Each generation submits a paid Replicate prediction.")
+
+prepared_reference = None
+reference_label = "No photo"
+frame_size = None
+reference = None
+reference_error = None
+if reference_ready and not is_image:
+    if shot:
+        choices = ["No photo", *(label for label, photo in cast_photos.items() if photo)]
+        reference_label = st.selectbox(
+            "Starting frame", choices,
+            index=choices.index(shot.reference) if shot.reference in choices else 0,
+            key=f"action-reference-{shot_number}",
+        )
+        reference = cast_photos.get(reference_label)
+    else:
+        reference = st.file_uploader(
+            "Starting image (optional)", type=["png", "jpg", "jpeg", "webp"],
+            help="Use a photo that already shows the framing you want. Auto follows the photo’s orientation.",
+        )
+        if library_photos:
+            reference_label = st.selectbox("Or use a saved cast photo", ["No photo", *library_photos])
+            if reference_label != "No photo":
+                reference = library_photos[reference_label]
+wan_14b = False
+if use_modal and not is_image:
+    if video_controls and reference is not None:
+        wan_14b = st.selectbox(
+            "Render model", (WAN_5B_LABEL, WAN_14B_LABEL),
+            help="14B uses more Modal GPU time. Choose it when detail matters most.",
+        ) == WAN_14B_LABEL
+    else:
+        st.caption(WAN_5B_LABEL)
+if video_controls:
+    with st.expander("Starting frame and render size", expanded=reference is not None):
+        sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
+        size = st.selectbox("Frame size", (AUTO_FRAME, *sizes))
+        frame_size = sizes.get(size)
+        if reference is not None:
+            try:
+                prepared_reference, frame_size = prepare_wan_reference(reference, frame_size, wan_14b=wan_14b)
+            except VideoGenerationError as exc:
+                reference_error = str(exc)
+                st.error(reference_error)
+            else:
+                st.image(prepared_reference, caption=f"Starting frame · {frame_size[0]} × {frame_size[1]}", width=320)
 
 with st.form("direct_create"):
     prompt = st.text_area(
         "Prompt", value=shot.prompt if shot else "", height=180,
         key=f"action-shot-prompt-{shot_number}" if shot else f"direct_prompt_{kind}",
+        placeholder=None if is_image else (
+            "A runner takes three steady steps. The camera tracks alongside in a full-body shot. "
+            "Keep the runner’s head, hands, and shoes visible."
+        ),
     )
     duration = 8
     ratio = "16:9"
     audio = True
-    reference = None
-    reference_label = "No photo"
     video_options = {}
+    keep_hands = False
     seed_text = ""
     if not use_comfyui:
         ratios = ("1:1", "16:9", "9:16", "4:3", "3:4") if is_image else ("16:9", "9:16")
         ratio = st.selectbox("Aspect ratio", ratios)
     if not is_image:
         if video_controls:
+            maximum = WAN_14B_MAX_SECONDS if wan_14b else 12
             duration = st.number_input(
-                "Clip length in seconds", min_value=2, max_value=12, value=shot.seconds if shot else 8,
-                key=f"wan-clip-length-{shot_number}",
+                "Clip length in seconds", min_value=2, max_value=maximum,
+                value=min(shot.seconds if shot else (5 if use_modal else 8), maximum),
+                key=f"wan-clip-length-{shot_number}-{maximum}",
             )
         else:
             durations = (8, 6, 4)
@@ -244,32 +313,22 @@ with st.form("direct_create"):
                 "Clip length in seconds", durations, index=durations.index(shot.seconds) if shot else 0,
                 key=f"direct-clip-length-{shot_number}",
             )
-        if reference_ready:
-            if shot:
-                choices = ["No photo", *(label for label, photo in cast_photos.items() if photo)]
-                reference_label = st.selectbox(
-                    "Starting frame", choices,
-                    index=choices.index(shot.reference) if shot.reference in choices else 0,
-                    key=f"action-reference-{shot_number}",
-                )
-                reference = cast_photos.get(reference_label)
-            else:
-                reference = st.file_uploader("Starting image (optional)", type=["png", "jpg", "jpeg", "webp"])
-                if library_photos:
-                    reference_label = st.selectbox("Or use a saved cast photo", ["No photo", *library_photos])
-                    if reference_label != "No photo":
-                        reference = library_photos[reference_label]
         if not use_comfyui:
             audio = st.checkbox("Generate audio", value=True)
         if video_controls:
-            with st.expander("Camera format and render settings"):
-                size = st.selectbox("Frame size", list(VIDEO_SIZES))
-                steps = st.slider("Sampling steps", 12, 32, 20, help="More steps increase render time. Compare shots using the same seed.")
+            keep_hands = st.checkbox("Keep hands in frame", help="Ask Wan to keep both hands visible and their movement natural.")
+            with st.expander("Advanced render settings"):
+                steps = st.slider(
+                    "Sampling steps", 12, 32, 24 if use_modal and not wan_14b else 20,
+                    help="More steps increase render time. Compare shots using the same seed.",
+                )
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
-                negative = st.text_area("Things to avoid (optional)")
-                video_options = {"video_size": VIDEO_SIZES[size], "steps": steps, "negative_prompt": negative}
+                default_negative = WAN_14B_NEGATIVE_PROMPT if wan_14b else ""
+                negative = st.text_area("Things to avoid (optional)", placeholder=default_negative or None)
+                negative = negative if negative.strip() else default_negative
+                video_options = {"video_size": frame_size or WAN_LANDSCAPE_HD, "steps": steps, "negative_prompt": negative}
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
-    generate = st.form_submit_button("Generate", type="primary", disabled=active)
+    generate = st.form_submit_button("Generate", type="primary", disabled=active or reference_error is not None)
 
 if generate and not active:
     model = IMAGE_MODEL if is_image else CLIP_MODEL
@@ -290,9 +349,18 @@ if generate and not active:
                             raise ValueError
                     except ValueError as exc:
                         raise VideoGenerationError("Use a whole-number seed from 0 to 9007199254740991.") from exc
-                image = image_to_data_url(reference, max_bytes=1_500_000)
+                if prepared_reference is not None:
+                    image = "data:image/jpeg;base64," + base64.b64encode(prepared_reference).decode("ascii")
+                else:
+                    image = image_to_data_url(reference, max_bytes=1_500_000)
                 if reference is not None and not image:
                     raise VideoGenerationError("The starting image could not be prepared.")
+                if use_modal and not is_image:
+                    video_options["save_clip"] = True
+                if wan_14b:
+                    video_options["wan_14b"] = True
+                if keep_hands:
+                    prompt, video_options["negative_prompt"] = guide_wan_hands(prompt, video_options["negative_prompt"])
                 prediction = make_comfyui_client(kind=workflow_kind).create_prediction(
                     prompt, seed=seed, duration=duration, image=image, **video_options,
                 )
@@ -310,6 +378,8 @@ if generate and not active:
             job["shot_number"] = shot_number
         if use_comfyui:
             job["seed"] = seed
+        if use_modal and not is_image:
+            job["render_model"] = WAN_14B_LABEL if wan_14b else WAN_5B_LABEL
         save_render_job(job)
         if use_comfyui and str(prediction.get("id", "")).startswith("fc-"):
             st.rerun()
@@ -342,6 +412,8 @@ if job:
     elif not auto_check and "data" not in job and job["prediction"].get("status") not in TERMINAL_STATUSES:
         st.info("Render submitted. Use Check render status to update this job.")
     if "data" in job:
+        if warning := job["prediction"].get("warning"):
+            st.warning(warning)
         if warning := job.get("film_warning"):
             st.warning(warning)
         if job["model"] == IMAGE_MODEL:
@@ -350,12 +422,16 @@ if job:
         else:
             filename = job.get("filename", "silver-screen.mp4")
             st.video(job["data"], format="video/mp4")
-            if seconds := job.get("requested_seconds"):
+            if seconds := job.get("requested_seconds") or job.get("actual_seconds"):
                 elapsed = job.get("elapsed_seconds")
                 timing = f" · ready in {elapsed:.1f} seconds" if elapsed is not None else ""
-                st.caption(f"{seconds}-second clip{timing}")
+                st.caption(f"{seconds:g}-second clip{timing}")
             if "seed" in job:
                 st.caption(f"Seed {job['seed']}")
+            if render_model := job.get("render_model"):
+                st.caption(render_model)
+            if job["prediction"].get("archived"):
+                st.caption("Saved in your studio")
             st.download_button("Download original clip", job["data"], filename, "video/mp4")
 
             with st.expander("Record dialogue and smooth this clip"):
@@ -428,12 +504,34 @@ if job:
                     st.error("The film workspace is full. Remove a clip before adding another.")
                 else:
                     name = previous["name"] if previous else f"Clip {len(custom_shots) + 1} · {prediction_id}"
-                    custom_shots[clip_id] = {"name": name, "data": clip, "seconds": job.get("requested_seconds", 4)}
+                    seconds = job.get("requested_seconds") or int(round(job.get("actual_seconds") or 4))
+                    custom_shots[clip_id] = {"name": name, "data": clip, "seconds": max(1, seconds)}
                     current_order = st.session_state.get("custom_film_clip_order")
                     if previous is None and current_order is not None:
                         st.session_state["custom_film_clip_order"] = [*current_order, clip_id]
                     st.session_state.pop("custom_film_export", None)
                     st.success("Clip added to your custom film.")
+
+if modal_ready:
+    with st.expander("Saved clips"):
+        if st.button("Load saved clips"):
+            try:
+                st.session_state["saved_clips"] = dict(saved_clips())
+            except VideoGenerationError as exc:
+                st.warning(str(exc))
+        if "saved_clips" in st.session_state:
+            if clips := st.session_state["saved_clips"]:
+                clip_id = st.selectbox(
+                    "Recent clips", clips, index=None, placeholder="Choose a clip",
+                    format_func=lambda value: f"{datetime.fromtimestamp(clips[value], timezone.utc):%b %d, %H:%M} UTC · {value[-6:]}",
+                )
+                if st.button("Open saved clip", disabled=clip_id is None or active):
+                    saved_job = recover_modal_job(clip_id)
+                    saved_job["read_saved_clip"] = True
+                    save_render_job(saved_job)
+                    st.rerun()
+            else:
+                st.caption("Finished clips will appear here after they are saved.")
 
 with st.expander("Recover a Modal render"):
     with st.form("recover-modal-render"):

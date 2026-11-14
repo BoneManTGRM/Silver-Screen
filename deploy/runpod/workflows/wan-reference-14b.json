@@ -1,0 +1,116 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "3": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+      "type": "wan",
+      "device": "default"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "wan_2.1_vae.safetensors"}
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"clip": ["3", 0], "text": "__PROMPT__"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"clip": ["3", 0], "text": "__NEGATIVE_PROMPT__"}
+  },
+  "7": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "__IMAGE__"}
+  },
+  "8": {
+    "class_type": "WanImageToVideo",
+    "inputs": {
+      "positive": ["5", 0],
+      "negative": ["6", 0],
+      "vae": ["4", 0],
+      "start_image": ["7", 0],
+      "width": "__WIDTH__",
+      "height": "__HEIGHT__",
+      "length": "__FRAMES__",
+      "batch_size": 1
+    }
+  },
+  "9": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {"model": ["1", 0], "shift": 5.0}
+  },
+  "10": {
+    "class_type": "ModelSamplingSD3",
+    "inputs": {"model": ["2", 0], "shift": 5.0}
+  },
+  "11": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["9", 0],
+      "positive": ["8", 0],
+      "negative": ["8", 1],
+      "latent_image": ["8", 2],
+      "add_noise": "enable",
+      "noise_seed": "__SEED__",
+      "steps": "__STEPS__",
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": 0,
+      "end_at_step": "__SPLIT_STEP__",
+      "return_with_leftover_noise": "enable"
+    }
+  },
+  "12": {
+    "class_type": "KSamplerAdvanced",
+    "inputs": {
+      "model": ["10", 0],
+      "positive": ["8", 0],
+      "negative": ["8", 1],
+      "latent_image": ["11", 0],
+      "add_noise": "disable",
+      "noise_seed": 0,
+      "steps": "__STEPS__",
+      "cfg": 3.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "start_at_step": "__SPLIT_STEP__",
+      "end_at_step": "__STEPS__",
+      "return_with_leftover_noise": "disable"
+    }
+  },
+  "13": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["12", 0], "vae": ["4", 0]}
+  },
+  "14": {
+    "class_type": "CreateVideo",
+    "inputs": {"images": ["13", 0], "fps": "__FPS__"}
+  },
+  "15": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": ["14", 0],
+      "filename_prefix": "SilverScreen/Video",
+      "format": "mp4",
+      "format.codec": "h264",
+      "format.codec.encoding": "re-encode",
+      "format.codec.encoding.crf": 16.0
+    }
+  }
+}

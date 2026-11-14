@@ -6,7 +6,8 @@ import os
 from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
-from .comfyui import MAX_OUTPUT, ComfyUIClient
+from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient
+from .modal_clip_archive import CLIPS_VOLUME, MODAL_RENDER_ID, latest_saved_clips, read_saved_clip
 
 
 def _configured(app_setting: str) -> bool:
@@ -41,6 +42,16 @@ def modal_function(name: str, *, app_setting: str):
         raise VideoGenerationError(f'Modal could not load {name} ({type(exc).__name__}).') from exc
 
 
+def saved_clips() -> list[tuple[str, int]]:
+    modal = _modal_client()
+    try:
+        return latest_saved_clips(modal.Volume.from_name(CLIPS_VOLUME))
+    except modal.exception.NotFoundError:
+        return []
+    except (modal.exception.Error, OSError) as exc:
+        raise VideoGenerationError('Could not load saved clips from Modal. Check again shortly.') from exc
+
+
 class ModalComfyUIClient(ComfyUIClient):
     timeout_seconds = 1600
 
@@ -50,11 +61,18 @@ class ModalComfyUIClient(ComfyUIClient):
         self.supports_reference = kind == 'video'
         self.app = os.environ['SILVER_SCREEN_MODAL_APP'].strip()
 
-    def create_prediction(self, prompt: str, **settings: Any) -> dict[str, Any]:
+    def create_prediction(self, prompt: str, *, wan_14b: bool = False, **settings: Any) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError('Enter a prompt before generating.')
+        function = 'render'
+        if wan_14b:
+            if self.kind != 'video' or not settings.get('image'):
+                raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
+            if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
+                raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
+            function = 'render_wan14'
         try:
-            call = self.modal.Function.from_name(self.app, 'render').spawn(self.kind, prompt, settings)
+            call = self.modal.Function.from_name(self.app, function).spawn(self.kind, prompt, settings)
         except self.modal.exception.Error as exc:
             raise VideoGenerationError(f'Modal could not submit the render ({type(exc).__name__}).') from exc
         return {'id': call.object_id, 'status': 'starting', 'model': self.model}
@@ -72,7 +90,7 @@ class ModalComfyUIClient(ComfyUIClient):
             if type(exc) is errors.TimeoutError:
                 return result
             if isinstance(exc, (errors.OutputExpiredError, errors.NotFoundError)):
-                return dict(result, status='failed', error='Modal no longer has a result for this render ID.')
+                return self.get_saved_prediction(prediction_id)
             if isinstance(exc, errors.FunctionTimeoutError):
                 return dict(result, status='failed', error='The GPU worker reached its time limit. Try a shorter clip.')
             if isinstance(exc, errors.AuthError):
@@ -86,13 +104,39 @@ class ModalComfyUIClient(ComfyUIClient):
             detail = str(exc).casefold()
             if 'out of memory' in detail or 'allocation on device' in detail:
                 return dict(result, status='failed', error='The GPU ran out of memory. Try a shorter clip or a smaller frame size.')
+            if isinstance(exc, VideoGenerationError):
+                return dict(result, status='failed', error=str(exc))
             if detail == 'comfyui did not start on the gpu worker.':
                 return dict(result, status='failed', error='ComfyUI could not start on the Modal GPU worker.')
             return dict(result, status='failed', error=f'GPU render failed ({type(exc).__name__}).')
+        if isinstance(data, dict):
+            if data.get('archive_failed') is True:
+                result['warning'] = 'The clip rendered, but Modal could not confirm the save. Download your copy now.'
+            elif data.get('archived') is True:
+                result['archived'] = True
+            data = data.get('data')
+        return self._complete_prediction(result, data)
+
+    def get_saved_prediction(self, prediction_id: str) -> dict[str, Any]:
+        result = {'id': prediction_id, 'model': self.model}
+        unavailable = dict(result, status='failed', error='Modal no longer has a result for this render ID.')
+        if not MODAL_RENDER_ID.fullmatch(prediction_id):
+            return unavailable
+        try:
+            data = read_saved_clip(self.modal.Volume.from_name(CLIPS_VOLUME), prediction_id)
+        except (FileNotFoundError, self.modal.exception.NotFoundError):
+            return unavailable
+        except VideoGenerationError as exc:
+            return dict(result, status='failed', error=str(exc))
+        except (self.modal.exception.Error, OSError) as exc:
+            raise PredictionPending('Could not read the saved clip from Modal. Check this render again.') from exc
+        return self._complete_prediction(dict(result, archived=True), data)
+
+    def _complete_prediction(self, result: dict[str, Any], data: Any) -> dict[str, Any]:
         if not isinstance(data, bytes) or not 0 < len(data) <= MAX_OUTPUT:
             return dict(result, status='failed', error='Modal returned an invalid media file.')
-        self._output = (prediction_id, data)
-        return dict(result, status='succeeded', output=prediction_id)
+        self._output = (result['id'], data)
+        return dict(result, status='succeeded', output=result['id'])
 
     def read_output(self, prediction: dict[str, Any]) -> bytes:
         prediction_id = prediction['id']

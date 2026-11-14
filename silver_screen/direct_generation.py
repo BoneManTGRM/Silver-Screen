@@ -8,15 +8,16 @@ import urllib.request
 from pathlib import Path
 from textwrap import fill
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 
 from .ai_video import (
     DEFAULT_MODEL, ReplicateVideoClient, VideoGenerationError, _ffmpeg_path,
     _ffprobe_path, verify_mp4,
 )
+from .comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD
 from .voice_audio import _has_audio, combine_voice_tracks, mix_voice_into_clip, verify_audio
 
 IMAGE_MODEL = "black-forest-labs/flux-schnell"
@@ -24,11 +25,56 @@ CLIP_MODEL = DEFAULT_MODEL
 OUTPUT_LIMIT = 64 * 1024 * 1024
 FILM_LIMIT = 128 * 1024 * 1024
 RECORDING_LIMIT = 20 * 1024 * 1024
+REFERENCE_LIMIT = 1_500_000
 FILM_CANVASES = {
     "Landscape HD · 1280 × 720": (1280, 720),
     "Portrait HD · 720 × 1280": (720, 1280),
     "Landscape compact · 960 × 540": (960, 540),
 }
+
+
+def guide_wan_hands(prompt: str, negative_prompt: str) -> tuple[str, str]:
+    if not prompt.strip():
+        raise VideoGenerationError("Enter a prompt before generating.")
+    hand_artifacts = "hands out of frame, missing hands, fused fingers, extra fingers, warped hands"
+    return (
+        f"{prompt.rstrip()}\n\nKeep both hands visible throughout the shot. "
+        "Use a steady camera and natural hand movement with clearly defined fingers.",
+        ", ".join(filter(None, (negative_prompt.strip(), hand_artifacts))),
+    )
+
+
+def prepare_wan_reference(
+    source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
+) -> tuple[bytes, tuple[int, int]]:
+    """Fit the full photo to Wan's frame before ComfyUI resizes it."""
+    try:
+        with Image.open(source) as uploaded:
+            photo = ImageOps.exif_transpose(uploaded).convert("RGB")
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise VideoGenerationError("The starting photo could not be read.") from exc
+    finally:
+        if not isinstance(source, Path):
+            source.seek(0)
+
+    size = frame_size
+    if size is None:
+        landscape_hd = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
+        size = landscape_hd[::-1] if photo.height > photo.width else landscape_hd
+    fitted = ImageOps.contain(photo, size, Image.Resampling.LANCZOS)
+    if fitted.size != size:
+        background = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
+        frame = background.filter(ImageFilter.GaussianBlur(min(size) / 18))
+        frame.paste(fitted, ((size[0] - fitted.width) // 2, (size[1] - fitted.height) // 2))
+    else:
+        frame = fitted
+
+    for quality in (94, 85, 75):
+        buffer = io.BytesIO()
+        frame.save(buffer, format="JPEG", quality=quality, subsampling=0, optimize=True)
+        if buffer.tell() <= REFERENCE_LIMIT:
+            return buffer.getvalue(), size
+    raise VideoGenerationError("The starting photo exceeds the render upload limit.")
 
 
 def submit_direct_generation(
@@ -84,24 +130,32 @@ def read_direct_output(prediction: dict[str, Any], *, image: bool) -> bytes:
 def verify_direct_output(
     data: bytes, *, image: bool, expected_seconds: int | None = None,
 ) -> bytes:
-    if not data or len(data) > OUTPUT_LIMIT:
-        raise VideoGenerationError("The generated file is empty or exceeds the 64 MiB download limit.")
-
     if image:
+        _check_output_size(data)
         with Image.open(io.BytesIO(data), formats=["PNG"]) as generated:
             generated.verify()
     else:
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "clip.mp4"
-            path.write_bytes(data)
-            metadata = _verified_clip(path)
-            duration = metadata["durationSeconds"]
-            frame_seconds = 1 / (metadata["frameRate"] or 24)
-            if expected_seconds and duration is not None and duration + frame_seconds + 0.001 < expected_seconds:
-                raise VideoGenerationError(
-                    f"The render returned {duration:.1f} seconds of a {expected_seconds}-second clip."
-                )
+        verify_direct_clip(data, expected_seconds=expected_seconds)
     return data
+
+
+def _check_output_size(data: bytes) -> None:
+    if not data or len(data) > OUTPUT_LIMIT:
+        raise VideoGenerationError("The generated file is empty or exceeds the 64 MiB download limit.")
+
+
+def verify_direct_clip(data: bytes, *, expected_seconds: int | None = None) -> float | None:
+    """Verify the video and return its duration when available."""
+    _check_output_size(data)
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "clip.mp4"
+        path.write_bytes(data)
+        metadata = _verified_clip(path)
+    duration = metadata["durationSeconds"]
+    frame_seconds = 1 / (metadata["frameRate"] or 24)
+    if expected_seconds and duration is not None and duration + frame_seconds + 0.001 < expected_seconds:
+        raise VideoGenerationError(f"The render returned {duration:.1f} seconds of a {expected_seconds}-second clip.")
+    return duration
 
 
 def _verified_clip(source: Path) -> dict[str, Any]:
