@@ -11,7 +11,7 @@ import urllib.request
 import modal
 
 from silver_screen.ai_video import PredictionPending, VideoGenerationError
-from silver_screen.comfyui import WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
+from silver_screen.comfyui import WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
 from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip
 
 COMFY = Path('/opt/ComfyUI')
@@ -89,12 +89,13 @@ def _render(kind: str, prompt: str, settings: dict, *, wan_14b: bool = False) ->
     settings = dict(settings)
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     reference_workflow = 'wan-reference-14b.json' if wan_14b else 'wan-reference.json'
+    fps = WAN_14B_FPS if wan_14b else 24
     os.environ.update(
         SILVER_SCREEN_COMFYUI_URL='http://127.0.0.1:8188',
         SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW='/opt/workflows/flux-schnell.json',
         SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW='/opt/workflows/wan-video.json',
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
-        SILVER_SCREEN_COMFYUI_FPS='16' if wan_14b else '24',
+        SILVER_SCREEN_COMFYUI_FPS=str(fps),
     )
     with tempfile.TemporaryDirectory(prefix='silver-render-') as directory:
         command = [
@@ -131,7 +132,7 @@ def _render(kind: str, prompt: str, settings: dict, *, wan_14b: bool = False) ->
                 process.kill()
                 process.wait()
     if save_clip:
-        verify_direct_clip(data, expected_seconds=settings.get('duration', 8))
+        verify_direct_clip(data, expected_seconds=settings.get('duration', 8), minimum_fps=fps)
         try:
             save_completed_clip(clips_volume, CLIPS_MOUNT, modal.current_function_call_id() or '', data)
         except (modal.exception.Error, OSError, RuntimeError, ValueError):

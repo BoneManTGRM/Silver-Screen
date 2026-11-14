@@ -72,7 +72,7 @@
       "sampler_name": "euler",
       "scheduler": "simple",
       "start_at_step": 0,
-      "end_at_step": "__SPLIT_STEP__",
+      "end_at_step": "__WAN_14B_SPLIT_STEP__",
       "return_with_leftover_noise": "enable"
     }
   },
@@ -89,7 +89,7 @@
       "cfg": 3.5,
       "sampler_name": "euler",
       "scheduler": "simple",
-      "start_at_step": "__SPLIT_STEP__",
+      "start_at_step": "__WAN_14B_SPLIT_STEP__",
       "end_at_step": "__STEPS__",
       "return_with_leftover_noise": "disable"
     }

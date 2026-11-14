@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from silver_screen.ai_video import VideoGenerationError
-from silver_screen.direct_generation import assemble_direct_film, finish_direct_clip, verify_direct_output
+from silver_screen.direct_generation import assemble_direct_film, finish_direct_clip, verify_direct_clip, verify_direct_output
 from silver_screen.voice_audio import verify_audio
 from silver_screen.voice_config import VoiceStudioError
 
@@ -32,6 +32,40 @@ class DirectFinishingTests(unittest.TestCase):
             _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=1", "-c:v", "libx264", video)
             with self.assertRaisesRegex(VideoGenerationError, "1.0 seconds of a 4-second clip"):
                 verify_direct_output(video.read_bytes(), image=False, expected_seconds=4)
+
+    def test_long_audio_cannot_pass_as_a_full_length_picture(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "short-picture.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=24:d=1",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                    "-c:v", "libx264", "-c:a", "aac", video)
+            with self.assertRaisesRegex(VideoGenerationError, "1.0 seconds of a 4-second clip"):
+                verify_direct_clip(video.read_bytes(), expected_seconds=4)
+
+    def test_rendered_video_rejects_a_repeated_frame_with_real_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "frozen.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=640x360:r=24",
+                    "-vf", "trim=end_frame=1,tpad=stop_mode=clone:stop_duration=3",
+                    "-c:v", "libx264", "-crf", "12", video)
+            with self.assertRaisesRegex(VideoGenerationError, "frozen"):
+                verify_direct_clip(video.read_bytes(), expected_seconds=3, minimum_fps=24)
+
+    def test_film_export_preserves_even_wan_frame_cadence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shots = []
+            for fps in (16, 24):
+                source = root / f"source-{fps}.mp4"
+                _ffmpeg("-f", "lavfi", "-i", f"testsrc2=s=320x180:r={fps}:d=2",
+                        "-c:v", "libx264", source)
+                shots.append(source.read_bytes())
+
+            for selected, runtime, fps in ((shots[:1], 2, 16), (shots, 4, 48)):
+                with self.subTest(fps=fps):
+                    export = root / f"export-{fps}.mp4"
+                    export.write_bytes(assemble_direct_film(selected, runtime, smooth=False, canvas=(960, 540)))
+                    self.assert_export(export, duration=runtime, fps=fps)
 
     def test_rejects_media_without_expected_track(self):
         with tempfile.TemporaryDirectory() as directory:

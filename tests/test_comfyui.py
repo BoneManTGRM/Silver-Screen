@@ -21,6 +21,7 @@ from streamlit.testing.v1 import AppTest
 from silver_screen.ai_video import generate_ai_video
 from silver_screen.cast_library import PHOTO_SLOTS
 from silver_screen.comfyui import ComfyUIClient, WAN_14B_VIDEO_SIZES, WORKFLOW_ENV
+from silver_screen.direct_generation import prepare_wan_reference
 from silver_screen.modal_clip_archive import CLIPS_VOLUME
 from test_long_video import _fake_assemble, _state
 
@@ -114,13 +115,24 @@ def comfy_server(tmp_path, monkeypatch):
             worker.join()
 
 
+@pytest.fixture(autouse=True)
+def empty_modal_clip_archive(request, monkeypatch):
+    # Tests that need saved renders provide their own Modal volume.
+    if request.node.name != "test_direct_create_opens_saved_clip_without_a_call_result":
+        monkeypatch.setattr("silver_screen.modal_renderer.saved_clips", lambda: [])
+
+
+def generate_button(app):
+    return next(button for button in app.button if button.label == "Generate")
+
+
 def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     submissions, _, media = comfy_server
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     assert app.radio[1].value == "ComfyUI"
     prompt = "  Watercolor mountains.\nTitle: Night Train.  "
     app.text_area[0].set_value(prompt)
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert not app.exception
     assert not app.error, [item.value for item in app.error]
     assert submissions["job-1"]["1"]["inputs"]["text"] == prompt
@@ -130,7 +142,7 @@ def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     app.radio[0].set_value("Video clip").run()
     app.text_area[0].set_value("Clay fox on a moonlit hill.")
     app.selectbox[0].select(4)
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert not app.exception
     assert not app.error, [item.value for item in app.error]
     assert submissions["job-2"]["2"]["inputs"]["length"] == 97
@@ -174,12 +186,12 @@ def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     app.radio[0].set_value("Video clip").run()
     app.text_area[0].set_value("A paper pinwheel spins.")
-    app.button[0].click().run()
-    assert app.button[0].disabled
+    generate_button(app).click().run()
+    assert generate_button(app).disabled
     app.button(key="direct-check-job").click().run()
     assert not app.exception
     assert app.error[0].value == "ComfyUI did not start."
-    assert not app.button[0].disabled
+    assert not generate_button(app).disabled
 
 
 def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, monkeypatch):
@@ -210,16 +222,16 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     app.radio[0].set_value("Video clip").run()
     app.text_area[0].set_value("A paper pinwheel spins.")
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert app.info[0].value.startswith("Waiting for Modal.")
-    assert app.button[0].disabled
+    assert generate_button(app).disabled
     assert app.query_params == {"render": call_id, "render_seconds": "8"}
 
     # AppTest has no browser timer, so simulate the scheduled refresh without clicking a widget.
     app.run()
     assert not app.exception
     assert not app.error
-    assert not app.button[0].disabled
+    assert not generate_button(app).disabled
     assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
     assert app.get("video")
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
@@ -254,7 +266,7 @@ def test_direct_create_reloads_modal_job_and_reports_a_manual_check(comfy_server
     app.query_params.update({"render": call_id, "render_seconds": "8"})
     app.run()
     assert app.radio[0].value == "Video clip"
-    assert app.button[0].disabled
+    assert generate_button(app).disabled
     app.button(key="direct-check-job").click().run()
     assert any(caption.value.startswith("Last manual check") for caption in app.caption)
     assert app.info[0].value.startswith("Waiting for Modal.")
@@ -265,7 +277,7 @@ def test_direct_create_reloads_modal_job_and_reports_a_manual_check(comfy_server
     reopened.run()
     assert not reopened.exception
     assert not reopened.error
-    assert not reopened.button[0].disabled
+    assert not generate_button(reopened).disabled
     assert reopened.get("video")
     assert "Download original clip" in [item.proto.label for item in reopened.get("download_button")]
     assert reopened.session_state["direct_create_job"]["data"] == media["result.mp4"]
@@ -314,7 +326,7 @@ def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, m
     app.selectbox[0].select("Portrait HD · 704 × 1280")
     app.slider[0].set_value(27)
     app.text_input[0].set_value("542")
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert not app.exception
     assert not app.error
     graph = submissions["job-1"]
@@ -361,25 +373,44 @@ def test_direct_create_previews_full_photo_and_guides_hand_motion(comfy_server, 
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     app.radio[0].set_value("Video clip").run()
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
-    assert any(image.proto.imgs[0].caption == "Starting frame · 704 × 1280" for image in app.image)
+    assert any(image.proto.imgs[0].caption == "Starting frame · 736 × 1216" for image in app.image)
     next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
     app.text_area[0].set_value("A runner warms up.")
     app.text_area[1].set_value("camera shake")
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert not app.exception
     assert not app.error
 
     graph = submissions["job-1"]
     assert graph["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
-    assert graph["6"]["inputs"]["width"] == 704
-    assert graph["6"]["inputs"]["height"] == 1280
+    assert graph["6"]["inputs"]["width"] == 736
+    assert graph["6"]["inputs"]["height"] == 1216
     assert "Keep both hands visible" in graph["4"]["inputs"]["text"]
     assert "camera shake, hands out of frame, missing hands" in graph["5"]["inputs"]["text"]
     jpeg = uploads[0].split(b"\r\n\r\n", 1)[1].split(b"\r\n--", 1)[0]
     with Image.open(io.BytesIO(jpeg)) as fitted:
-        assert fitted.size == (704, 1280)
+        assert fitted.size == (736, 1216)
         assert fitted.getpixel((352, 70))[0] > 230
-        assert fitted.getpixel((352, 1210))[2] > 230
+        assert fitted.getpixel((352, 1140))[2] > 230
+
+
+@pytest.mark.parametrize("wan_14b,expected_size", [(False, (928, 928)), (True, (960, 960))])
+def test_auto_framing_keeps_square_photo_without_blurred_side_panels(wan_14b, expected_size):
+    photo = Image.new("RGB", (1000, 1000), "white")
+    photo.paste("red", (0, 0, 200, 1000))
+    photo.paste("blue", (800, 0, 1000, 1000))
+    source = io.BytesIO()
+    photo.save(source, format="PNG")
+    source.seek(0)
+
+    data, size = prepare_wan_reference(source, None, wan_14b=wan_14b)
+
+    assert size == expected_size
+    with Image.open(io.BytesIO(data)) as frame:
+        assert frame.size == expected_size
+        assert frame.getpixel((8, 200))[0] > 240
+        assert frame.getpixel((8, 200))[2] < 10
+        assert frame.getpixel((size[0] - 9, 200))[2] > 240
 
 
 def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypatch, tmp_path):
@@ -411,14 +442,13 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert not any(box.label == "Render model" for box in app.selectbox)
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
     models = next(box for box in app.selectbox if box.label == "Render model")
-    assert models.value == "Wan 2.2 5B · 24 fps"
-    models.select("Wan 2.2 14B · 16 fps").run()
+    assert models.value == "Wan 2.2 14B · 16 fps"
     assert app.number_input[0].max == 5
     assert any(image.proto.imgs[0].caption == "Starting frame · 720 × 1280" for image in app.image)
-    assert app.slider[0].value == 20
+    assert app.slider[0].value == 40
     next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
     app.text_area[0].set_value("The runner lifts both hands.")
-    app.button[0].click().run()
+    generate_button(app).click().run()
     assert not app.exception
     assert not app.error
     assert app.get("video")
@@ -430,7 +460,7 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert "missing hands" in settings["negative_prompt"]
     assert settings["video_size"] == (720, 1280)
     assert settings["save_clip"] is True
-    assert settings["duration"] == 5
+    assert settings["duration"] == 3
     assert settings["image"].startswith("data:image/jpeg;base64,")
     assert "wan_14b" not in settings
 
@@ -442,7 +472,7 @@ def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypat
     monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
     client = ComfyUIClient()
     client.video_sizes = WAN_14B_VIDEO_SIZES
-    client.create_prediction("Slow movement", seed=42, duration=5, video_size=(1280, 720), steps=25,
+    client.create_prediction("Slow movement", seed=42, duration=5, video_size=(1280, 720), steps=40,
                              image="data:image/jpeg;base64,ZmFrZS1qcGVn")
     graph = submissions["job-1"]
     conditioning = graph["8"]["inputs"]
@@ -450,8 +480,8 @@ def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypat
     high_noise = graph["11"]["inputs"]
     low_noise = graph["12"]["inputs"]
     assert high_noise["noise_seed"] == 42
-    assert high_noise["end_at_step"] == low_noise["start_at_step"] == 12
-    assert high_noise["steps"] == low_noise["steps"] == low_noise["end_at_step"] == 25
+    assert high_noise["end_at_step"] == low_noise["start_at_step"] == 15
+    assert high_noise["steps"] == low_noise["steps"] == low_noise["end_at_step"] == 40
     assert high_noise["return_with_leftover_noise"] == "enable"
     assert low_noise["add_noise"] == "disable"
     assert low_noise["latent_image"] == ["11", 0]
@@ -517,7 +547,7 @@ def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monk
         Volume=SimpleNamespace(from_name=from_name), exception=modal_errors,
     ))
     reopened = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
-    next(button for button in reopened.button if button.label == "Load saved clips").click().run()
+    reopened.radio[0].set_value("Video clip").run()
     next(box for box in reopened.selectbox if box.label == "Recent clips").select(render_id).run()
     next(button for button in reopened.button if button.label == "Open saved clip").click().run()
     assert not reopened.exception

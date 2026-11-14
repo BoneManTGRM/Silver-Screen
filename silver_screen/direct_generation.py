@@ -11,13 +11,13 @@ from tempfile import TemporaryDirectory
 from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 
 from .ai_video import (
     DEFAULT_MODEL, ReplicateVideoClient, VideoGenerationError, _ffmpeg_path,
     _ffprobe_path, verify_mp4,
 )
-from .comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD
+from .comfyui import WAN_14B_FPS, wan_reference_size
 from .voice_audio import _has_audio, combine_voice_tracks, mix_voice_into_clip, verify_audio
 
 IMAGE_MODEL = "black-forest-labs/flux-schnell"
@@ -47,7 +47,7 @@ def guide_wan_hands(prompt: str, negative_prompt: str) -> tuple[str, str]:
 def prepare_wan_reference(
     source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
 ) -> tuple[bytes, tuple[int, int]]:
-    """Fit the full photo to Wan's frame before ComfyUI resizes it."""
+    """Prepare the exact starting frame that will be shown in the preview."""
     try:
         with Image.open(source) as uploaded:
             photo = ImageOps.exif_transpose(uploaded).convert("RGB")
@@ -57,17 +57,8 @@ def prepare_wan_reference(
         if not isinstance(source, Path):
             source.seek(0)
 
-    size = frame_size
-    if size is None:
-        landscape_hd = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
-        size = landscape_hd[::-1] if photo.height > photo.width else landscape_hd
-    fitted = ImageOps.contain(photo, size, Image.Resampling.LANCZOS)
-    if fitted.size != size:
-        background = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
-        frame = background.filter(ImageFilter.GaussianBlur(min(size) / 18))
-        frame.paste(fitted, ((size[0] - fitted.width) // 2, (size[1] - fitted.height) // 2))
-    else:
-        frame = fitted
+    size = frame_size or wan_reference_size(photo.width, photo.height, wan_14b=wan_14b)
+    frame = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
 
     for quality in (94, 85, 75):
         buffer = io.BytesIO()
@@ -144,18 +135,56 @@ def _check_output_size(data: bytes) -> None:
         raise VideoGenerationError("The generated file is empty or exceeds the 64 MiB download limit.")
 
 
-def verify_direct_clip(data: bytes, *, expected_seconds: int | None = None) -> float | None:
-    """Verify the video and return its duration when available."""
+def verify_direct_clip(
+    data: bytes, *, expected_seconds: int | None = None, minimum_fps: int | None = None,
+) -> float | None:
+    """Verify delivery, with a full decode and freeze check for new GPU renders."""
     _check_output_size(data)
     with TemporaryDirectory() as directory:
         path = Path(directory) / "clip.mp4"
         path.write_bytes(data)
         metadata = _verified_clip(path)
-    duration = metadata["durationSeconds"]
-    frame_seconds = 1 / (metadata["frameRate"] or 24)
-    if expected_seconds and duration is not None and duration + frame_seconds + 0.001 < expected_seconds:
-        raise VideoGenerationError(f"The render returned {duration:.1f} seconds of a {expected_seconds}-second clip.")
+        duration = metadata["videoDurationSeconds"] or metadata["durationSeconds"]
+        fps = metadata["frameRate"]
+        frame_seconds = 1 / (fps or 24)
+        if expected_seconds and duration is not None and duration + frame_seconds + 0.001 < expected_seconds:
+            raise VideoGenerationError(f"The render returned {duration:.1f} seconds of a {expected_seconds}-second clip.")
+        if minimum_fps is not None:
+            if not duration or not fps or fps < minimum_fps - 0.01:
+                raise VideoGenerationError(f"The render did not deliver video at {minimum_fps} frames per second.")
+            _verify_render_motion(path, duration)
     return duration
+
+
+def _verify_render_motion(path: Path, duration: float) -> None:
+    ffmpeg = _ffmpeg_path()
+    if not ffmpeg:
+        raise VideoGenerationError("FFmpeg is required to check the complete render.")
+    try:
+        result = subprocess.run([
+            ffmpeg, "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
+            "-i", str(path), "-map", "0:V:0", "-an", "-sn",
+            "-vf", "scale=256:-2,freezedetect=n=-60dB:d=0.75,metadata=mode=print:file=-",
+            "-f", "null", "-",
+        ], capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired as exc:
+        raise VideoGenerationError("The rendered video took too long to verify.") from exc
+    if result.returncode or result.stderr:
+        raise VideoGenerationError("The rendered video could not be decoded from start to finish.")
+
+    frozen = 0.0
+    start = None
+    for line in result.stdout.splitlines():
+        key, _, seconds = line.partition("=")
+        if key == "lavfi.freezedetect.freeze_start":
+            start = float(seconds)
+        elif key == "lavfi.freezedetect.freeze_end" and start is not None:
+            frozen += float(seconds) - start
+            start = None
+    if start is not None:
+        frozen += duration - start
+    if frozen >= max(1.0, duration * 0.6):
+        raise VideoGenerationError("Most of the rendered video is frozen. Try a prompt with one clear movement.")
 
 
 def _verified_clip(source: Path) -> dict[str, Any]:
@@ -167,7 +196,7 @@ def _verified_clip(source: Path) -> dict[str, Any]:
 
 def _clip_timing(source: Path) -> tuple[float, float | None]:
     metadata = _verified_clip(source)
-    duration = metadata["durationSeconds"]
+    duration = metadata["videoDurationSeconds"] or metadata["durationSeconds"]
     if not duration:
         raise VideoGenerationError("FFprobe is required to read the clip's duration.")
     return duration, metadata.get("frameRate")
@@ -189,15 +218,16 @@ def finish_short_video(
     source: Path, destination: Path, *, seconds: int, brand: str = "", cta: str = "",
 ) -> Path:
     """Export the requested runtime and optionally overlay a final end card."""
-    available, _ = _clip_timing(source)
+    available, source_fps = _clip_timing(source)
     if available + 0.25 < seconds:
         raise VideoGenerationError(f"The footage is {available:.1f} seconds long. The cut requires {seconds} seconds.")
     start = max(0, seconds - 3)
     brand, cta = brand.strip(), cta.strip()
+    fps = WAN_14B_FPS if source_fps == WAN_14B_FPS else 24
     destination.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix="short-export-", dir=destination.parent) as directory:
         work = Path(directory)
-        filters = ["fps=24,tpad=stop_mode=clone:stop_duration=0.25"]
+        filters = [f"fps={fps},tpad=stop_mode=clone:stop_duration=0.25"]
         for text, size, bottom in ((brand, 22, 0.26 if cta else 0.1), (cta, 30, 0.07)):
             if not text:
                 continue
@@ -217,7 +247,7 @@ def finish_short_video(
             cwd=work,
         )
         duration, _ = _clip_timing(staged)
-        if abs(duration - seconds) > 1 / 24 + 0.001:
+        if abs(duration - seconds) > 1 / fps + 0.001:
             raise VideoGenerationError("The exported video does not match the selected length.")
         staged.replace(destination)
     return destination
@@ -298,6 +328,13 @@ def assemble_direct_film(
         width, height = canvas
         remaining = float(runtime)
         normalized = []
+        source_rates = {source_fps for _, _, source_fps in sources}
+        fps = 24
+        if smooth or source_rates == {WAN_14B_FPS, 24}:
+            # 48 is a common multiple of the two Wan rates, so frame repeats stay evenly spaced.
+            fps = 48
+        elif source_rates == {WAN_14B_FPS}:
+            fps = WAN_14B_FPS
         for index, (source, duration, source_fps) in enumerate(sources):
             if remaining < 0.02:
                 break
@@ -309,7 +346,7 @@ def assemble_direct_film(
                            "-map", "0:v:0", "-map", "1:a:0"]
             resize = (f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                       f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
-            motion = _motion_filter(source_fps) if smooth else "fps=24"
+            motion = _motion_filter(source_fps) if smooth else f"fps={fps}"
             _encode_video([
                 *command, "-vf", f"{resize},{motion}", "-af", "apad", "-t", f"{length:.3f}",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "17", "-pix_fmt", "yuv420p",
@@ -321,7 +358,6 @@ def assemble_direct_film(
         manifest = root / "shots.txt"
         manifest.write_text("\n".join(f"file {shot.name}" for shot in normalized), encoding="utf-8")
         film = root / "film.mp4"
-        fps = 48 if smooth else 24
         _encode_video([
             "-f", "concat", "-i", str(manifest), "-map", "0:v:0", "-map", "0:a:0",
             "-vf", f"setpts=PTS-STARTPTS,fps={fps},tpad=stop_mode=clone:stop=1,trim=end_frame={runtime * fps}",

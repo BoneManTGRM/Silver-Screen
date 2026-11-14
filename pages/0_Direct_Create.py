@@ -22,8 +22,8 @@ from silver_screen.ai_video import (
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
 from silver_screen.comfyui import (
-    ComfyUIClient, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_NEGATIVE_PROMPT, WAN_14B_VIDEO_SIZES, WAN_LANDSCAPE_HD,
-    comfyui_ready, make_comfyui_client, video_controls_ready,
+    ComfyUIClient, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
+    WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, comfyui_ready, make_comfyui_client, video_controls_ready,
 )
 from silver_screen.direct_generation import (
     CLIP_MODEL,
@@ -45,7 +45,7 @@ from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
 
-AUTO_FRAME = "Auto · HD, match starting photo"
+AUTO_FRAME = "Auto · match the photo’s proportions"
 WAN_5B_LABEL = "Wan 2.2 5B · 24 fps"
 WAN_14B_LABEL = "Wan 2.2 14B · 16 fps"
 
@@ -104,11 +104,15 @@ def refresh_render(job, film_shots, *, wait=False):
                 if job.get("recovered"):
                     is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
                     job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
-                if is_image:
-                    verify_direct_output(data, image=True)
-                else:
-                    expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
-                    job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
+                try:
+                    if is_image:
+                        verify_direct_output(data, image=True)
+                    else:
+                        expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
+                        job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
+                except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
+                    save_prediction(dict(prediction, status="failed", error=str(exc)))
+                    return
                 job["data"] = data
             else:
                 job["data"] = read_direct_output(prediction, image=is_image)
@@ -235,6 +239,29 @@ if use_modal and is_image:
 if not use_comfyui:
     st.caption("Each generation submits a paid Replicate prediction.")
 
+if modal_ready:
+    with st.expander("Saved clips", expanded=not job):
+        refresh_clips = st.button("Refresh saved clips", key="direct-refresh-saved-clips")
+        if refresh_clips or (not job and "saved_clips" not in st.session_state):
+            try:
+                st.session_state["saved_clips"] = dict(saved_clips())
+            except VideoGenerationError as exc:
+                st.warning(str(exc))
+                st.session_state.setdefault("saved_clips", {})
+        if clips := st.session_state.get("saved_clips"):
+            clip_id = st.selectbox(
+                "Recent clips", clips, index=None, placeholder="Choose a clip",
+                format_func=lambda value: f"{datetime.fromtimestamp(clips[value], timezone.utc):%b %d, %H:%M} UTC · {value[-6:]}",
+            )
+            pending = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
+            if st.button("Open saved clip", disabled=clip_id is None or pending):
+                saved_job = recover_modal_job(clip_id)
+                saved_job["read_saved_clip"] = True
+                save_render_job(saved_job)
+                st.rerun()
+        else:
+            st.caption("Finished clips will appear here after they are saved.")
+
 prepared_reference = None
 reference_label = "No photo"
 frame_size = None
@@ -262,15 +289,18 @@ wan_14b = False
 if use_modal and not is_image:
     if video_controls and reference is not None:
         wan_14b = st.selectbox(
-            "Render model", (WAN_5B_LABEL, WAN_14B_LABEL),
-            help="14B uses more Modal GPU time. Choose it when detail matters most.",
+            "Render model", (WAN_14B_LABEL, WAN_5B_LABEL),
+            help="14B uses more Modal GPU time and supports clips up to five seconds.",
         ) == WAN_14B_LABEL
     else:
         st.caption(WAN_5B_LABEL)
 if video_controls:
     with st.expander("Starting frame and render size", expanded=reference is not None):
         sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
-        size = st.selectbox("Frame size", (AUTO_FRAME, *sizes))
+        size = st.selectbox(
+            "Frame size", (AUTO_FRAME, *sizes),
+            help="Fixed frame sizes center-crop the photo to fill the frame. Check the preview for faces and hands.",
+        )
         frame_size = sizes.get(size)
         if reference is not None:
             try:
@@ -302,9 +332,10 @@ with st.form("direct_create"):
     if not is_image:
         if video_controls:
             maximum = WAN_14B_MAX_SECONDS if wan_14b else 12
+            default_duration = 3 if wan_14b else (5 if use_modal else 8)
             duration = st.number_input(
                 "Clip length in seconds", min_value=2, max_value=maximum,
-                value=min(shot.seconds if shot else (5 if use_modal else 8), maximum),
+                value=min(shot.seconds if shot else default_duration, maximum),
                 key=f"wan-clip-length-{shot_number}-{maximum}",
             )
         else:
@@ -318,12 +349,13 @@ with st.form("direct_create"):
         if video_controls:
             keep_hands = st.checkbox("Keep hands in frame", help="Ask Wan to keep both hands visible and their movement natural.")
             with st.expander("Advanced render settings"):
+                default_steps = WAN_14B_STEPS if wan_14b else (24 if use_modal else 20)
                 steps = st.slider(
-                    "Sampling steps", 12, 32, 24 if use_modal and not wan_14b else 20,
+                    "Sampling steps", 12, WAN_14B_STEPS if wan_14b else 32, default_steps,
                     help="More steps increase render time. Compare shots using the same seed.",
                 )
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
-                default_negative = WAN_14B_NEGATIVE_PROMPT if wan_14b else ""
+                default_negative = WAN_MOTION_NEGATIVE_PROMPT if use_modal else ""
                 negative = st.text_area("Things to avoid (optional)", placeholder=default_negative or None)
                 negative = negative if negative.strip() else default_negative
                 video_options = {"video_size": frame_size or WAN_LANDSCAPE_HD, "steps": steps, "negative_prompt": negative}
@@ -467,7 +499,9 @@ if job:
                         "My co-star approved using their cloned voice for these lines."
                     )
                     preserve_audio = st.checkbox("Keep background audio under dialogue", value=True)
-                    smooth_clip = st.checkbox("Smooth motion at 48 fps", value=True)
+                    smooth_clip = st.checkbox(
+                        "Interpolate to 48 fps", help="Preview the added frames around hands and moving edges.",
+                    )
                     finish = st.form_submit_button("Preview edited clip")
                 if finish:
                     try:
@@ -511,27 +545,6 @@ if job:
                         st.session_state["custom_film_clip_order"] = [*current_order, clip_id]
                     st.session_state.pop("custom_film_export", None)
                     st.success("Clip added to your custom film.")
-
-if modal_ready:
-    with st.expander("Saved clips"):
-        if st.button("Load saved clips"):
-            try:
-                st.session_state["saved_clips"] = dict(saved_clips())
-            except VideoGenerationError as exc:
-                st.warning(str(exc))
-        if "saved_clips" in st.session_state:
-            if clips := st.session_state["saved_clips"]:
-                clip_id = st.selectbox(
-                    "Recent clips", clips, index=None, placeholder="Choose a clip",
-                    format_func=lambda value: f"{datetime.fromtimestamp(clips[value], timezone.utc):%b %d, %H:%M} UTC · {value[-6:]}",
-                )
-                if st.button("Open saved clip", disabled=clip_id is None or active):
-                    saved_job = recover_modal_job(clip_id)
-                    saved_job["read_saved_clip"] = True
-                    save_render_job(saved_job)
-                    st.rerun()
-            else:
-                st.caption("Finished clips will appear here after they are saved.")
 
 with st.expander("Recover a Modal render"):
     with st.form("recover-modal-render"):

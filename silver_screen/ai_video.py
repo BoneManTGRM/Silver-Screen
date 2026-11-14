@@ -293,6 +293,7 @@ def verify_mp4(
     metadata: dict[str, Any] = {
         "bytes": path.stat().st_size,
         "durationSeconds": None,
+        "videoDurationSeconds": None,
         "width": None,
         "height": None,
         "frameRate": None,
@@ -307,7 +308,7 @@ def verify_mp4(
         "-select_streams",
         "V:0",
         "-show_entries",
-        "format=duration:stream=codec_type,width,height,avg_frame_rate",
+        "format=duration:stream=codec_type,duration,width,height,avg_frame_rate",
         "-of",
         "json",
         str(path),
@@ -341,9 +342,14 @@ def verify_mp4(
         frame_rate = float(Fraction(video_stream.get("avg_frame_rate", "0"))) or None
     except (TypeError, ValueError, ZeroDivisionError):
         frame_rate = None
+    try:
+        video_duration = float(video_stream.get("duration") or 0) or None
+    except (TypeError, ValueError):
+        video_duration = None
     metadata.update(
         {
             "durationSeconds": round(duration, 3),
+            "videoDurationSeconds": video_duration,
             "width": video_stream.get("width"),
             "height": video_stream.get("height"),
             "frameRate": frame_rate,

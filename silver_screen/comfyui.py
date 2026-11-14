@@ -8,6 +8,7 @@ import os
 import secrets
 import urllib.error
 import urllib.request
+from math import ceil, floor, log, sqrt
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -27,7 +28,12 @@ WAN_LANDSCAPE_HD = (1280, 704)
 WAN_PORTRAIT_HD = (704, 1280)
 WAN_14B_LANDSCAPE_HD = (1280, 720)
 WAN_14B_MAX_SECONDS = 5
-WAN_14B_NEGATIVE_PROMPT = "blurry subject, smeared movement, flicker, distorted anatomy, warped objects"
+WAN_14B_FPS = 16
+WAN_14B_STEPS = 40
+WAN_MOTION_NEGATIVE_PROMPT = (
+    "blurry subject, smeared movement, flicker, distorted anatomy, warped objects, "
+    "fused fingers, extra limbs, morphing faces"
+)
 COMPACT_VIDEO_SIZES = {
     "Landscape · 832 × 480": (832, 480),
     "Portrait · 480 × 832": (480, 832),
@@ -43,6 +49,45 @@ WAN_14B_VIDEO_SIZES = {
     **COMPACT_VIDEO_SIZES,
 }
 VIDEO_CONTROL_MARKERS = {"__WIDTH__", "__HEIGHT__", "__STEPS__", "__NEGATIVE_PROMPT__"}
+WAN_14B_SPLIT_MARKER = "__WAN_14B_SPLIT_STEP__"
+
+
+def _wan_frame_limits(wan_14b: bool) -> tuple[int, int]:
+    width, height = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
+    return (16 if wan_14b else 32), width * height
+
+
+def wan_reference_size(width: int, height: int, *, wan_14b: bool) -> tuple[int, int]:
+    """Choose the nearest supported aspect ratio within the HD pixel budget."""
+    stride, pixel_limit = _wan_frame_limits(wan_14b)
+    scale = min(1280 / max(width, height), sqrt(pixel_limit / (width * height)))
+    widths, heights = (
+        {max(256, round_down_or_up(side * scale / stride) * stride)
+         for round_down_or_up in (floor, ceil)}
+        for side in (width, height)
+    )
+    candidates = (
+        (w, h) for w in widths for h in heights if w * h <= pixel_limit and max(w, h) <= 1280
+    )
+    return min(
+        candidates, key=lambda size: (abs(log((size[0] / size[1]) / (width / height))), -size[0] * size[1]),
+    )
+
+
+def _valid_wan_reference_size(size: tuple[int, int], *, wan_14b: bool) -> bool:
+    width, height = size
+    stride, pixel_limit = _wan_frame_limits(wan_14b)
+    return width * height <= pixel_limit and all(256 <= side <= 1280 and side % stride == 0 for side in (width, height))
+
+
+def _wan_14b_split_step(steps: int) -> int:
+    # ComfyUI's simple scheduler samples 1,000 shifted timesteps from high to low.
+    # Wan I2V switches experts at the first shifted timestep below 0.900.
+    for step in range(1, steps):
+        time = (1000 - step * 1000 // steps) / 1000
+        if 5 * time / (1 + 4 * time) < 0.9:
+            return step
+    return steps - 1
 
 
 def video_backend() -> str:
@@ -198,13 +243,19 @@ class ComfyUIClient:
             raise VideoGenerationError("Enter a prompt before generating.")
         kind = "reference" if image else self.kind
         workflow = _workflow(kind)
+        markers = _markers(workflow)
+        wan_14b = WAN_14B_SPLIT_MARKER in markers
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
         if kind != "image":
-            if video_size is not None and video_size not in self.video_sizes.values():
+            if video_size is not None and not (
+                video_size in self.video_sizes.values()
+                or image and _valid_wan_reference_size(video_size, wan_14b=wan_14b)
+            ):
                 raise VideoGenerationError("Choose a supported Wan video size.")
-            if steps is not None and not 12 <= steps <= 32:
-                raise VideoGenerationError("Choose between 12 and 32 sampling steps.")
+            max_steps = WAN_14B_STEPS if wan_14b else 32
+            if steps is not None and not 12 <= steps <= max_steps:
+                raise VideoGenerationError(f"Choose between 12 and {max_steps} sampling steps.")
             try:
                 fps = int(os.getenv("SILVER_SCREEN_COMFYUI_FPS", "24"))
                 if fps not in range(4, 61, 4):
@@ -212,18 +263,19 @@ class ComfyUIClient:
             except ValueError as exc:
                 raise VideoGenerationError("Set SILVER_SCREEN_COMFYUI_FPS to a multiple of 4 between 4 and 60.") from exc
             width, height = video_size or (832, 480)
-            sampling_steps = steps or 20
+            sampling_steps = steps or (WAN_14B_STEPS if wan_14b else 20)
             replacements.update(__FRAMES__=duration * fps + 1, __FPS__=fps,
                                 __WIDTH__=width, __HEIGHT__=height, __STEPS__=sampling_steps,
                                 __SPLIT_STEP__=sampling_steps // 2,
                                 __NEGATIVE_PROMPT__=negative_prompt)
+            if wan_14b:
+                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(sampling_steps)
             required.add("__FRAMES__")
             if video_size is not None or steps is not None or negative_prompt:
                 required.update(VIDEO_CONTROL_MARKERS)
         if image:
             required.add("__IMAGE__")
         inputs = [node["inputs"] for node in workflow.values()]
-        markers = _markers(workflow)
         if missing := required - markers:
             raise VideoGenerationError("Missing ComfyUI workflow inputs " + ", ".join(sorted(missing)) + ".")
         if image:
