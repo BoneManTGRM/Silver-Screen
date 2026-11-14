@@ -3,7 +3,22 @@ from unittest.mock import Mock
 import pytest
 
 from silver_screen.ai_video import VideoGenerationError
-from silver_screen.direct_generation import CLIP_MODEL, IMAGE_MODEL, submit_direct_generation
+from silver_screen.direct_generation import CLIP_MODEL, IMAGE_MODEL, direct_video_prompt, submit_direct_generation
+
+
+def test_natural_pace_directs_motion_and_preserves_the_action():
+    prompt = "Two dancers take a step apart, then raise their arms."
+    directed = direct_video_prompt(prompt, natural_pace=True)
+
+    assert directed.startswith(prompt + "\n\n")
+    assert "once, in order, at natural real-time speed" in directed
+    assert "foot plant and the weight transfer" in directed
+
+
+def test_direct_video_prompt_preserves_explicit_timing_and_empty_input():
+    prompt = "  A dancer raises both arms in slow motion.  "
+    assert direct_video_prompt(prompt, natural_pace=False) == prompt
+    assert direct_video_prompt(" \n ", natural_pace=True) == " \n "
 
 
 @pytest.mark.parametrize(

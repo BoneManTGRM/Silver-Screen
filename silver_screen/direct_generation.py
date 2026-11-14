@@ -33,6 +33,19 @@ FILM_CANVASES = {
 }
 
 
+def direct_video_prompt(prompt: str, *, natural_pace: bool) -> str:
+    """Add real-time direction while preserving the shot's user-written action."""
+    if not natural_pace or not prompt.strip():
+        return prompt
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "Play the described action once, in order, at natural real-time speed. "
+        "Start the first movement promptly and carry it through to a clear finish. "
+        "For steps, show each foot plant and the weight transfer before the next step. "
+        "For gestures, use a clear start and finish with natural acceleration and settling."
+    )
+
+
 def prepare_wan_reference(
     source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
 ) -> tuple[bytes, tuple[int, int]]:

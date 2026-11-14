@@ -31,6 +31,7 @@ from silver_screen.direct_generation import (
     FILM_LIMIT,
     IMAGE_MODEL,
     assemble_direct_film,
+    direct_video_prompt,
     finish_direct_clip,
     prepare_wan_reference,
     read_direct_output,
@@ -350,6 +351,7 @@ with st.form("direct_create"):
     audio = True
     video_options = {}
     seed_text = ""
+    natural_pace = False
     if not use_comfyui:
         ratios = ("1:1", "16:9", "9:16", "4:3", "3:4") if is_image else ("16:9", "9:16")
         ratio = st.selectbox("Aspect ratio", ratios)
@@ -362,6 +364,12 @@ with st.form("direct_create"):
                 value=min(shot.seconds if shot else default_duration, maximum),
                 key=f"wan-clip-length-{shot_number}-{maximum}",
             )
+            if use_modal:
+                natural_pace = st.selectbox(
+                    "Action timing", ("Natural real time", "Follow my prompt"),
+                    index=1 if shot else 0,
+                    help="Use Follow my prompt for intentional slow motion, loops, or other specified timing.",
+                ) == "Natural real time"
         else:
             durations = (8, 6, 4)
             duration = st.selectbox(
@@ -417,7 +425,8 @@ if generate and not active:
                 if prepared_end is not None:
                     video_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
                 prediction = make_comfyui_client(kind=workflow_kind).create_prediction(
-                    prompt, seed=seed, duration=duration, image=image, **video_options,
+                    direct_video_prompt(prompt, natural_pace=natural_pace),
+                    seed=seed, duration=duration, image=image, **video_options,
                 )
             else:
                 prediction = submit_direct_generation(
