@@ -120,6 +120,9 @@ class ModalComfyUIClient(ComfyUIClient):
             if isinstance(data.get('hand_review'), dict):
                 result['hand_review'] = data['hand_review']
             data = data.get('data')
+        if isinstance(data, str) and data.startswith(f'{prediction_id}: '):
+            # The dashboard quality check returns a summary. Its MP4 lives in the archive.
+            return self.get_saved_prediction(prediction_id)
         return self._complete_prediction(result, data)
 
     def get_saved_prediction(self, prediction_id: str) -> dict[str, Any]:

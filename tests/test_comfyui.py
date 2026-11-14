@@ -118,7 +118,7 @@ def comfy_server(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def empty_modal_clip_archive(request, monkeypatch):
     # Tests that need saved renders provide their own Modal volume.
-    if not request.node.name.startswith("test_direct_create_opens_saved_clip_without_a_call_result"):
+    if not request.node.name.startswith("test_direct_create_opens_saved_clip_without_video_bytes_from_call"):
         monkeypatch.setattr("silver_screen.modal_renderer.saved_clips", lambda: [])
 
 
@@ -558,7 +558,8 @@ def test_modal_worker_archives_completed_clip_without_a_viewer(
 
 
 @pytest.mark.parametrize("needs_review", [False, True])
-def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monkeypatch, needs_review):
+@pytest.mark.parametrize("open_by_id", [False, True])
+def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_server, monkeypatch, needs_review, open_by_id):
     _, _, media = comfy_server
     for key, value in {"MODAL_TOKEN_ID": "test-id", "MODAL_TOKEN_SECRET": "test-secret",
                        "SILVER_SCREEN_MODAL_APP": "test-renderer"}.items():
@@ -580,13 +581,22 @@ def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monk
             read_file=read_file,
         )
 
+    def function_call_from_id(clip_id):
+        assert open_by_id and clip_id == render_id
+        return SimpleNamespace(get=lambda **kwargs: f"{render_id}: {'possible_loss' if needs_review else 'tracked'}")
+
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         Volume=SimpleNamespace(from_name=from_name), exception=modal_errors,
+        FunctionCall=SimpleNamespace(from_id=function_call_from_id),
     ))
     reopened = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     reopened.radio[0].set_value("Video clip").run()
-    next(box for box in reopened.selectbox if box.label == "Recent clips").select(render_id).run()
-    next(button for button in reopened.button if button.label == "Open saved clip").click().run()
+    if open_by_id:
+        next(field for field in reopened.text_input if field.label == "ComfyUI prediction ID").set_value(render_id)
+        next(button for button in reopened.button if button.label == "Find render").click().run()
+    else:
+        next(box for box in reopened.selectbox if box.label == "Recent clips").select(render_id).run()
+        next(button for button in reopened.button if button.label == "Open saved clip").click().run()
     assert not reopened.exception
     assert not reopened.error
     assert reopened.get("video")
