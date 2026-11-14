@@ -19,10 +19,14 @@ Railway runs the existing Streamlit studio and its film exporter. Authenticated 
 
 ### Review hand continuity
 
-For a photo-based Direct Create render, the Modal worker samples the clip and looks for sustained loss of hand landmarks near a wrist that was visible in the starting photo. The worker can try one additional seed if it has enough time left. The studio keeps the result available for playback and download, and asks for review before including a flagged take in a film. The check may be inconclusive with small, hidden, or cropped hands, or when multiple people are visible. Landmark detection can miss deformation, so inspect the resulting footage.
+For a photo-based Direct Create render, the Modal worker samples the clip and looks for sustained loss of hand landmarks near a wrist that was visible in the starting photo. The check can follow one or two performers and can distinguish separated wrists from likely overlap or occlusion. The worker can try one additional seed if it has enough time left. The studio keeps the result available for playback and download, and asks for review before including a flagged take in a film. Automated film production checks photo-based character shots and keeps flagged attempts out of the cut. Those attempts use the film queue's existing retry budget. The check can be inconclusive for overlapping or crowded scenes, and it can miss deformed fingers.
+
+The 48 fps clip and film export uses the generated frames and preserves their timing. It repeats frames as needed to reach 48 fps.
 
 For Wan 2.2 14B, add an **Ending image** to guide the final pose. Use a second photo of the same subject and scene. The studio fits it to the starting frame's dimensions and previews both frames. The first and last frame workflow uses the existing Wan 2.2 14B model files.
 
 For 14B renders Modal tries an H100 first and falls back to an L40S when needed. Test cost depends on the GPU allotted and render time. The 5B worker uses an L40S.
 
 For a repeatable GPU check, the private Modal dashboard exposes **check_wan14_motion**. Run it with seed `341597` to render one three-second shot from the public MediaPipe pose sample. It uses the same renderer as Direct Create and allows up to 30 minutes for one full-quality attempt. Use the returned ID in **Recover a Modal render** or open the take in **Saved clips**, then review movement and hand detail. The check consumes Modal compute credits when invoked.
+
+**check_wan14_duet** uses the same settings and accepts a seed for a three-second two-person motion check. It adapts [a reference photo by Shixart1985](https://commons.wikimedia.org/wiki/File:Two_individuals_share_a_playful_and_lively_moment_outside_a_building,_engaging_in_a_dance_as_they_smile_and_hold_hands.jpg) under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/).

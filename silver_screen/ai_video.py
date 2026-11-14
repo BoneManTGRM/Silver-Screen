@@ -871,6 +871,11 @@ def _process_prediction(
         "image": image,
         "generate_audio": False if (repair or {}).get("disableAudio") else None,
     }
+    if image and queue.get("referenceMode") != "product":
+        from .modal_renderer import ModalComfyUIClient
+
+        if isinstance(client, ModalComfyUIClient):
+            settings["check_hands"] = True
     if queue.get("referenceMode") == "product":
         settings["generate_audio"] = False
         if queue.get("backend") == "comfyui":
@@ -928,9 +933,21 @@ def _verify_prediction_output(
     shot: dict[str, Any],
     config: VideoProductionConfig,
 ) -> None:
+    from .hand_review import hand_review_message
+
     clip_path = root / "clips" / f"{shot.get('id')}.mp4"
     client.download_output(prediction, clip_path)
     verification = verify_mp4(clip_path, expected_duration=config.clip_duration_seconds)
+    shot.pop("handReview", None)
+    review = prediction.get("hand_review")
+    if isinstance(review, dict):
+        shot["handReview"] = review
+        if review.get("status") == "possible_loss":
+            rejected = clip_path.parent / "review" / f"{clip_path.stem}-attempt-{int(shot.get('attempts') or 1):02d}.mp4"
+            rejected.parent.mkdir(exist_ok=True)
+            clip_path.replace(rejected)
+            shot["handReviewCandidate"] = _store_relative(root, rejected)
+            raise VideoGenerationError(hand_review_message(review))
     duration = verification.get("durationSeconds")
     if queue.get("referenceMode") == "product":
         if not duration or not verification.get("width") or not verification.get("height"):

@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from silver_screen.ai_video import VideoGenerationError
 from silver_screen.direct_generation import assemble_direct_film, finish_direct_clip, verify_direct_clip, verify_direct_output
 from silver_screen.voice_audio import verify_audio
@@ -66,6 +68,24 @@ class DirectFinishingTests(unittest.TestCase):
                     export = root / f"export-{fps}.mp4"
                     export.write_bytes(assemble_direct_film(selected, runtime, smooth=False, canvas=(960, 540)))
                     self.assert_export(export, duration=runtime, fps=fps)
+
+    def test_48_fps_export_repeats_each_wan_frame_with_no_invented_motion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "wan.mp4"
+            export = Path(directory) / "export.mp4"
+            _ffmpeg("-f", "lavfi", "-i", "testsrc2=s=320x180:r=16:d=2", "-c:v", "libx264", source)
+            export.write_bytes(finish_direct_clip(source.read_bytes(), [], smooth=True, preserve_audio=True))
+            self.assertEqual(_probe(export)["streams"][0]["avg_frame_rate"], "48/1")
+
+            def frames(video):
+                raw = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(video), "-f", "rawvideo",
+                                               "-pix_fmt", "gray", "-"])
+                return np.frombuffer(raw, dtype=np.uint8).reshape(-1, 320 * 180).astype(np.int16)
+
+            originals, delivery = frames(source), frames(export)
+            self.assertEqual(len(delivery), 3 * len(originals))
+            error = np.abs(delivery - np.repeat(originals, 3, axis=0)).mean(axis=1)
+            self.assertLess(error.max(), 2.0)
 
     def test_rejects_media_without_expected_track(self):
         with tempfile.TemporaryDirectory() as directory:

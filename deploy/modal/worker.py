@@ -41,6 +41,9 @@ MOTION_CHECK_TIMEOUT = 1800
 RETAKE_RESERVE = 240
 MOTION_CHECK_ASSET = 'https://storage.googleapis.com/mediapipe-assets/pose.jpg'
 MOTION_CHECK_SHA256 = 'c8a830ed683c0276d713dd5aeda28f415f10cd6291972084a40d0d8b934ed62b'
+DUET_CHECK_ASSET = ('https://upload.wikimedia.org/wikipedia/commons/7/74/'
+                    'Two_individuals_share_a_playful_and_lively_moment_outside_a_building%2C_engaging_in_a_dance_as_they_smile_and_hold_hands.jpg')
+DUET_CHECK_SHA256 = 'c9d01899ce5f5c9dc03f5da1d3c481e5bdd858054a32d78fcabf435e9b20fd5f'
 
 MEDIAPIPE_MODELS = 'https://storage.googleapis.com/mediapipe-models'
 HAND_REVIEW_MODELS = {
@@ -117,6 +120,30 @@ def render_wan14(kind: str, prompt: str, settings: dict) -> bytes | dict:
 )
 def check_wan14_motion(seed: int) -> str:
     """Run one reproducible 14B quality check from the private Modal dashboard."""
+    return _check_motion(seed, MOTION_CHECK_ASSET, MOTION_CHECK_SHA256, 200_000, (
+        'A steady full-body shot of an athlete holding a yoga pose at the beach. '
+        'He slowly lowers his left arm toward his waist with natural finger movement. '
+        'His right arm, body and gaze remain steady. Subtle waves move behind him. '
+        'Consistent daylight and a locked camera.'
+    ))
+
+
+@app.function(
+    image=wan_14b_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=MOTION_CHECK_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def check_wan14_duet(seed: int) -> str:
+    """Render a three-second two-person shot from a licensed reference."""
+    # Reference photo by Shixart1985, CC BY 2.0, via Wikimedia Commons.
+    return _check_motion(seed, DUET_CHECK_ASSET, DUET_CHECK_SHA256, 11_000_000, (
+        'One continuous full-body shot of two adults rehearsing a dance. '
+        'They let go of their clasped hands, take a quick sideways step apart, then open their palms at chest level. '
+        'The man in denim stays on the left and the woman in plaid stays on the right. '
+        'Natural weight shifts and finger movement, a steady eye-level camera, and consistent daylight.'
+    ))
+
+
+def _check_motion(seed: int, image_url: str, digest: str, byte_limit: int, prompt: str) -> str:
     from hashlib import sha256
     from io import BytesIO
 
@@ -125,17 +152,13 @@ def check_wan14_motion(seed: int) -> str:
 
     if type(seed) is not int or not 0 <= seed < 2**53:
         raise ValueError('Choose a whole-number seed from 0 to 9007199254740991.')
-    with urllib.request.urlopen(MOTION_CHECK_ASSET, timeout=20) as response:
-        source = response.read(200_001)
-    if sha256(source).hexdigest() != MOTION_CHECK_SHA256:
+    request = urllib.request.Request(image_url, headers={'User-Agent': 'Silver-Screen/1.0 (render validation)'})
+    with urllib.request.urlopen(request, timeout=25) as response:
+        source = response.read(byte_limit + 1)
+    if len(source) > byte_limit or sha256(source).hexdigest() != digest:
         raise RuntimeError('The public reference photo for the motion check changed.')
     reference, size = prepare_wan_reference(BytesIO(source), None, wan_14b=True)
-    result = _render('video', (
-        'A steady full-body shot of an athlete holding a yoga pose at the beach. '
-        'He slowly lowers his left arm toward his waist with natural finger movement. '
-        'His right arm, body and gaze remain steady. Subtle waves move behind him. '
-        'Consistent daylight and a locked camera.'
-    ), {
+    result = _render('video', prompt, {
         'duration': 3, 'seed': seed, 'steps': WAN_14B_STEPS, 'video_size': size,
         'image': 'data:image/jpeg;base64,' + base64.b64encode(reference).decode(),
         'negative_prompt': WAN_MOTION_NEGATIVE_PROMPT, 'save_clip': True,
@@ -176,9 +199,10 @@ def _render(
         raise ValueError('Unsupported render type.')
     settings = dict(settings)
     save_clip = settings.pop('save_clip', False) and kind == 'video'
+    check_hands = settings.pop('check_hands', False) and kind == 'video'
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
-    reference = settings.get('image') if save_clip else None
+    reference = settings.get('image') if save_clip or check_hands else None
     hand_review = None
     reference_workflow = 'wan-reference-14b.json' if wan_14b else 'wan-reference.json'
     fps = WAN_14B_FPS if wan_14b else 24
@@ -213,12 +237,12 @@ def _render(
             if wan_14b:
                 client.video_sizes = WAN_14B_VIDEO_SIZES
                 client.timeout_seconds = min(2400, timeout - 150)
-            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip else None)
+            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands else None)
             if reference:
                 hand_review = _review_hands(data, reference)
                 elapsed = time.monotonic() - started
                 remaining = timeout - elapsed - RETAKE_RESERVE
-                if allow_retake and hand_review['status'] == 'possible_loss' and elapsed < remaining:
+                if save_clip and allow_retake and hand_review['status'] == 'possible_loss' and elapsed < remaining:
                     # Retry once with a different latent seed. Keep the first take unless the second tracks.
                     client.timeout_seconds = int(remaining)
                     hand_review['retake_attempted'] = True
@@ -252,4 +276,4 @@ def _render(
             logging.exception('Could not store a completed Silver Screen clip.')
             return dict(result, archive_failed=True)
         return dict(result, archived=True)
-    return data
+    return {'data': data, 'hand_review': hand_review} if hand_review is not None else data

@@ -500,7 +500,7 @@ if job:
                 st.caption("Saved in your studio")
             st.download_button("Download original clip", job["data"], filename, "video/mp4")
 
-            with st.expander("Record dialogue and smooth this clip"):
+            with st.expander("Record dialogue and export this clip"):
                 samples = saved_clone_samples(library_root) if library_root and voice_clone_ready() else {}
                 st.caption("Set when each line should start in this clip.")
                 with st.form(f"finish-clip-{prediction_id}"):
@@ -534,7 +534,7 @@ if job:
                     )
                     preserve_audio = st.checkbox("Keep background audio under dialogue", value=True)
                     smooth_clip = st.checkbox(
-                        "Interpolate to 48 fps", help="Preview the added frames around hands and moving edges.",
+                        "Export at 48 fps", help="Repeats source frames as needed to preserve hands and other fine detail.",
                     )
                     finish = st.form_submit_button("Preview edited clip")
                 if finish:
@@ -595,7 +595,7 @@ if not is_image and (shot or film_shots):
             )
             runtime = st.number_input("Film runtime (seconds)", min_value=1, max_value=12 * len(SHOTS), value=60)
             canvas = st.selectbox("Export frame size", list(FILM_CANVASES))
-            smooth_film = st.checkbox("Smooth motion at 48 fps", value=False, key="smooth-action-film")
+            smooth_film = st.checkbox("Export at 48 fps", value=False, key="smooth-action-film", help="Keeps the original motion and repeats source frames as needed.")
             export = st.form_submit_button("Export film", disabled=not film_shots)
         if export:
             try:
@@ -619,7 +619,7 @@ if not is_image and custom_shots:
         with st.form("custom-film-export"):
             runtime = st.number_input("Custom film runtime (seconds)", min_value=1, value=max(1, seconds))
             canvas = st.selectbox("Custom film frame size", list(FILM_CANVASES))
-            smooth_film = st.checkbox("Smooth custom film to 48 fps")
+            smooth_film = st.checkbox("Export custom film at 48 fps", help="Keeps the original motion and repeats source frames as needed.")
             export = st.form_submit_button("Export custom film", disabled=not selected)
         if export:
             try:

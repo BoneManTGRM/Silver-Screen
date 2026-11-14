@@ -242,24 +242,16 @@ def finish_short_video(
     return destination
 
 
-def _motion_filter(source_fps: float | None) -> str:
-    if source_fps is not None and source_fps >= 48:
-        return "fps=48"
-    # Padding provides the look-ahead frames FFmpeg needs at the end of a shot.
-    return ("tpad=stop_mode=clone:stop_duration=0.25,"
-            "minterpolate=fps=48:mi_mode=mci:mc_mode=aobmc:vsbmc=1:scd=fdiff")
-
-
 def finish_direct_clip(
     video: bytes, recordings: list[tuple[bytes, float]], *, smooth: bool,
     preserve_audio: bool,
 ) -> bytes:
-    """Mix recordings and optionally interpolate motion at the original speed."""
+    """Mix recordings and optionally conform to 48 fps using the source frames."""
     with TemporaryDirectory() as directory:
         root = Path(directory)
         source = root / "source.mp4"
         source.write_bytes(video)
-        duration, source_fps = _clip_timing(source)
+        duration, _ = _clip_timing(source)
         if recordings:
             tracks = []
             for index, (recording, start) in enumerate(recordings):
@@ -283,8 +275,8 @@ def finish_direct_clip(
             destination = root / "smooth.mp4"
             _encode_video([
                 "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
-                "-vf", _motion_filter(source_fps), "-t", f"{duration:.3f}",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-vf", "fps=48:round=up", "-t", f"{duration:.3f}",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "16", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(destination),
             ])
             source = destination
@@ -319,12 +311,12 @@ def assemble_direct_film(
         normalized = []
         source_rates = {source_fps for _, _, source_fps in sources}
         fps = 24
-        if smooth or source_rates == {WAN_14B_FPS, 24}:
-            # 48 is a common multiple of the two Wan rates, so frame repeats stay evenly spaced.
+        if smooth or (WAN_14B_FPS in source_rates and len(source_rates) > 1):
+            # 48 is a common multiple of the Wan rates. Retain the same frames and timing.
             fps = 48
         elif source_rates == {WAN_14B_FPS}:
             fps = WAN_14B_FPS
-        for index, (source, duration, source_fps) in enumerate(sources):
+        for index, (source, duration, _) in enumerate(sources):
             if remaining < 0.02:
                 break
             length = min(remaining, duration)
@@ -335,9 +327,8 @@ def assemble_direct_film(
                            "-map", "0:v:0", "-map", "1:a:0"]
             resize = (f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,"
                       f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p")
-            motion = _motion_filter(source_fps) if smooth else f"fps={fps}"
             _encode_video([
-                *command, "-vf", f"{resize},{motion}", "-af", "apad", "-t", f"{length:.3f}",
+                *command, "-vf", f"{resize},fps={fps}:round=up", "-af", "apad", "-t", f"{length:.3f}",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "17", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000", str(destination),
             ])

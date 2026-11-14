@@ -626,7 +626,60 @@ def test_hand_review_treats_visible_wrists_and_out_of_frame_hands_differently():
     assert summarize_hand_review((), [intact] * 24)["status"] == "insufficient_reference"
 
 
-def test_modal_motion_check_uses_a_public_reference_and_one_take(monkeypatch):
+def test_two_performers_keep_separate_tracks_and_report_the_affected_wrist(monkeypatch):
+    from silver_screen.hand_review import Body, HandReviewer, Track, Wrist, hand_review_message, summarize_hand_review
+
+    def actor(x):
+        return Body((x, 50), 40, {"left": Wrist((x + 26, 86), (x + 6, 61), (0, 0, 120, 120))})
+
+    reviewer = HandReviewer.__new__(HandReviewer)
+    reviewer.start = [actor(40), actor(160)]
+    reviewer.reference = {(0, "left"): reviewer.start[0].wrists["left"], (1, "left"): reviewer.start[1].wrists["left"]}
+    tracks = [Track(body) for body in reviewer.start]
+    first, second = actor(43), actor(154)
+    monkeypatch.setattr(reviewer, "_bodies", lambda frame: [second, first])
+    monkeypatch.setattr(reviewer, "_has_hand", lambda frame, wrist: wrist is first.wrists["left"])
+    observations = reviewer._frame(Image.new("RGB", (300, 200)), tracks)
+    assert observations == {"1:left": True, "2:left": False}
+    assert tracks[0].body is first and tracks[1].body is second
+    intact = {"1:left": True, "2:left": True}
+    result = summarize_hand_review(intact, [intact] * 8 + [observations] * 4 + [intact] * 12)
+    assert result["suspect_hands"] == ["2:left"]
+    assert result["first_issue_seconds"] == 1.0
+    assert "left hand of the person starting on the right" in hand_review_message(result)
+    # When the missing landmarks are near a thigh, their absence is ambiguous.
+    second = Body(second.center, second.scale, second.wrists, (((175, 60), (191, 120), 15),))
+    assert reviewer._frame(Image.new("RGB", (300, 200)), tracks) == {"1:left": True}
+
+
+def test_film_queue_excludes_a_flagged_take_and_accepts_the_retry(comfy_server, tmp_path, monkeypatch):
+    from silver_screen import ai_video
+    from silver_screen.video_runtime import choose_tgrm_repair
+
+    _, _, media = comfy_server
+    monkeypatch.setenv("SILVER_SCREEN_VISUAL_QUALITY_GATE", "0")
+    shot = {"id": "shot-0001", "attempts": 1}
+    config = SimpleNamespace(clip_duration_seconds=8)
+
+    def download(prediction, target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(media["result.mp4"])
+
+    client = SimpleNamespace(download_output=download)
+    prediction = {"status": "succeeded", "hand_review": {"status": "possible_loss", "first_issue_seconds": 1.25}}
+    with pytest.raises(ai_video.VideoGenerationError, match="hand could not be detected") as failure:
+        ai_video._verify_prediction_output(client, prediction, {}, tmp_path, shot, config)
+    assert choose_tgrm_repair(str(failure.value), 2)["strategy"] == "preserve_hand_anatomy"
+    assert (tmp_path / shot["handReviewCandidate"]).read_bytes() == media["result.mp4"]
+    assert not (tmp_path / "clips/shot-0001.mp4").exists()
+    shot["attempts"] = 2
+    ai_video._verify_prediction_output(client, {**prediction, "hand_review": {"status": "tracked"}}, {}, tmp_path, shot, config)
+    assert shot["status"] == "verified" and shot["handReview"]["status"] == "tracked"
+    assert shot["handReviewCandidate"] != shot["path"]
+
+
+@pytest.mark.parametrize("demo,license_prefix", [("motion", "https://storage.googleapis.com/"), ("duet", "https://upload.wikimedia.org/")])
+def test_modal_motion_check_uses_a_public_reference_and_one_take(monkeypatch, demo, license_prefix):
     from hashlib import sha256
 
     from deploy.modal import worker
@@ -636,23 +689,25 @@ def test_modal_motion_check_uses_a_public_reference_and_one_take(monkeypatch):
     source = photo.getvalue()
     call_id = "fc-" + "6" * 26
 
-    def fetch(url, **kwargs):
-        assert url == worker.MOTION_CHECK_ASSET
+    def fetch(request, **kwargs):
+        assert request.full_url.startswith(license_prefix)
         return nullcontext(io.BytesIO(source))
 
     def render(kind, prompt, settings, **kwargs):
-        assert kind == "video" and "lowers his left arm" in prompt
+        assert kind == "video" and ("lowers his left arm" if demo == "motion" else "step apart") in prompt
         assert kwargs == {"wan_14b": True, "timeout": worker.MOTION_CHECK_TIMEOUT, "allow_retake": False}
         assert settings["duration"] == 3 and settings["seed"] == 341597
         assert settings["image"].startswith("data:image/jpeg;base64,") and settings["save_clip"] is True
         return {"archived": True, "hand_review": {"status": "tracked"}}
 
     monkeypatch.setattr(worker, "MOTION_CHECK_SHA256", sha256(source).hexdigest())
+    monkeypatch.setattr(worker, "DUET_CHECK_SHA256", sha256(source).hexdigest())
     monkeypatch.setattr(worker.urllib.request, "urlopen", fetch)
     monkeypatch.setattr(worker.modal, "current_function_call_id", lambda: call_id)
     monkeypatch.setattr(worker, "_render", render)
     with pytest.warns(UserWarning, match="executing locally"):
-        assert worker.check_wan14_motion.local(341597) == f"{call_id}: tracked"
+        check = worker.check_wan14_motion if demo == "motion" else worker.check_wan14_duet
+        assert check.local(341597) == f"{call_id}: tracked"
 
 
 def test_movie_uses_comfyui_and_keeps_backend_on_resume(comfy_server, tmp_path, monkeypatch):

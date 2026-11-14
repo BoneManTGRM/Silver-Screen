@@ -475,6 +475,10 @@ def choose_tgrm_repair(error: str, attempt: int) -> dict[str, Any]:
         strategy = "redownload_or_regenerate"
         suffix = "Return a clean, complete video file with stable motion."
         seed_delta = 17
+    elif "hand could not be detected" in lowered:
+        strategy = "preserve_hand_anatomy"
+        suffix = "Keep wrists and hands connected during the planned movement, with natural finger anatomy. Preserve intentional occlusion."
+        seed_delta = 23
     elif "timeout" in lowered or "timed out" in lowered:
         strategy = "retry_with_simplified_motion"
         suffix = "Use one clear camera move and one clear subject action."
