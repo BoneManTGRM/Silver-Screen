@@ -33,17 +33,6 @@ FILM_CANVASES = {
 }
 
 
-def guide_wan_hands(prompt: str, negative_prompt: str) -> tuple[str, str]:
-    if not prompt.strip():
-        raise VideoGenerationError("Enter a prompt before generating.")
-    hand_artifacts = "hands out of frame, missing hands, fused fingers, extra fingers, warped hands"
-    return (
-        f"{prompt.rstrip()}\n\nKeep both hands visible throughout the shot. "
-        "Use a steady camera and natural hand movement with clearly defined fingers.",
-        ", ".join(filter(None, (negative_prompt.strip(), hand_artifacts))),
-    )
-
-
 def prepare_wan_reference(
     source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
 ) -> tuple[bytes, tuple[int, int]]:

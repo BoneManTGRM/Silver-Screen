@@ -7,7 +7,8 @@ from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
 from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient
-from .modal_clip_archive import CLIPS_VOLUME, MODAL_RENDER_ID, latest_saved_clips, read_saved_clip
+from .hand_review import HAND_REVIEW_UNAVAILABLE
+from .modal_clip_archive import CLIPS_VOLUME, MODAL_RENDER_ID, latest_saved_clips, read_saved_clip, read_saved_hand_review
 
 
 def _configured(app_setting: str) -> bool:
@@ -64,6 +65,8 @@ class ModalComfyUIClient(ComfyUIClient):
     def create_prediction(self, prompt: str, *, wan_14b: bool = False, **settings: Any) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError('Enter a prompt before generating.')
+        if settings.get('end_image') and not wan_14b:
+            raise VideoGenerationError('An ending image requires Wan 2.2 14B.')
         function = 'render'
         if wan_14b:
             if self.kind != 'video' or not settings.get('image'):
@@ -114,6 +117,8 @@ class ModalComfyUIClient(ComfyUIClient):
                 result['warning'] = 'The clip rendered, but Modal could not confirm the save. Download your copy now.'
             elif data.get('archived') is True:
                 result['archived'] = True
+            if isinstance(data.get('hand_review'), dict):
+                result['hand_review'] = data['hand_review']
             data = data.get('data')
         return self._complete_prediction(result, data)
 
@@ -123,13 +128,21 @@ class ModalComfyUIClient(ComfyUIClient):
         if not MODAL_RENDER_ID.fullmatch(prediction_id):
             return unavailable
         try:
-            data = read_saved_clip(self.modal.Volume.from_name(CLIPS_VOLUME), prediction_id)
+            volume = self.modal.Volume.from_name(CLIPS_VOLUME)
+            data = read_saved_clip(volume, prediction_id)
         except (FileNotFoundError, self.modal.exception.NotFoundError):
             return unavailable
         except VideoGenerationError as exc:
             return dict(result, status='failed', error=str(exc))
         except (self.modal.exception.Error, OSError) as exc:
             raise PredictionPending('Could not read the saved clip from Modal. Check this render again.') from exc
+        try:
+            if review := read_saved_hand_review(volume, prediction_id):
+                result['hand_review'] = review
+        except self.modal.exception.NotFoundError:
+            pass  # Clips made before hand review have no sidecar.
+        except (self.modal.exception.Error, OSError):
+            result['hand_review'] = HAND_REVIEW_UNAVAILABLE.copy()
         return self._complete_prediction(dict(result, archived=True), data)
 
     def _complete_prediction(self, result: dict[str, Any], data: Any) -> dict[str, Any]:

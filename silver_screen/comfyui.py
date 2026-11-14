@@ -32,7 +32,7 @@ WAN_14B_FPS = 16
 WAN_14B_STEPS = 40
 WAN_MOTION_NEGATIVE_PROMPT = (
     "blurry subject, smeared movement, flicker, distorted anatomy, warped objects, "
-    "fused fingers, extra limbs, morphing faces"
+    "missing hands, wrist stumps, detached hands, fused fingers, extra fingers, extra limbs, morphing faces"
 )
 COMPACT_VIDEO_SIZES = {
     "Landscape · 832 × 480": (832, 480),
@@ -234,6 +234,7 @@ class ComfyUIClient:
         seed: int,
         duration: int = 8,
         image: str | None = None,
+        end_image: str | None = None,
         generate_audio: bool | None = None,
         video_size: tuple[int, int] | None = None,
         steps: int | None = None,
@@ -245,6 +246,15 @@ class ComfyUIClient:
         workflow = _workflow(kind)
         markers = _markers(workflow)
         wan_14b = WAN_14B_SPLIT_MARKER in markers
+        if end_image:
+            conditioning = [node for node in workflow.values() if node["class_type"] == "WanImageToVideo"]
+            if not image or not wan_14b or len(conditioning) != 1:
+                raise VideoGenerationError("An ending image requires the Wan 2.2 14B image-to-video workflow.")
+            # The same A14B models support ComfyUI's start/end-frame conditioning.
+            end_node = str(max((int(key) for key in workflow if key.isdecimal()), default=0) + 1)
+            conditioning[0]["class_type"] = "WanFirstLastFrameToVideo"
+            conditioning[0]["inputs"]["end_image"] = [end_node, 0]
+            workflow[end_node] = {"class_type": "LoadImage", "inputs": {"image": "__END_IMAGE__"}}
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
         if kind != "image":
@@ -280,6 +290,8 @@ class ComfyUIClient:
             raise VideoGenerationError("Missing ComfyUI workflow inputs " + ", ".join(sorted(missing)) + ".")
         if image:
             replacements["__IMAGE__"] = self._upload_image(image)
+        if end_image:
+            replacements["__END_IMAGE__"] = self._upload_image(end_image)
         for fields in inputs:
             for key, value in fields.items():
                 if isinstance(value, str) and value in replacements:

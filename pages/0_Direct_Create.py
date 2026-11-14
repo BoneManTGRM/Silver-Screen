@@ -32,13 +32,13 @@ from silver_screen.direct_generation import (
     IMAGE_MODEL,
     assemble_direct_film,
     finish_direct_clip,
-    guide_wan_hands,
     prepare_wan_reference,
     read_direct_output,
     submit_direct_generation,
     verify_direct_clip,
     verify_direct_output,
 )
+from silver_screen.hand_review import hand_review_message
 from silver_screen.modal_clip_archive import MODAL_RENDER_ID
 from silver_screen.modal_renderer import ModalComfyUIClient, modal_configured, saved_clips
 from silver_screen.voice_config import VoiceStudioError
@@ -75,6 +75,23 @@ def recover_modal_job(render_id: str, seconds: str = "") -> dict:
     if re.fullmatch(r"[2-9]|1[0-2]", seconds):
         job["requested_seconds"] = int(seconds)
     return job
+
+
+def needs_hand_review(job: dict) -> bool:
+    return job["prediction"].get("hand_review", {}).get("status") == "possible_loss" and not job.get("hand_reviewed")
+
+
+def retain_film_shot(job: dict, film_shots: dict, data: bytes) -> None:
+    number = job.get("shot_number")
+    if not number or needs_hand_review(job):
+        return
+    existing_size = sum(len(clip) for key, clip in film_shots.items() if key != number)
+    if existing_size + len(data) > FILM_LIMIT:
+        job["film_warning"] = "This shot exceeds the film workspace. Download it separately."
+        return
+    film_shots[number] = data
+    job.pop("film_warning", None)
+    st.session_state.pop("action_film_export", None)
 
 
 def refresh_render(job, film_shots, *, wait=False):
@@ -118,13 +135,7 @@ def refresh_render(job, film_shots, *, wait=False):
                 job["data"] = read_direct_output(prediction, image=is_image)
             if "started" in job:
                 job["elapsed_seconds"] = monotonic() - job["started"]
-            if number := job.get("shot_number"):
-                existing_size = sum(len(data) for key, data in film_shots.items() if key != number)
-                if existing_size + len(job["data"]) <= FILM_LIMIT:
-                    film_shots[number] = job["data"]
-                    st.session_state.pop("action_film_export", None)
-                else:
-                    job["film_warning"] = "This shot exceeds the film workspace. Download it separately."
+            retain_film_shot(job, film_shots, job["data"])
     except (VideoGenerationError, OSError, SubprocessError, Image.DecompressionBombError) as exc:
         job["check_error"] = str(exc)
 
@@ -263,6 +274,7 @@ if modal_ready:
             st.caption("Finished clips will appear here after they are saved.")
 
 prepared_reference = None
+prepared_end = None
 reference_label = "No photo"
 frame_size = None
 reference = None
@@ -310,6 +322,19 @@ if video_controls:
                 st.error(reference_error)
             else:
                 st.image(prepared_reference, caption=f"Starting frame · {frame_size[0]} × {frame_size[1]}", width=320)
+                if wan_14b:
+                    end_image = st.file_uploader(
+                        "Ending image (optional)", type=["png", "jpg", "jpeg", "webp"], key="wan-ending-image",
+                        help="Guide the final pose with a second photo of the same subject and scene.",
+                    )
+                    if end_image is not None:
+                        try:
+                            prepared_end, _ = prepare_wan_reference(end_image, frame_size, wan_14b=True)
+                        except VideoGenerationError as exc:
+                            reference_error = f"Ending image. {exc}"
+                            st.error(reference_error)
+                        else:
+                            st.image(prepared_end, caption="Ending frame", width=320)
 
 with st.form("direct_create"):
     prompt = st.text_area(
@@ -324,7 +349,6 @@ with st.form("direct_create"):
     ratio = "16:9"
     audio = True
     video_options = {}
-    keep_hands = False
     seed_text = ""
     if not use_comfyui:
         ratios = ("1:1", "16:9", "9:16", "4:3", "3:4") if is_image else ("16:9", "9:16")
@@ -347,7 +371,6 @@ with st.form("direct_create"):
         if not use_comfyui:
             audio = st.checkbox("Generate audio", value=True)
         if video_controls:
-            keep_hands = st.checkbox("Keep hands in frame", help="Ask Wan to keep both hands visible and their movement natural.")
             with st.expander("Advanced render settings"):
                 default_steps = WAN_14B_STEPS if wan_14b else (24 if use_modal else 20)
                 steps = st.slider(
@@ -357,7 +380,7 @@ with st.form("direct_create"):
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
                 default_negative = WAN_MOTION_NEGATIVE_PROMPT if use_modal else ""
                 negative = st.text_area("Things to avoid (optional)", placeholder=default_negative or None)
-                negative = negative if negative.strip() else default_negative
+                negative = ", ".join(filter(None, (default_negative, negative.strip())))
                 video_options = {"video_size": frame_size or WAN_LANDSCAPE_HD, "steps": steps, "negative_prompt": negative}
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
     generate = st.form_submit_button("Generate", type="primary", disabled=active or reference_error is not None)
@@ -391,8 +414,8 @@ if generate and not active:
                     video_options["save_clip"] = True
                 if wan_14b:
                     video_options["wan_14b"] = True
-                if keep_hands:
-                    prompt, video_options["negative_prompt"] = guide_wan_hands(prompt, video_options["negative_prompt"])
+                if prepared_end is not None:
+                    video_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
                 prediction = make_comfyui_client(kind=workflow_kind).create_prediction(
                     prompt, seed=seed, duration=duration, image=image, **video_options,
                 )
@@ -454,12 +477,23 @@ if job:
         else:
             filename = job.get("filename", "silver-screen.mp4")
             st.video(job["data"], format="video/mp4")
+            if review := job["prediction"].get("hand_review"):
+                if message := hand_review_message(review):
+                    if review.get("status") == "possible_loss":
+                        st.warning(message)
+                        if needs_hand_review(job) and st.button("Use this take", key=f"hand-review-{prediction_id}"):
+                            job["hand_reviewed"] = True
+                            retain_film_shot(job, film_shots, job.get("finished_data", job["data"]))
+                            st.rerun()
+                    else:
+                        st.caption(message)
             if seconds := job.get("requested_seconds") or job.get("actual_seconds"):
                 elapsed = job.get("elapsed_seconds")
                 timing = f" · ready in {elapsed:.1f} seconds" if elapsed is not None else ""
                 st.caption(f"{seconds:g}-second clip{timing}")
-            if "seed" in job:
-                st.caption(f"Seed {job['seed']}")
+            seed = job["prediction"].get("hand_review", {}).get("selected_seed", job.get("seed"))
+            if seed is not None:
+                st.caption(f"Seed {seed}")
             if render_model := job.get("render_model"):
                 st.caption(render_model)
             if job["prediction"].get("archived"):
@@ -515,13 +549,7 @@ if job:
                             job["finished_data"] = finish_direct_clip(
                                 job["data"], tracks, smooth=smooth_clip, preserve_audio=preserve_audio,
                             )
-                        if number := job.get("shot_number"):
-                            existing_size = sum(len(data) for key, data in film_shots.items() if key != number)
-                            if existing_size + len(job["finished_data"]) <= FILM_LIMIT:
-                                film_shots[number] = job["finished_data"]
-                                st.session_state.pop("action_film_export", None)
-                            else:
-                                st.warning("This edit exceeds the film workspace. Download it separately.")
+                        retain_film_shot(job, film_shots, job["finished_data"])
                     except (VideoGenerationError, VoiceStudioError, OSError, SubprocessError) as exc:
                         st.error(str(exc))
                 if "finished_data" in job:
@@ -529,7 +557,7 @@ if job:
                     st.download_button(
                         "Download edited clip", job["finished_data"], f"{Path(filename).stem}-edited.mp4", "video/mp4",
                     )
-            if st.button("Add clip to custom film"):
+            if st.button("Add clip to custom film", disabled=needs_hand_review(job)):
                 clip = job.get("finished_data", job["data"])
                 clip_id = f"{job_backend}:{prediction_id}"
                 previous = custom_shots.get(clip_id)

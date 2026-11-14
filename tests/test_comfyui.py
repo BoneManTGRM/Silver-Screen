@@ -118,7 +118,7 @@ def comfy_server(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def empty_modal_clip_archive(request, monkeypatch):
     # Tests that need saved renders provide their own Modal volume.
-    if request.node.name != "test_direct_create_opens_saved_clip_without_a_call_result":
+    if not request.node.name.startswith("test_direct_create_opens_saved_clip_without_a_call_result"):
         monkeypatch.setattr("silver_screen.modal_renderer.saved_clips", lambda: [])
 
 
@@ -359,7 +359,7 @@ def test_bundled_wan_accepts_custom_format_and_director_controls(comfy_server, m
     assert dimensions == "720,1280"
 
 
-def test_direct_create_previews_full_photo_and_guides_hand_motion(comfy_server, monkeypatch, tmp_path):
+def test_direct_create_previews_photo_and_preserves_framing_prompt(comfy_server, monkeypatch, tmp_path):
     submissions, uploads, _ = comfy_server
     workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
     monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflows / "wan-video.json"))
@@ -374,7 +374,6 @@ def test_direct_create_previews_full_photo_and_guides_hand_motion(comfy_server, 
     app.radio[0].set_value("Video clip").run()
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
     assert any(image.proto.imgs[0].caption == "Starting frame · 736 × 1216" for image in app.image)
-    next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
     app.text_area[0].set_value("A runner warms up.")
     app.text_area[1].set_value("camera shake")
     generate_button(app).click().run()
@@ -385,8 +384,8 @@ def test_direct_create_previews_full_photo_and_guides_hand_motion(comfy_server, 
     assert graph["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
     assert graph["6"]["inputs"]["width"] == 736
     assert graph["6"]["inputs"]["height"] == 1216
-    assert "Keep both hands visible" in graph["4"]["inputs"]["text"]
-    assert "camera shake, hands out of frame, missing hands" in graph["5"]["inputs"]["text"]
+    assert graph["4"]["inputs"]["text"] == "A runner warms up."
+    assert graph["5"]["inputs"]["text"] == "camera shake"
     jpeg = uploads[0].split(b"\r\n\r\n", 1)[1].split(b"\r\n--", 1)[0]
     with Image.open(io.BytesIO(jpeg)) as fitted:
         assert fitted.size == (736, 1216)
@@ -446,8 +445,9 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert app.number_input[0].max == 5
     assert any(image.proto.imgs[0].caption == "Starting frame · 720 × 1280" for image in app.image)
     assert app.slider[0].value == 40
-    next(box for box in app.checkbox if box.label == "Keep hands in frame").check()
+    assert not any(box.label == "Keep hands in frame" for box in app.checkbox)
     app.text_area[0].set_value("The runner lifts both hands.")
+    app.text_area[1].set_value("camera shake")
     generate_button(app).click().run()
     assert not app.exception
     assert not app.error
@@ -455,9 +455,10 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     app_name, function, kind, prompt, settings = submissions[0]
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
-    assert "Keep both hands visible" in prompt
+    assert prompt == "The runner lifts both hands."
+    assert "camera shake" in settings["negative_prompt"]
     assert "blurry subject" in settings["negative_prompt"]
-    assert "missing hands" in settings["negative_prompt"]
+    assert "wrist stumps" in settings["negative_prompt"]
     assert settings["video_size"] == (720, 1280)
     assert settings["save_clip"] is True
     assert settings["duration"] == 3
@@ -465,18 +466,27 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert "wan_14b" not in settings
 
 
-def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypatch):
-    submissions, _, _ = comfy_server
+@pytest.mark.parametrize("two_anchors", [False, True])
+def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypatch, two_anchors):
+    submissions, uploads, _ = comfy_server
     workflows = Path(__file__).resolve().parents[1] / "deploy/runpod/workflows"
     monkeypatch.setenv(WORKFLOW_ENV["reference"], str(workflows / "wan-reference-14b.json"))
     monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
     client = ComfyUIClient()
     client.video_sizes = WAN_14B_VIDEO_SIZES
     client.create_prediction("Slow movement", seed=42, duration=5, video_size=(1280, 720), steps=40,
-                             image="data:image/jpeg;base64,ZmFrZS1qcGVn")
+                             image="data:image/jpeg;base64,ZmFrZS1qcGVn",
+                             end_image="data:image/jpeg;base64,ZW5kLWZyYW1l" if two_anchors else None)
     graph = submissions["job-1"]
     conditioning = graph["8"]["inputs"]
     assert (conditioning["width"], conditioning["height"], conditioning["length"]) == (1280, 720, 81)
+    if two_anchors:
+        assert len(uploads) == 2 and b"end-frame" in uploads[1]
+        assert graph["8"]["class_type"] == "WanFirstLastFrameToVideo"
+        assert graph[conditioning["end_image"][0]]["class_type"] == "LoadImage"
+    else:
+        assert len(uploads) == 1
+        assert graph["8"]["class_type"] == "WanImageToVideo"
     high_noise = graph["11"]["inputs"]
     low_noise = graph["12"]["inputs"]
     assert high_noise["noise_seed"] == 42
@@ -488,8 +498,12 @@ def test_14b_workflow_preserves_the_two_denoising_stages(comfy_server, monkeypat
     assert graph["14"]["inputs"]["fps"] == 16
 
 
-@pytest.mark.parametrize("archive_fails", [False, True])
-def test_modal_worker_archives_completed_clip_without_a_viewer(comfy_server, monkeypatch, tmp_path, archive_fails):
+@pytest.mark.parametrize(("archive_fails", "has_reference", "retry_succeeds"), [
+    (False, False, False), (True, False, False), (False, True, False), (False, True, True),
+])
+def test_modal_worker_archives_completed_clip_without_a_viewer(
+    comfy_server, monkeypatch, tmp_path, archive_fails, has_reference, retry_succeeds,
+):
     from deploy.modal import worker
 
     _, _, media = comfy_server
@@ -497,16 +511,29 @@ def test_modal_worker_archives_completed_clip_without_a_viewer(comfy_server, mon
     clip = media["result.mp4"]
     archive = tmp_path / f"{render_id}.mp4"
     commits = []
+    submitted_seeds = []
+    reference = "data:image/jpeg;base64,ZmFrZS1qcGVn"
+    review = {"status": "tracked", "selected_seed": 8} if retry_succeeds else {"status": "possible_loss"}
+    review["retake_attempted"] = True
+    settings = {"duration": 8, "seed": 7, **({"image": reference} if has_reference else {})}
 
     def commit():
         assert archive.read_bytes() == clip
+        if has_reference:
+            assert json.loads(archive.with_suffix(".json").read_bytes()) == review
         commits.append(archive)
         if archive_fails:
             raise RuntimeError("test archive failure")
 
-    def submit(prompt, **settings):
-        assert settings == {"duration": 8}
+    def submit(prompt, **submitted):
+        submitted_seeds.append(submitted["seed"])
+        assert submitted == dict(settings, seed=7 if len(submitted_seeds) == 1 else 8)
         return {"id": "comfy-job", "status": "succeeded"}
+
+    def review_hands(data, start_image):
+        assert data == clip
+        assert start_image == reference
+        return {"status": "tracked" if retry_succeeds and len(submitted_seeds) == 2 else "possible_loss"}
 
     client = SimpleNamespace(create_prediction=submit, wait=lambda prediction: prediction,
                              read_output=lambda prediction: clip)
@@ -514,18 +541,24 @@ def test_modal_worker_archives_completed_clip_without_a_viewer(comfy_server, mon
     monkeypatch.setattr(worker, "CLIPS_MOUNT", tmp_path)
     monkeypatch.setattr(worker, "clips_volume", SimpleNamespace(commit=commit))
     monkeypatch.setattr(worker.modal, "current_function_call_id", lambda: render_id)
+    monkeypatch.setattr(worker, "_review_hands", review_hands)
     monkeypatch.setattr(worker, "subprocess", SimpleNamespace(Popen=lambda *args, **kwargs: process))
     monkeypatch.setattr(worker.urllib.request, "urlopen", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr("silver_screen.comfyui.ComfyUIClient", lambda **kwargs: client)
     # The remote worker has no browser or Streamlit session.
     with pytest.warns(UserWarning, match="executing locally"):
-        result = worker.render.local("video", "The runner moves.", {"duration": 8, "save_clip": True})
-    assert result == {"data": clip, "archive_failed" if archive_fails else "archived": True}
+        result = worker.render.local("video", "The runner moves.", {**settings, "save_clip": True})
+    assert result == {
+        "data": clip, "archive_failed" if archive_fails else "archived": True,
+        **({"hand_review": review} if has_reference else {}),
+    }
     assert commits == [archive]
+    assert submitted_seeds == ([7, 8] if has_reference else [7])
     assert list(tmp_path.glob(".render-*")) == []
 
 
-def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monkeypatch):
+@pytest.mark.parametrize("needs_review", [False, True])
+def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monkeypatch, needs_review):
     _, _, media = comfy_server
     for key, value in {"MODAL_TOKEN_ID": "test-id", "MODAL_TOKEN_SECRET": "test-secret",
                        "SILVER_SCREEN_MODAL_APP": "test-renderer"}.items():
@@ -533,8 +566,12 @@ def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monk
     render_id = "fc-" + "4" * 26
 
     def read_file(path):
-        assert path == f"{render_id}.mp4"
-        yield media["result.mp4"]
+        if path == f"{render_id}.mp4":
+            yield media["result.mp4"]
+        elif path == f"{render_id}.json" and needs_review:
+            yield b'{"status":"possible_loss","suspect_sides":["left"]}'
+        else:
+            raise FileNotFoundError(path)
 
     def from_name(name):
         assert name == CLIPS_VOLUME
@@ -555,6 +592,57 @@ def test_direct_create_opens_saved_clip_without_a_call_result(comfy_server, monk
     assert reopened.get("video")
     assert reopened.session_state["direct_create_job"]["data"] == media["result.mp4"]
     assert "Saved in your studio" in [caption.value for caption in reopened.caption]
+    add = next(button for button in reopened.button if button.label == "Add clip to custom film")
+    assert add.disabled == needs_review
+    if needs_review:
+        assert any("wrist appeared visible" in warning.value for warning in reopened.warning)
+        next(button for button in reopened.button if button.label == "Use this take").click().run()
+        assert not next(button for button in reopened.button if button.label == "Add clip to custom film").disabled
+
+
+def test_hand_review_treats_visible_wrists_and_out_of_frame_hands_differently():
+    from silver_screen.hand_review import summarize_hand_review
+
+    intact = {"left": True, "right": True}
+    absent = {"left": False, "right": True}
+    cropped = {"right": True}
+    assert summarize_hand_review(("left", "right"), [intact] * 24)["status"] == "tracked"
+    result = summarize_hand_review(("left", "right"), [intact] * 8 + [absent] * 16)
+    assert result["status"] == "possible_loss"
+    assert result["suspect_sides"] == ["left"]
+    assert result["first_issue_seconds"] == 1.0
+    assert summarize_hand_review(("left", "right"), [intact] * 8 + [cropped] * 16)["status"] == "inconclusive"
+    assert summarize_hand_review(("left", "right"), [intact] * 7 + [absent] * 3 + [intact] * 14)["status"] == "tracked"
+    assert summarize_hand_review((), [intact] * 24)["status"] == "insufficient_reference"
+
+
+def test_modal_motion_check_uses_a_public_reference_and_one_take(monkeypatch):
+    from hashlib import sha256
+
+    from deploy.modal import worker
+
+    photo = io.BytesIO()
+    Image.new("RGB", (960, 640), "gray").save(photo, "JPEG")
+    source = photo.getvalue()
+    call_id = "fc-" + "6" * 26
+
+    def fetch(url, **kwargs):
+        assert url == worker.MOTION_CHECK_ASSET
+        return nullcontext(io.BytesIO(source))
+
+    def render(kind, prompt, settings, **kwargs):
+        assert kind == "video" and "lowers his left arm" in prompt
+        assert kwargs == {"wan_14b": True, "timeout": 900, "allow_retake": False}
+        assert settings["duration"] == 3 and settings["seed"] == 341597
+        assert settings["image"].startswith("data:image/jpeg;base64,") and settings["save_clip"] is True
+        return {"archived": True, "hand_review": {"status": "tracked"}}
+
+    monkeypatch.setattr(worker, "MOTION_CHECK_SHA256", sha256(source).hexdigest())
+    monkeypatch.setattr(worker.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(worker.modal, "current_function_call_id", lambda: call_id)
+    monkeypatch.setattr(worker, "_render", render)
+    with pytest.warns(UserWarning, match="executing locally"):
+        assert worker.check_wan14_motion.local(341597) == f"{call_id}: tracked"
 
 
 def test_movie_uses_comfyui_and_keeps_backend_on_resume(comfy_server, tmp_path, monkeypatch):
