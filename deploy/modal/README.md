@@ -23,4 +23,6 @@ For a photo-based Direct Create render, the Modal worker samples the clip and lo
 
 For Wan 2.2 14B, add an **Ending image** to guide the final pose. Use a second photo of the same subject and scene. The studio fits it to the starting frame's dimensions and previews both frames. The first and last frame workflow uses the existing Wan 2.2 14B model files.
 
-For a repeatable GPU check, the private Modal dashboard exposes **check_wan14_motion**. Run it with seed `341597` to render one three-second shot from the public MediaPipe pose sample. It uses the same renderer as Direct Create. Use the returned ID in **Recover a Modal render** or open the take in **Saved clips**, then review movement and hand detail. The check consumes Modal compute credits when invoked.
+For 14B renders Modal tries an H100 first and falls back to an L40S when needed. Test cost depends on the GPU allotted and render time. The 5B worker uses an L40S.
+
+For a repeatable GPU check, the private Modal dashboard exposes **check_wan14_motion**. Run it with seed `341597` to render one three-second shot from the public MediaPipe pose sample. It uses the same renderer as Direct Create and allows up to 30 minutes for one full-quality attempt. Use the returned ID in **Recover a Modal render** or open the take in **Saved clips**, then review movement and hand detail. The check consumes Modal compute credits when invoked.

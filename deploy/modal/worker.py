@@ -36,6 +36,8 @@ WAN_14B_MODELS = (
 )
 STANDARD_TIMEOUT = 1500
 WAN_14B_TIMEOUT = 2700
+WAN_14B_GPUS = ['H100', 'L40S']
+MOTION_CHECK_TIMEOUT = 1800
 RETAKE_RESERVE = 240
 MOTION_CHECK_ASSET = 'https://storage.googleapis.com/mediapipe-assets/pose.jpg'
 MOTION_CHECK_SHA256 = 'c8a830ed683c0276d713dd5aeda28f415f10cd6291972084a40d0d8b934ed62b'
@@ -98,7 +100,7 @@ def render(kind: str, prompt: str, settings: dict) -> bytes | dict:
 
 
 @app.function(
-    image=wan_14b_image, gpu='L40S', max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
+    image=wan_14b_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
 )
 def render_wan14(kind: str, prompt: str, settings: dict) -> bytes | dict:
@@ -110,7 +112,7 @@ def render_wan14(kind: str, prompt: str, settings: dict) -> bytes | dict:
 
 
 @app.function(
-    image=wan_14b_image, gpu='L40S', max_containers=1, scaledown_window=5, timeout=900,
+    image=wan_14b_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=MOTION_CHECK_TIMEOUT,
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
 )
 def check_wan14_motion(seed: int) -> str:
@@ -137,7 +139,7 @@ def check_wan14_motion(seed: int) -> str:
         'duration': 3, 'seed': seed, 'steps': WAN_14B_STEPS, 'video_size': size,
         'image': 'data:image/jpeg;base64,' + base64.b64encode(reference).decode(),
         'negative_prompt': WAN_MOTION_NEGATIVE_PROMPT, 'save_clip': True,
-    }, wan_14b=True, timeout=900, allow_retake=False)
+    }, wan_14b=True, timeout=MOTION_CHECK_TIMEOUT, allow_retake=False)
     if not isinstance(result, dict) or not result.get('archived'):
         raise RuntimeError('The motion check did not save the clip.')
     return f"{modal.current_function_call_id()}: {result['hand_review']['status']}"

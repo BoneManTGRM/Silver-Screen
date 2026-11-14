@@ -632,7 +632,7 @@ def test_modal_motion_check_uses_a_public_reference_and_one_take(monkeypatch):
 
     def render(kind, prompt, settings, **kwargs):
         assert kind == "video" and "lowers his left arm" in prompt
-        assert kwargs == {"wan_14b": True, "timeout": 900, "allow_retake": False}
+        assert kwargs == {"wan_14b": True, "timeout": worker.MOTION_CHECK_TIMEOUT, "allow_retake": False}
         assert settings["duration"] == 3 and settings["seed"] == 341597
         assert settings["image"].startswith("data:image/jpeg;base64,") and settings["save_clip"] is True
         return {"archived": True, "hand_review": {"status": "tracked"}}
