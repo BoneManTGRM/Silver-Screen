@@ -40,3 +40,11 @@ The worker samples the reference by timestamp at Wan's native 16 fps, pads to fi
 ### Preview prompt-only HD shots
 
 Deploy the worker to a test app and point the private test studio at that app as described above. Set `SILVER_SCREEN_TEXT_14B=1` on the test studio. In Direct Create, choose Video clip, enter a prompt, and select Generate. With no starting photo, the default uses the dedicated Wan 2.2 14B text-to-video model at five seconds and 1280 × 720. Keep the same prompt, seed, and duration when comparing against Wan 2.2 5B. Review movement and anatomy at normal playback speed and confirm the original clip reopens from Saved clips.
+
+To test without redeploying the studio, use an authenticated Modal CLI:
+
+```sh
+SILVER_SCREEN_RENDERER_DEPLOY_APP=silver-screen-prompt-test modal run deploy/modal/worker.py::check_prompt_only --model 14b
+```
+
+This runs one five-second HD shot and prints its render ID. Retrieve the original from the private Modal clip volume or from **Recover a Modal render** in Direct Create. Use `--model 5b` with the same seed for a separate baseline when credits allow.

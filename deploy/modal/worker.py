@@ -164,6 +164,35 @@ def render_wan14_text(kind: str, prompt: str, settings: dict) -> bytes | dict:
     return _render(kind, prompt, settings, wan_14b=True)
 
 
+@app.local_entrypoint()
+def check_prompt_only(model: str = '14b', seed: int = 341597):
+    """Run one prompt-only take and print the recoverable render ID."""
+    from silver_screen.comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT
+    from silver_screen.direct_generation import direct_video_prompt
+
+    if model not in {'14b', '5b'}:
+        raise ValueError('Choose 14b or 5b.')
+    if not 0 <= seed < 2**53:
+        raise ValueError('Choose a whole-number seed from 0 to 9007199254740991.')
+    prompt = direct_video_prompt(
+        'A continuous, locked, full-body shot of two adult dancers in a sunlit rehearsal room. '
+        'They step apart once and plant both feet, then raise their open hands to shoulder height. '
+        'Their faces, hands, and shoes stay in view. Natural daylight and realistic movement.',
+        natural_pace=True,
+    )
+    renderer = render_wan14_text if model == '14b' else render
+    call = renderer.spawn('video', prompt, {
+        'duration': 5, 'seed': seed, 'steps': 40 if model == '14b' else 24,
+        'video_size': WAN_14B_LANDSCAPE_HD if model == '14b' else WAN_LANDSCAPE_HD,
+        'negative_prompt': WAN_MOTION_NEGATIVE_PROMPT, 'save_clip': True,
+    })
+    print(f'Modal render ID: {call.object_id}', flush=True)
+    result = call.get()
+    if not isinstance(result, dict) or not result.get('archived'):
+        raise RuntimeError('Modal could not confirm that the test clip was saved.')
+    print(f'Five-second test clip saved: {call.object_id}', flush=True)
+
+
 @app.function(
     image=wan_14b_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=MOTION_CHECK_TIMEOUT,
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
