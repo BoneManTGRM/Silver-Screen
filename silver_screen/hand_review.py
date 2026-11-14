@@ -43,6 +43,11 @@ class Wrist:
     def forearm(self) -> float:
         return dist(self.position, self.elbow)
 
+    def has_full_crop(self, size: tuple[int, int]) -> bool:
+        left, top, right, bottom = self.crop
+        width, height = size
+        return 0 <= left and 0 <= top and right <= width and bottom <= height
+
     def crop_at_scale(self, factor: float) -> tuple[int, int, int, int]:
         left, top, right, bottom = self.crop
         x, y = (left + right) / 2, (top + bottom) / 2
@@ -196,7 +201,7 @@ class HandReviewer:
             x = round(px + (px - ex) * 0.18)
             y = round(py + (py - ey) * 0.18)
             crop = (x - radius, y - radius, x + radius, y + radius)
-            if length >= 25 and 0 <= crop[0] < crop[2] <= width and 0 <= crop[1] < crop[3] <= height:
+            if length >= 25 and 0 <= px < width and 0 <= py < height:
                 wrists[side] = Wrist((px, py), (ex, ey), crop)
         return Body(center, scale, wrists, tuple(silhouette))
 
@@ -239,7 +244,10 @@ class HandReviewer:
             detected = self._has_hand(image, wrist)
             original_ratio = reference.forearm / self.start[index].scale
             ratio = wrist.forearm / actor.scale / original_ratio
-            if detected or (0.67 <= ratio <= 1.50 and not _expected_hand_behind_body(wrist, bodies)):
+            if detected or (
+                wrist.has_full_crop(image.size) and 0.67 <= ratio <= 1.50
+                and not _expected_hand_behind_body(wrist, bodies)
+            ):
                 observations[self._hand_key(index, side)] = detected
         return observations
 

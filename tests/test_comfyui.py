@@ -652,6 +652,29 @@ def test_two_performers_keep_separate_tracks_and_report_the_affected_wrist(monke
     assert reviewer._frame(Image.new("RGB", (300, 200)), tracks) == {"1:left": True}
 
 
+def test_hand_review_uses_visible_detail_at_frame_edge_without_flagging_a_crop(monkeypatch):
+    from silver_screen.hand_review import HandReviewer, Track
+
+    image = Image.new("RGB", (300, 200))
+    landmarks = [SimpleNamespace(x=0.5, y=0.5, visibility=1, presence=1) for _ in range(33)]
+    landmarks[11].x, landmarks[12].x, landmarks[13].x = 0.30, 0.45, 0.17
+    landmarks[13].y = 0.64
+    landmarks[15].x, landmarks[15].y = 0.06, 0.83
+    reviewer = HandReviewer.__new__(HandReviewer)
+    body = reviewer._body(image.size, landmarks)
+    wrist = body.wrists["left"]
+    assert not wrist.has_full_crop(image.size)
+    reviewer.start = [body]
+    reviewer.reference = {(0, "left"): wrist}
+    monkeypatch.setattr(reviewer, "_bodies", lambda frame: [body])
+    monkeypatch.setattr(reviewer, "_has_hand", lambda frame, target: True)
+    assert reviewer._frame(image, [Track(body)]) == {"left": True}
+    monkeypatch.setattr(reviewer, "_has_hand", lambda frame, target: False)
+    assert reviewer._frame(image, [Track(body)]) == {}
+    landmarks[15].x = -0.01
+    assert "left" not in reviewer._body(image.size, landmarks).wrists
+
+
 def test_film_queue_excludes_a_flagged_take_and_accepts_the_retry(comfy_server, tmp_path, monkeypatch):
     from silver_screen import ai_video
     from silver_screen.video_runtime import choose_tgrm_repair
