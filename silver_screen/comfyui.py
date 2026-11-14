@@ -81,12 +81,12 @@ def _valid_wan_reference_size(size: tuple[int, int], *, wan_14b: bool) -> bool:
     return width * height <= pixel_limit and all(256 <= side <= 1280 and side % stride == 0 for side in (width, height))
 
 
-def _wan_14b_split_step(steps: int) -> int:
+def _wan_14b_split_step(steps: int, *, boundary: float = 0.9) -> int:
     # ComfyUI's simple scheduler samples 1,000 shifted timesteps from high to low.
-    # Wan I2V switches experts at the first shifted timestep below 0.900.
+    # Switch experts at the first shifted timestep below the model's boundary.
     for step in range(1, steps):
         time = (1000 - step * 1000 // steps) / 1000
-        if 5 * time / (1 + 4 * time) < 0.9:
+        if 5 * time / (1 + 4 * time) < boundary:
             return step
     return steps - 1
 
@@ -284,7 +284,9 @@ class ComfyUIClient:
                                 __SPLIT_STEP__=sampling_steps // 2,
                                 __NEGATIVE_PROMPT__=negative_prompt)
             if wan_14b:
-                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(sampling_steps)
+                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(
+                    sampling_steps, boundary=0.875 if kind == "video" else 0.9,
+                )
             required.add("__FRAMES__")
             if video_size is not None or steps is not None or negative_prompt:
                 required.update(VIDEO_CONTROL_MARKERS)

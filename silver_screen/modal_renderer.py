@@ -69,13 +69,15 @@ class ModalComfyUIClient(ComfyUIClient):
             raise VideoGenerationError('An ending image requires Wan 2.2 14B.')
         function = 'render'
         if wan_14b:
-            if self.kind != 'video' or not settings.get('image'):
-                raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
+            if self.kind != 'video':
+                raise VideoGenerationError('Wan 2.2 14B is a video renderer.')
             if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
                 raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
-            function = 'render_wan14'
+            function = 'render_wan14' if settings.get('image') else 'render_wan14_text'
+            if settings.get('end_image') and not settings.get('image'):
+                raise VideoGenerationError('An ending image requires a starting photo.')
         if (reference := settings.get('motion_reference')) is not None:
-            if not wan_14b or settings.get('end_image'):
+            if not wan_14b or not settings.get('image') or settings.get('end_image'):
                 raise VideoGenerationError('Motion reference requires Wan 2.2 14B and a look image.')
             if not isinstance(reference, bytes) or not 0 < len(reference) <= MOTION_REFERENCE_LIMIT:
                 raise VideoGenerationError('Choose a motion reference video up to 12 MiB.')

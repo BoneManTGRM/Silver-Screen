@@ -23,7 +23,8 @@ from silver_screen.ai_video import (
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
 from silver_screen.comfyui import (
-    ComfyUIClient, MOTION_REFERENCE_LIMIT, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
+    ComfyUIClient, MOTION_REFERENCE_LIMIT, VIDEO_SIZES, WAN_14B_LANDSCAPE_HD, WAN_14B_MAX_SECONDS,
+    WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
     WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, comfyui_ready, make_comfyui_client, video_controls_ready,
 )
 from silver_screen.direct_generation import (
@@ -302,14 +303,14 @@ if reference_ready and not is_image:
 wan_14b = False
 motion_reference = None
 if use_modal and not is_image:
-    if video_controls and reference is not None:
+    if video_controls and (reference is not None or os.getenv("SILVER_SCREEN_TEXT_14B") == "1"):
         wan_14b = st.selectbox(
             "Render model", (WAN_14B_LABEL, WAN_5B_LABEL),
             help="14B uses more Modal GPU time and supports clips up to five seconds.",
         ) == WAN_14B_LABEL
     else:
         st.caption(WAN_5B_LABEL)
-    if wan_14b and os.getenv("SILVER_SCREEN_MOTION_REFERENCE") == "1":
+    if wan_14b and reference is not None and os.getenv("SILVER_SCREEN_MOTION_REFERENCE") == "1":
         motion_reference = st.file_uploader(
             "Motion reference (optional)", type=["mp4", "mov"], key="wan-motion-reference",
             help="Use a clip at least as long as the shot. The starting photo guides the look. "
@@ -322,8 +323,8 @@ if video_controls:
     with st.expander("Starting frame and render size", expanded=reference is not None):
         sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
         size = st.selectbox(
-            "Frame size", (AUTO_FRAME, *sizes),
-            help="Fixed frame sizes center-crop the photo to fill the frame. Check the preview for faces and hands.",
+            "Frame size", (AUTO_FRAME, *sizes) if reference is not None else tuple(sizes),
+            help="Fixed frame sizes center-crop the photo to fill the frame." if reference is not None else None,
         )
         frame_size = sizes.get(size)
         if reference is not None:
@@ -369,7 +370,9 @@ with st.form("direct_create"):
     if not is_image:
         if video_controls:
             maximum = WAN_14B_MAX_SECONDS if wan_14b else 12
-            default_duration = 5 if motion_reference is not None else (3 if wan_14b else (5 if use_modal else 8))
+            default_duration = 5 if use_modal else 8
+            if wan_14b and reference is not None and motion_reference is None:
+                default_duration = 3
             duration = st.number_input(
                 "Clip length in seconds", min_value=2, max_value=maximum,
                 value=min(shot.seconds if shot else default_duration, maximum),
@@ -400,7 +403,8 @@ with st.form("direct_create"):
                 default_negative = WAN_MOTION_NEGATIVE_PROMPT if use_modal else ""
                 negative = st.text_area("Things to avoid (optional)", placeholder=default_negative or None)
                 negative = ", ".join(filter(None, (default_negative, negative.strip())))
-                video_options = {"video_size": frame_size or WAN_LANDSCAPE_HD, "steps": steps, "negative_prompt": negative}
+                default_size = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
+                video_options = {"video_size": frame_size or default_size, "steps": steps, "negative_prompt": negative}
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
     generate = st.form_submit_button("Generate", type="primary", disabled=active or reference_error is not None)
 

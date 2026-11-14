@@ -8,6 +8,27 @@ from silver_screen.comfyui import make_comfyui_client
 from silver_screen.screenplay_writer import ScreenplayError, check_screenplay
 
 
+def test_prompt_only_14b_submission_uses_text_worker(monkeypatch):
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    submissions = []
+
+    def lookup(app, function):
+        def spawn(kind, prompt, settings):
+            submissions.append((app, function, kind, prompt, settings))
+            return SimpleNamespace(object_id="fc-test")
+        return SimpleNamespace(spawn=spawn)
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(Function=SimpleNamespace(from_name=lookup)))
+    client = make_comfyui_client()
+    client.create_prediction("Two performers step apart.", wan_14b=True, seed=10, duration=5, image=None)
+    assert submissions == [
+        ("test-renderer", "render_wan14_text", "video", "Two performers step apart.",
+         {"seed": 10, "duration": 5, "image": None}),
+    ]
+
+
 def test_modal_submission_can_resume_from_call_id(monkeypatch):
     monkeypatch.setenv('SILVER_SCREEN_MODAL_APP', 'test-renderer')
     monkeypatch.setenv('MODAL_TOKEN_ID', 'test-id')

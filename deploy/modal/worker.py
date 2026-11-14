@@ -89,6 +89,14 @@ motion_image = image.run_commands(*[
         ('vae/wan_2.1_vae.safetensors', WAN_14B),
     )
 ])
+wan_text_image = image.run_commands(*[
+    f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
+    for path in (
+        'diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+        'diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+        'vae/wan_2.1_vae.safetensors',
+    )
+])
 image = _with_hand_review(image)
 wan_14b_image = _with_hand_review(wan_14b_image)
 if modal.is_local():
@@ -100,6 +108,9 @@ if modal.is_local():
         workflows, remote_path='/opt/workflows'
     )
     motion_image = motion_image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
+    wan_text_image = wan_text_image.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
 app = modal.App(os.getenv('SILVER_SCREEN_RENDERER_DEPLOY_APP', 'silver-screen-renderer'))
@@ -139,6 +150,18 @@ def render_wan14_motion(kind: str, prompt: str, settings: dict) -> bytes | dict:
     if not isinstance(reference, bytes) or not 0 < len(reference) <= MOTION_REFERENCE_LIMIT:
         raise VideoGenerationError('Choose a motion reference video up to 12 MiB.')
     return _render(kind, prompt, settings, wan_14b=True, allow_retake=False)
+
+
+@app.function(
+    image=wan_text_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def render_wan14_text(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    if kind != 'video' or any(settings.get(key) is not None for key in ('image', 'end_image', 'motion_reference')):
+        raise VideoGenerationError('Use a text prompt for this render.')
+    if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
+        raise VideoGenerationError('Choose a 2- to 5-second clip for Wan 2.2 14B.')
+    return _render(kind, prompt, settings, wan_14b=True)
 
 
 @app.function(
@@ -239,7 +262,10 @@ def _render(
     os.environ.update(
         SILVER_SCREEN_COMFYUI_URL='http://127.0.0.1:8188',
         SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW='/opt/workflows/flux-schnell.json',
-        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW='/opt/workflows/wan-video.json',
+        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=(
+            '/opt/workflows/wan-text-14b.json' if wan_14b and not settings.get('image')
+            else '/opt/workflows/wan-video.json'
+        ),
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
         SILVER_SCREEN_COMFYUI_FPS=str(fps),
     )
