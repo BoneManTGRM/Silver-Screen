@@ -123,13 +123,11 @@ class ModalComfyUIClient(ComfyUIClient):
         result = {'id': prediction_id, 'status': 'processing', 'model': self.model}
         try:
             data = self.modal.FunctionCall.from_id(prediction_id).get(timeout=0)
-        except TimeoutError:
-            return result
-        except self.modal.exception.Error as exc:
+        except (TimeoutError, self.modal.exception.Error) as exc:
             errors = self.modal.exception
-            # A zero-time poll raises the base SDK timeout while work is pending.
-            # FunctionTimeoutError and OutputExpiredError are terminal subclasses.
-            if type(exc) is errors.TimeoutError:
+            # Modal uses a builtin or SDK timeout for an unfinished zero-time
+            # poll. The terminal SDK timeout subclasses still denote failures.
+            if type(exc) in (TimeoutError, errors.TimeoutError):
                 if MODAL_RENDER_ID.fullmatch(prediction_id):
                     try:
                         if progress := read_render_progress(self.modal.Volume.from_name(CLIPS_VOLUME), prediction_id):

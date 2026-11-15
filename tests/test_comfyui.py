@@ -35,6 +35,33 @@ def empty_archive():
     return SimpleNamespace(iterdir=lambda *args, **kwargs: [], read_file=missing_archive_file)
 
 
+@pytest.mark.parametrize("pending_error", [TimeoutError, modal_errors.TimeoutError])
+def test_modal_pending_poll_reads_extended_progress(monkeypatch, pending_error):
+    from silver_screen.modal_renderer import ModalComfyUIClient
+
+    render_id = "fc-" + "4" * 26
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+
+    def pending(*, timeout):
+        assert timeout == 0
+        raise pending_error()
+
+    def read_file(name):
+        assert name == f"{render_id}.progress"
+        yield b'{"complete":1,"total":2}'
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=pending)),
+        Volume=SimpleNamespace(from_name=lambda _: SimpleNamespace(read_file=read_file)),
+        exception=modal_errors,
+    ))
+    result = ModalComfyUIClient().get_prediction(render_id)
+    assert result["status"] == "processing"
+    assert result["progress"] == {"complete": 1, "total": 2}
+
+
 @pytest.fixture
 def comfy_server(tmp_path, monkeypatch):
     graphs = {
