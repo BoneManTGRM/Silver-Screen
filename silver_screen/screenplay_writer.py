@@ -58,6 +58,7 @@ _AD_SCHEMA = _object(
 )
 _COMMON = """Write five ordered shots in the language of the user's brief. Use headings like 'EXT. LOCATION - NIGHT'. Each action is one 15–28 word paragraph in present tense, with visible movement and specific objects. Vary the camera angle and blocking. Keep names, wardrobe, and props consistent. Each shot has at most one very short line. Use 'none' with an empty line when silence works better. Cast names must be distinct and use ordinary name characters. If the user supplies a lead name, use it exactly. Return only the requested JSON."""
 _FILM = """You write original short films. Give the story a striking opening, an escalating problem, a reversal, a decisive choice by the lead, and a final image that pays off a physical detail from the opening. Respect the requested genre, casting, tone, and relationship. Show the lead by name in each action. If the user wants to star and leaves the name blank, invent a screen name for them. Avoid stock dialogue, generic spectacle, and reciting the brief. When the story calls for intimacy, portray consenting adults in a way that serves the characters and plot. For fictional danger, describe the visible movie action without operational instructions for real-world harm."""
+_TRAILER = """Write an original cinematic trailer rather than a complete story. The brief specifies whether it is for a feature movie or a television series. Build exactly five vivid, filmable shots: an arresting opening image, a character-and-world reveal, rising conflict, a surprising escalation, and an unforgettable final teaser. The trailer must create anticipation without resolving the central mystery or revealing the ending. For a television series, establish an ongoing episodic premise and longer-term stakes; for a feature movie, focus on one escalating central conflict. Use a compelling rhythm of distinct shots, consistent named characters, environments, costumes, and props. Any spoken line must be short enough for its shot. Never invent a release date, distribution rights, reviews, cast credits, or an actual network. Do not direct the model to generate on-screen typography; title cards are handled during editing."""
 _AD = """Write a five-shot product commercial in the language of the brief. Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and visual details, without inventing product specifications or performance claims. Plan a hook, a reveal, a use demonstration, a detail, and a final product shot. Keep that same product visible in all five shots. Each shot has one physical action and one camera move, with a setting, framing, 15–25 words of visible action, and an optional short voiceover line. Use hard cuts between shots. Keep people, backgrounds, and props secondary to the product. Leave clear space below the product in the final shot for the editor's end card. Use the supplied call to action if there is one. Return only the requested JSON."""
 _SLUGLINE = re.compile(r"^(?:INT\.|EXT\.)\s+\S.*$", re.IGNORECASE)
 _SPEAKER = re.compile(r"[\w .'’-]+")
@@ -91,6 +92,7 @@ def script_sync_text(script: str, *, clip_seconds: int) -> str:
 def screenplay_request(
     idea: str, lead: str, seconds: int, seed: int, *,
     kind: str = "film", end_card: dict[str, str] | None = None,
+    trailer_type: str = "movie",
 ) -> dict[str, Any]:
     idea, lead = idea.strip(), lead.strip()
     if len(idea) < 3 or len(idea) > IDEA_LIMIT:
@@ -99,17 +101,20 @@ def screenplay_request(
         raise ScreenplayError("Use a short name with letters, spaces, or ordinary name punctuation.")
     if seconds not in SCREENPLAY_LENGTHS:
         raise ScreenplayError("Choose 20 or 30 seconds for the short screenplay.")
-    if kind not in {"film", "ad"}:
-        raise ScreenplayError("Choose a movie or advertisement.")
+    if kind not in {"film", "ad", "trailer"}:
+        raise ScreenplayError("Choose a movie, trailer, or advertisement.")
+    if kind == "trailer" and trailer_type not in {"movie", "series"}:
+        raise ScreenplayError("Choose a movie or television-series trailer.")
     clip = SCREENPLAY_LENGTHS[seconds]
     return {
         "model": "screenplay",
         "messages": [
-            {"role": "system", "content": _AD if kind == "ad" else _FILM + "\n\n" + _COMMON},
+            {"role": "system", "content": (_AD if kind == "ad" else (_TRAILER if kind == "trailer" else _FILM) + "\n\n" + _COMMON)},
             {"role": "user", "content": json.dumps({
                 "brief": idea, "lead name": lead, "seconds per shot": clip,
                 "maximum words in a line": clip * 2,
                 **({"end card text": end_card} if kind == "ad" and end_card else {}),
+                **({"trailer type": trailer_type} if kind == "trailer" else {}),
             }, ensure_ascii=False)},
         ],
         "response_format": {
@@ -123,8 +128,11 @@ def screenplay_request(
 def screenplay_draft(
     raw: dict[str, Any], *, idea: str, lead: str, seconds: int, seed: int,
     kind: str = "film", end_card: dict[str, str] | None = None,
+    trailer_type: str = "movie",
 ) -> dict[str, Any]:
     """Validate model output and produce the exact script used by production."""
+    if kind == "trailer" and trailer_type not in {"movie", "series"}:
+        raise ScreenplayError("Choose a movie or television-series trailer.")
     try:
         title, logline = _text(raw["title"], 120), _text(raw["logline"], 400)
         card = {}
@@ -228,6 +236,7 @@ def screenplay_draft(
         "creativeDirection": {"scriptSource": "authored", "strictGate": False},
         "shotDirection": shot_direction,
         "seconds": seconds, "kind": kind, "screenplayWriter": kind,
+        **({"trailerType": trailer_type} if kind == "trailer" else {}),
         **({"adProduct": {"name": product, "appearance": appearance}} if kind == "ad" else {}),
         **({"adEndCard": card} if card else {}),
     }
@@ -236,10 +245,11 @@ def screenplay_draft(
 def submit_screenplay(
     idea: str, lead: str, seconds: int, *,
     kind: str = "film", end_card: dict[str, str] | None = None,
+    trailer_type: str = "movie",
 ) -> dict[str, Any]:
     idea, lead = idea.strip(), " ".join(lead.split())
     seed = secrets.randbelow(2**31)
-    request = screenplay_request(idea, lead, seconds, seed, kind=kind, end_card=end_card)
+    request = screenplay_request(idea, lead, seconds, seed, kind=kind, end_card=end_card, trailer_type=trailer_type)
     if not screenplay_writer_configured():
         raise ScreenplayError("Connect the Modal screenplay writer to generate a draft.")
     try:
@@ -250,7 +260,7 @@ def submit_screenplay(
         call_id = writer.spawn(request).object_id
     except modal.exception.Error as exc:
         raise ScreenplayError(f"Modal could not start the writer ({type(exc).__name__}).") from exc
-    return {"id": call_id, "idea": idea, "lead": lead, "seconds": seconds, "seed": seed, "kind": kind, "end_card": end_card}
+    return {"id": call_id, "idea": idea, "lead": lead, "seconds": seconds, "seed": seed, "kind": kind, "end_card": end_card, **({"trailer_type": trailer_type} if kind == "trailer" else {})}
 
 
 def check_screenplay(job: dict[str, Any]) -> dict[str, Any] | None:

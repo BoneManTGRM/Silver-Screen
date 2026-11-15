@@ -16,17 +16,24 @@ from silver_screen.screenplay_writer import (
 )
 
 st.title("Silver Screen")
-st.caption("Write a movie or advertisement from one idea. Review the script and shots before rendering.")
+st.caption("Write a movie, movie trailer, television-series trailer, or advertisement from one idea. Review the shots before rendering.")
 
 draft = st.session_state.get("screenplay-draft")
 job = st.session_state.get("screenplay-writer-job")
 ready = screenplay_writer_configured()
-kind = st.radio("What are you making?", ["Movie", "Advertisement"], horizontal=True)
+kind = st.radio("What are you making?", ["Movie", "Advertisement", "Movie trailer", "TV show trailer"], horizontal=True)
 is_ad = kind == "Advertisement"
+is_trailer = kind in {"Movie trailer", "TV show trailer"}
+trailer_type = "series" if kind == "TV show trailer" else "movie"
 with st.form(f"write-{kind}"):
     example = (
         "A 20-second ad for a reusable travel mug. Show the spillproof lid and end with Shop now."
-        if is_ad else "Make me the action hero of a futuristic action movie."
+        if is_ad else (
+            "A gripping 30-second teaser for a supernatural mystery television series."
+            if kind == "TV show trailer" else
+            "A tense 30-second movie trailer for a futuristic rescue action film."
+            if is_trailer else "Make me the action hero of a futuristic action movie."
+        )
     )
     idea = st.text_area("Product or campaign brief" if is_ad else "Your movie idea", placeholder=example,
                         max_chars=IDEA_LIMIT, height=118)
@@ -47,7 +54,8 @@ if not ready:
 if generate and not job:
     try:
         st.session_state["screenplay-writer-job"] = submit_screenplay(
-            idea, lead, seconds, kind="ad" if is_ad else "film", end_card=end_card,
+            idea, lead, seconds, kind="ad" if is_ad else "trailer" if is_trailer else "film",
+            end_card=end_card, trailer_type=trailer_type,
         )
         st.rerun()
     except ScreenplayError as exc:
@@ -96,9 +104,11 @@ if draft:
             st.text(f"{member['name']} · {member['role']}. {member['description']}")
 
     root = cast_library_root()
-    can_star = draft["kind"] == "film" and root and "Your photo" in saved_cast_photos(root)
+    can_star = draft["kind"] != "ad" and root and "Your photo" in saved_cast_photos(root)
     use_saved_photo = st.checkbox("Use my saved lead photo", key="writer-use-lead-photo") if can_star else False
-    if draft["kind"] == "film" and not can_star:
+    if draft["kind"] == "trailer":
+        st.caption("Trailer source · television series" if draft.get("trailerType") == "series" else "Trailer source · movie")
+    if draft["kind"] != "ad" and not can_star:
         st.page_link("pages/0_Cast_Library.py", label="Save a photo to star in future films")
     columns = st.columns(2)
     columns[0].download_button("Download script", f"{draft['title']}\n\n{draft['authoredScript']}\n",

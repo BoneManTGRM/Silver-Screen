@@ -69,6 +69,7 @@ def show_production_progress(run_id, future):
 
 if draft:
     is_ad = draft["kind"] == "ad"
+    is_trailer = draft["kind"] == "trailer"
     started = st.session_state.get("screenplay-production-started") == draft["seed"] or bool(render_task)
     st.header(draft["title"])
     st.caption(f"{draft['seconds']} seconds planned · five clips · {video_backend()} video")
@@ -97,9 +98,10 @@ if draft:
                 "I have permission to use this product photo."
                 if is_ad else "Everyone shown in the photo agreed to this scene and its audience."
             )
-            call_budget = st.number_input("Maximum video requests", min_value=5, max_value=15, value=5)
+            call_budget = st.number_input("Maximum video requests", min_value=5, max_value=15, value=10 if is_ad or is_trailer else 5)
+            st.caption("Up to five shots. Extra requests allow retakes; each attempt consumes paid GPU time.")
             render_draft = st.form_submit_button(
-                "Render advertisement" if is_ad else "Render movie",
+                "Render advertisement" if is_ad else "Render trailer" if is_trailer else "Render movie",
                 type="primary", disabled=not video_ready,
             )
     if not video_ready:
@@ -292,7 +294,7 @@ if output:
     media, metrics = result.get("media") or {}, (result.get("media") or {}).get("metrics") or {}
     status = str(result.get("status") or (output.get("job") or {}).get("status") or "unknown")
     writer_kind = (result.get("brief") or {}).get("screenplayWriter")
-    st.header("Advertisement" if writer_kind == "ad" else "Production result")
+    st.header("Advertisement" if writer_kind == "ad" else "Trailer" if writer_kind == "trailer" else "Production result")
     short_path = ((output.get("job") or {}).get("artifacts") or {}).get("shortVideo")
     short_video = Path(short_path) if short_path and Path(short_path).is_file() else None
     audio = output.get("audio") or {}
@@ -337,6 +339,8 @@ if output:
             download_label = "Download preview"
         elif writer_kind == "ad" and short_video:
             download_label = "Download advertisement"
+        elif writer_kind == "trailer" and short_video:
+            download_label = "Download trailer"
         elif writer_kind and not short_video:
             download_label = "Download assembled footage"
         else:

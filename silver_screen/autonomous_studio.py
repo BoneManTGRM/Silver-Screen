@@ -372,7 +372,7 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
 
         card = brief.get("adEndCard") or {}
         runtime = (result.get("options") or {}).get("targetRuntimeSeconds")
-        filename = "advertisement.mp4" if writer_kind == "ad" else "movie.mp4"
+        filename = {"ad": "advertisement.mp4", "trailer": "trailer.mp4"}.get(writer_kind, "movie.mp4")
         source = (audio or {}).get("captioned_video_path") or (audio or {}).get("final_video_path")
         source = source or (result.get("media") or {}).get("final_video_path")
         if not source or not runtime:

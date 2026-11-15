@@ -63,7 +63,7 @@ def comfy_server(tmp_path, monkeypatch):
     clip = tmp_path / "sample.mp4"
     subprocess.run(
         [imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-f", "lavfi",
-         "-i", "testsrc2=s=192x108:d=8", "-c:v", "libx264", str(clip)],
+         "-i", "testsrc2=s=192x108:r=24:d=8", "-c:v", "libx264", str(clip)],
         check=True,
     )
     media = {"result.png": png.getvalue(), "result.mp4": clip.read_bytes()}

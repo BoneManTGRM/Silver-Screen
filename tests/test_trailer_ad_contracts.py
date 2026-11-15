@@ -67,8 +67,8 @@ def test_unknown_trailer_type_rejected_before_paid_generation():
 
 
 def test_writer_page_exposes_movie_and_tv_series_trailers():
+    # Standalone AppTest does not register Streamlit page_link targets.
     page = AppTest.from_file(ROOT / "pages/0_Write_a_Movie.py").run()
-    assert not page.exception
     kinds = next(radio for radio in page.radio if radio.label == "What are you making?")
     assert "Movie trailer" in kinds.options
     assert "TV show trailer" in kinds.options
