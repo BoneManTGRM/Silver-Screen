@@ -849,6 +849,10 @@ def _process_prediction(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
+    if repair and queue.get("referenceMode") == "product":
+        directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
+        if directive:
+            prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
     if queue.get("referenceMode") == "cast" and image:
         from .direct_generation import preserve_reference_appearance
 
