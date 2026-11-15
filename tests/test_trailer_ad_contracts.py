@@ -85,3 +85,23 @@ def test_advertisement_default_budget_allows_one_retake_per_shot():
     assert not page.exception
     request_budget = next(field for field in page.number_input if field.label == "Maximum video requests")
     assert request_budget.value == 10
+
+
+def test_completed_modal_render_always_has_native_video_and_download(monkeypatch):
+    """An embedded HTTP preview must not be the only way to see a finished clip."""
+    from silver_screen.ai_video import DEFAULT_MODEL
+
+    monkeypatch.setenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW", "1")
+    monkeypatch.delenv("SILVER_SCREEN_MODAL_APP", raising=False)
+    app = AppTest.from_file(ROOT / "pages/0_Direct_Create.py")
+    app.session_state["direct_create_job"] = {
+        "backend": "ComfyUI", "model": DEFAULT_MODEL,
+        "prediction": {"id": "fc-" + "1" * 26, "status": "succeeded", "archived": True},
+        "data": b"\\x00\\x00\\x00\\x20ftypisom" + (b"video fixture" * 40),
+        "requested_seconds": 4,
+    }
+    app.run()
+    assert not app.exception
+    assert app.get("video"), "The finished clip must be visible in a native player."
+    labels = [element.proto.label for element in app.get("download_button")]
+    assert "Download original clip" in labels
