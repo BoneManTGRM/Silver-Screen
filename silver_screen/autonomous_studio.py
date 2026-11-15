@@ -427,6 +427,7 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     project_id = str(plan.get("projectId") or cfg.get("projectId") or "")
     if not approved or not project_id:
         raise AutonomousStudioError("Build the autonomous plan before paid production.")
+    is_ad = approved.get("screenplayWriter") == "ad"
     planned_shots = int(execution.get("plannedShots", 1) or 1)
     max_calls = int(execution.get("maxProviderCalls", 1) or 1)
     result = run_pipeline(
@@ -441,7 +442,7 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
         video_max_spend_usd=float(cfg["maxSpendUsd"]) if cfg["maxSpendUsd"] > 0 else None,
         video_cost_per_second_usd=float(cfg["costPerSecondUsd"]) if cfg["costPerSecondUsd"] > 0 else None,
         video_continuous=bool(execution.get("continuous", True)),
-        video_use_continuity=True, progress=progress, run_id=run_id,
+        video_use_continuity=not is_ad, progress=progress, run_id=run_id,
     )
     run_id = _run_id(result)
     if not run_id:
@@ -486,7 +487,7 @@ def continue_autonomous_production(run_id: str, *, output_root: str = "runs", ba
             max_provider_calls=(
                 int(cfg.get("maxProviderCalls") or qcfg.get("max_provider_calls") or 0) or None
             ),
-            use_continuity=True,
+            use_continuity=not is_ad,
             progress=progress,
         )
     return finish_autonomous_run(run_id, project_id=str(job.get("projectId") or cfg.get("projectId") or ""), config=cfg, output_root=output_root)

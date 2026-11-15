@@ -849,17 +849,6 @@ def _process_prediction(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
-    if queue.get("referenceMode") == "product" and image:
-        direction = (
-            "Use the starting image as the product reference. Preserve the same shape, "
-            "proportions, colors, materials, and existing branding throughout the shot. "
-            "Continue into the specified action."
-        )
-        prompt = f"{direction} {prompt}"[:3500]
-    if repair and queue.get("referenceMode") == "product":
-        directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
-        if directive:
-            prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
     if queue.get("referenceMode") == "cast" and image:
         from .direct_generation import preserve_reference_appearance
 
@@ -1107,6 +1096,7 @@ def generate_ai_video(
     is_ad = state.get("screenplayWriter") == "ad"
     written = bool(state.get("screenplayWriter"))
     if is_ad:
+        config = replace(config, use_continuity_frames=False)
         reference = root / "ad-product-reference.txt"
         if initial_image is not None and not initial_image_data:
             raise VideoGenerationError("The product photo could not be prepared.")
