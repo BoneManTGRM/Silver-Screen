@@ -1106,3 +1106,38 @@ def test_movie_uses_comfyui_and_keeps_backend_on_resume(comfy_server, tmp_path, 
     assert second["status"] == "complete"
     assert second["metrics"]["verifiedShots"] == 2
     assert len(submissions) == 2
+
+
+def test_modal_ad_worker_reuses_a_healthy_server_only_within_a_single_ad(monkeypatch):
+    from contextlib import contextmanager
+
+    from deploy.modal import worker
+
+    events = []
+
+    @contextmanager
+    def start_server():
+        process = SimpleNamespace(poll=lambda: None)
+        events.append("start")
+        try:
+            yield process
+        finally:
+            events.append("stop")
+
+    monkeypatch.setattr(worker, "_start_comfy_server", start_server)
+    try:
+        with worker._comfy_server("first") as reused:
+            assert not reused
+        with worker._comfy_server("first") as reused:
+            assert reused
+        assert events == ["start"]
+        with pytest.raises(RuntimeError, match="failed"):
+            with worker._comfy_server("second") as reused:
+                assert not reused
+                raise RuntimeError("failed")
+        assert events == ["start", "stop", "start", "stop"]
+        with worker._comfy_server(None) as reused:
+            assert not reused
+        assert events[-2:] == ["start", "stop"]
+    finally:
+        worker._close_ad_server()

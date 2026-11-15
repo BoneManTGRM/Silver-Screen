@@ -150,7 +150,18 @@ def test_render_button_finishes_all_five_advertisement_shots(tmp_path, configure
     assert [button.proto.label for button in app.get("download_button")] == ["Download advertisement"]
     result = app.session_state["autonomous_result"]
     _assert_finished(result, 20, renderer, 5)
-    assert all(settings["duration"] == 4 and not settings["image"] for _, settings in renderer.calls)
+    assert all(settings["duration"] == 4 for _, settings in renderer.calls)
+    assert renderer.calls[0][1]["image"] is None
+    assert all(
+        settings["image"].startswith("data:image/jpeg;base64,")
+        and "Preserve the same shape" in prompt
+        for prompt, settings in renderer.calls[1:]
+    )
+    shots = result["result"]["media"]["queue"]["shots"]
+    assert all(
+        current["inputContinuityFrame"] == previous["continuityFrame"]
+        for previous, current in zip(shots, shots[1:])
+    )
     before = len(renderer.calls)
     reopened = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/9_Autonomous_Studio.py")
     reopened.query_params["production"] = result["runId"]

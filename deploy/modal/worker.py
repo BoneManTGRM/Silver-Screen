@@ -1,10 +1,11 @@
 """Private, on-demand ComfyUI worker for Silver Screen."""
 
 import base64
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -135,7 +136,7 @@ clips_volume = modal.Volume.from_name(CLIPS_VOLUME, create_if_missing=True)
 
 
 @app.function(
-    image=image, gpu='L40S', max_containers=1, scaledown_window=5, timeout=STANDARD_TIMEOUT,
+    image=image, gpu='L40S', max_containers=1, scaledown_window=12, timeout=STANDARD_TIMEOUT,
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
 )
 def render(kind: str, prompt: str, settings: dict) -> bytes | dict:
@@ -345,6 +346,71 @@ def _gpu_names() -> list[str]:
         return []
 
 
+@contextmanager
+def _start_comfy_server():
+    with tempfile.TemporaryDirectory(prefix='silver-render-') as directory:
+        command = [
+            'python', 'main.py', '--listen', '127.0.0.1', '--port', '8188',
+            '--disable-auto-launch', '--disable-all-custom-nodes', '--disable-metadata',
+        ]
+        for name in ('input', 'output', 'temp', 'user'):
+            path = Path(directory) / name
+            path.mkdir()
+            command.extend((f'--{name}-directory', str(path)))
+        process = subprocess.Popen(command, cwd=COMFY)
+        try:
+            deadline = time.monotonic() + 90
+            while True:
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError('ComfyUI did not start on the GPU worker.')
+                try:
+                    with urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=2):
+                        break
+                except OSError:
+                    time.sleep(1)
+            yield process
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+# The standard Modal worker processes one request at a time per container.
+_ad_server = None
+
+
+def _close_ad_server() -> None:
+    global _ad_server
+    if _ad_server:
+        _, _, stack = _ad_server
+        _ad_server = None
+        stack.close()
+
+
+@contextmanager
+def _comfy_server(ad_session: str | None):
+    global _ad_server
+    if _ad_server and (_ad_server[0] != ad_session or _ad_server[1].poll() is not None):
+        _close_ad_server()
+    if not ad_session:
+        with _start_comfy_server():
+            yield False
+        return
+    reused = _ad_server is not None
+    if not reused:
+        with ExitStack() as stack:
+            process = stack.enter_context(_start_comfy_server())
+            _ad_server = ad_session, process, stack.pop_all()
+    try:
+        yield reused
+    except BaseException:
+        _close_ad_server()
+        raise
+
+
 def _render(
     kind: str, prompt: str, settings: dict, *, wan_14b: bool = False,
     timeout: int | None = None, allow_retake: bool = True, image_workflow: str = 'flux-schnell.json',
@@ -357,6 +423,9 @@ def _render(
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     save_image = settings.pop('save_image', False) and kind in {'image', 'image_edit'}
     record_stats = settings.pop('record_stats', False) and kind == 'video'
+    ad_session = settings.pop('ad_render_session', None)
+    if kind != 'video' or wan_14b or not isinstance(ad_session, str) or not re.fullmatch(r'[0-9a-f]{64}', ad_session):
+        ad_session = None
     check_hands = settings.pop('check_hands', False) and kind == 'video'
     check_face = settings.pop('check_face', False) and kind == 'video'
     check_body = settings.pop('check_body', False) and kind == 'video'
@@ -389,31 +458,14 @@ def _render(
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
         SILVER_SCREEN_COMFYUI_FPS=str(fps),
     )
-    with tempfile.TemporaryDirectory(prefix='silver-render-') as directory:
-        command = [
-            'python', 'main.py', '--listen', '127.0.0.1', '--port', '8188',
-            '--disable-auto-launch', '--disable-all-custom-nodes', '--disable-metadata',
-        ]
-        for name in ('input', 'output', 'temp', 'user'):
-            path = Path(directory) / name
-            path.mkdir()
-            command.extend((f'--{name}-directory', str(path)))
-        process = subprocess.Popen(command, cwd=COMFY)
+    with _comfy_server(ad_session) as reused_server:
         try:
-            deadline = time.monotonic() + 90
-            while True:
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError('ComfyUI did not start on the GPU worker.')
-                try:
-                    with urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=2):
-                        break
-                except OSError:
-                    time.sleep(1)
             client = ComfyUIClient(kind=kind)
             if wan_14b:
                 client.video_sizes = WAN_14B_VIDEO_SIZES
                 client.timeout_seconds = min(2400, timeout - 150)
-            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands or check_face or record_stats else None)
+            verify_in_worker = save_clip or check_hands or check_face or (record_stats and not ad_session)
+            data = _render_take(client, prompt, settings, verify_fps=fps if verify_in_worker else None)
             reviews = review(data)
             elapsed = time.monotonic() - started
             remaining = timeout - elapsed - RETAKE_RESERVE
@@ -435,13 +487,6 @@ def _render(
                     logging.warning('A reference-continuity retake did not complete.', exc_info=True)
         except PredictionPending as exc:
             raise VideoGenerationError('The GPU render reached its time limit. Try a shorter clip or a smaller frame size.') from exc
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
     result = {'data': data, **reviews}
     if record_stats:
         gpu_names = _gpu_names()
@@ -452,6 +497,8 @@ def _render(
             'width': width, 'height': height, 'requested_seconds': settings.get('duration', 8),
             'gpu_worker_seconds': execution, 'gpus': gpu_names, 'execution_seconds': execution,
         }
+    if record_stats and ad_session:
+        result['render_stats']['reused_comfy_server'] = reused_server
     if save_clip or save_image:
         return _archive_result(result, image=save_image)
     return result if reviews or record_stats else data

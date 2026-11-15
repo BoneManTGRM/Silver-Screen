@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 from dataclasses import replace
 from fractions import Fraction
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable
 
@@ -848,6 +849,13 @@ def _process_prediction(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
+    if queue.get("referenceMode") == "product" and image:
+        direction = (
+            "Use the starting image as the product reference. Preserve the same shape, "
+            "proportions, colors, materials, and existing branding throughout the shot. "
+            "Continue into the specified action."
+        )
+        prompt = f"{direction} {prompt}"[:3500]
     if repair and queue.get("referenceMode") == "product":
         directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
         if directive:
@@ -886,7 +894,12 @@ def _process_prediction(
             if initial_image and initial_image != image:
                 settings["face_reference"] = initial_image
     if queue.get("referenceMode") == "product":
+        from .modal_renderer import ModalComfyUIClient
+
         settings["generate_audio"] = False
+        if isinstance(client, ModalComfyUIClient):
+            settings["ad_render_session"] = sha256(os.fsencode(root)).hexdigest()
+            settings["record_stats"] = True
         if queue.get("backend") == "comfyui":
             from .comfyui import video_controls_ready
 
@@ -978,6 +991,9 @@ def _verify_prediction_output(
                 clip_path.replace(rejected)
                 shot[f"{field}Candidate"] = _store_relative(root, rejected)
                 raise VideoGenerationError(message(review))
+    shot.pop("renderStats", None)
+    if isinstance(prediction.get("render_stats"), dict):
+        shot["renderStats"] = prediction["render_stats"]
     duration = verification.get("durationSeconds")
     if queue.get("writtenProduction") or queue.get("referenceMode") == "product":
         from .direct_generation import _verify_render_motion, finish_short_video
@@ -1091,7 +1107,6 @@ def generate_ai_video(
     is_ad = state.get("screenplayWriter") == "ad"
     written = bool(state.get("screenplayWriter"))
     if is_ad:
-        config = replace(config, use_continuity_frames=False)
         reference = root / "ad-product-reference.txt"
         if initial_image is not None and not initial_image_data:
             raise VideoGenerationError("The product photo could not be prepared.")

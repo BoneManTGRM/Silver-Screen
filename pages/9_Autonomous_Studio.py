@@ -373,6 +373,15 @@ if output:
     columns[3].metric("Quality", f"{float(quality.get('scorePercent', 0) or 0):.1f}")
     columns[4].metric("Visual", f"{float(quality.get('visualAverage', 0) or 0) * 100:.1f}")
     columns[5].metric("Semantic", "Used" if quality.get("semanticAvailable") else "Local only")
+    if writer_kind == "ad":
+        timings = [
+            shot["renderStats"] for shot in (media.get("queue") or {}).get("shots") or []
+            if shot.get("status") == "verified" and isinstance(shot.get("renderStats"), dict)
+        ]
+        if timings:
+            total_seconds = sum(timing.get("gpu_worker_seconds", 0) for timing in timings)
+            reused = sum(timing.get("reused_comfy_server") is True for timing in timings)
+            st.caption(f"GPU worker time for accepted shots · {total_seconds:.1f}s · {reused}/{len(timings)} reused ComfyUI")
     if playable:
         if status != "complete":
             st.caption(f"Partial preview · {metrics.get('verifiedShots', 0)} of {metrics.get('plannedShots', 0)} shots")
