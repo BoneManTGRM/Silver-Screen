@@ -586,7 +586,7 @@ if job:
     modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
     valid_render_id = modal_job and MODAL_RENDER_ID.fullmatch(prediction_id) is not None
     http_preview = valid_render_id and HTTP_RENDER_PREVIEW and not job.get("invalid_media")
-    if http_preview:
+    if http_preview and "data" not in job:
         st.iframe(render_preview_html(prediction_id), height="content", alt="Current render")
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
@@ -625,16 +625,14 @@ if job:
         if warning := job.get("film_warning"):
             st.warning(warning)
         if job["model"] == IMAGE_MODEL:
-            if not http_preview:
-                st.image(job["data"])
-                st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
+            st.image(job["data"])
+            st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
         else:
             filename = job.get("filename", "silver-screen.mp4")
-            if not http_preview:
-                st.success("Your clip is ready.")
-                st.video(job["data"], format="video/mp4")
+            st.success("Your clip is ready.")
+            st.video(job["data"], format="video/mp4")
             if review := job["prediction"].get("hand_review"):
                 if message := hand_review_message(review):
                     if review.get("status") == "possible_loss":
@@ -656,8 +654,7 @@ if job:
                 st.caption(render_model)
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
-            if not http_preview:
-                st.download_button("Download original clip", job["data"], filename, "video/mp4")
+            st.download_button("Download original clip", job["data"], filename, "video/mp4")
 
             with st.expander("Record dialogue and export this clip"):
                 samples = saved_clone_samples(library_root) if library_root and voice_clone_ready() else {}
