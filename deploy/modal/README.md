@@ -1,11 +1,11 @@
 # Private Silver Screen on Railway and Modal
 
-Railway runs the existing Streamlit studio and its film exporter. Authenticated Modal functions run ComfyUI with Wan 2.2 5B, Wan 2.2 14B image-to-video, FLUX.1 Schnell image generation, and FLUX.2 Klein image editing. The GPU has no public HTTP endpoint and scales to zero. The private Railway studio uses Caddy HTTP Basic Auth over Railway HTTPS. Keep the existing site and DNS in place during verification.
+Railway runs the Streamlit studio and its film exporter. Authenticated Modal functions run ComfyUI with Wan 2.2 5B and 14B for clips and FLUX.2 Klein for image generation and editing. The GPU has no public HTTP endpoint and scales to zero. The private Railway studio uses Caddy HTTP Basic Auth over Railway HTTPS.
 
 ## Enable the GPU
 
 1. Use a dedicated Modal Starter workspace. Verify the active compute credit and set the workspace net spend limit to $0 in **Usage & Billing**. Verify the saved value before deploying or invoking the worker. Modal requires a valid payment method on file for GPUs. Enter payment information only on Modal's billing page.
-2. Create a Modal API token for the same workspace. Railway can deploy the worker with the pre-deploy command `bash /app/deploy-renderer.sh` and a 3,600-second timeout. This builds the model images in Modal. Confirm that the app named `silver-screen-renderer` exposes `render`, `render_wan14`, and `edit_image`. The 14B image downloads about 29 GB of additional model weights on its first build.
+2. Create a Modal API token for the same workspace. Railway can deploy the worker with the pre-deploy command `bash /app/deploy-renderer.sh` and a 3,600-second timeout. This builds the model images in Modal. Confirm that `silver-screen-renderer` exposes `render`, `render_wan14`, `render_wan14_text`, and `edit_image`. The 14B text and reference workflows use separate checkpoints.
 3. Set `SILVER_SCREEN_MODAL_APP=silver-screen-renderer` and inject `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as Railway secrets for the same workspace. Use dedicated credentials for Railway and keep them out of Git and logs.
 
 ## Enable the private studio
@@ -14,7 +14,7 @@ Railway runs the existing Streamlit studio and its film exporter. Authenticated 
 2. Configure the Railway health check to `/_stcore/health`. Add a Railway domain for testing, verify that the studio requires sign-in, and check that the logged-in Streamlit session stays connected.
 3. Without a Railway volume, saved runs and cast uploads can disappear after a redeploy. For persistent use, mount a volume at `/app/runs` and ensure UID 10001 can write it. Verify the storage cost before adding the volume.
 4. In **Direct Create → Video clip → ComfyUI**, generate a five-second HD clip. For image-to-video, inspect **Starting frame and render size** before submitting. Verify that the download contains motion and plays on an iPhone. Then generate three more short clips and use **Export your custom film** for a 20-second cut. The GPU invocation timeout and single-container limit bound this test setup.
-5. Close the page before a test render completes, then reopen **Direct Create → Recent renders** and choose the submitted clip. Finished MP4 and PNG files are saved in the private `silver-screen-completed-clips` volume. Open a saved item to download it or confirm deletion. In **Direct Create → Image → ComfyUI**, upload an image and describe what to change to test the FLUX.2 Klein worker.
+5. Close the page before a render completes and reopen **Direct Create**. The page should restore the latest submitted render. Finished MP4 and PNG files are saved in the private `silver-screen-completed-clips` volume. Open a saved item to download it or confirm deletion. In **Direct Create → Image → ComfyUI**, check a text-only image and an uploaded-image edit.
 6. For the quality comparison, use the same starting photo, prompt, duration, and seed in **Render model** for both Wan variants. Choose a photo with visible hands and a single clear movement. The 14B mode uses both Wan denoisers, outputs 16 fps at up to 1280 × 720 or 720 × 1280, and supports two- to five-second shots. Compare sharpness on the moving subject, hand visibility and shape, and motion in the downloaded clips. The 14B render can take longer and uses more GPU time per shot. Its sampling settings follow the [ComfyUI Wan 2.2 workflow](https://docs.comfy.org/tutorials/video/wan/wan2_2).
 
 ### Review hand continuity

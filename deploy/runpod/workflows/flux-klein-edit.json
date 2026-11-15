@@ -37,11 +37,11 @@
   },
   "10": {
     "class_type": "Flux2Scheduler",
-    "inputs": {"width": ["9", 0], "height": ["9", 1], "steps": 4}
+    "inputs": {"width": "__IMAGE_WIDTH__", "height": "__IMAGE_HEIGHT__", "steps": 4}
   },
   "11": {
     "class_type": "EmptyFlux2LatentImage",
-    "inputs": {"width": ["9", 0], "height": ["9", 1], "batch_size": 1}
+    "inputs": {"width": "__IMAGE_WIDTH__", "height": "__IMAGE_HEIGHT__", "batch_size": 1}
   },
   "12": {
     "class_type": "BasicGuider",

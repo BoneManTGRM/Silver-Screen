@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -17,7 +18,7 @@ from .ai_video import (
     DEFAULT_MODEL, ReplicateVideoClient, VideoGenerationError, _ffmpeg_path,
     _ffprobe_path, verify_mp4,
 )
-from .comfyui import WAN_14B_FPS, wan_reference_size
+from .comfyui import IMAGE_SIZES, WAN_14B_FPS, wan_reference_size
 from .voice_audio import _has_audio, combine_voice_tracks, mix_voice_into_clip, verify_audio
 
 IMAGE_MODEL = "black-forest-labs/flux-schnell"
@@ -31,6 +32,56 @@ FILM_CANVASES = {
     "Portrait HD · 720 × 1280": (720, 1280),
     "Landscape compact · 960 × 540": (960, 540),
 }
+FORMAT_NAMES = {"portrait": "9:16", "vertical": "9:16", "landscape": "16:9", "horizontal": "16:9", "square": "1:1"}
+FORMAT_LABELS = re.compile(
+    r"\b(?:aspect ratio|frame format|output format|format)\s*(?:[:=]\s*|of\s+)?"
+    r"(\d+\s*:\s*\d+|portrait|vertical|landscape|horizontal|square)\b",
+    re.IGNORECASE,
+)
+FORMAT_PHRASES = re.compile(
+    r"\b(?:in\s+(\d+\s*:\s*\d+)|(\d+\s*:\s*\d+)\s+(?:format|frame|video|clip|image)|"
+    r"(portrait|vertical|landscape|horizontal|square)\s+(?:orientation|frame|video|clip|image))\b",
+    re.IGNORECASE,
+)
+CLIP_LENGTH = re.compile(
+    r"\b(?:clip length|(?:clip |video )?duration|(?:clip|video) (?:should |must )?lasts?|"
+    r"make (?:it|this|the clip|the video))\s*(?:[:=]\s*|of\s+|is\s+)?(\d{1,3})\s*(?:seconds?|secs?|s)\b"
+    r"|(?<![.\d])(\d{1,3})\s*[- ]\s*(?:seconds?|secs?)\s+"
+    r"(?:long|(?:(?:portrait|vertical|landscape|horizontal|square)\s+)?(?:clip|video))\b",
+    re.IGNORECASE,
+)
+NEGATED_INSTRUCTION = re.compile(
+    r"\b(?:not|no|avoid|without|don['’]t)\s+(?:(?:a|an|the|in|use|make)\s+)*$", re.IGNORECASE,
+)
+QUOTED_TEXT = re.compile(r"""["“][^"”\n]*["”]|(?<!\w)['‘][^'’\n]*['’](?!\w)""")
+
+
+def direct_prompt_aspect(prompt: str) -> str | None:
+    """Read a clear frame instruction without interpreting the scene description."""
+    prompt = QUOTED_TEXT.sub(" ", prompt)
+    ratios = set()
+    for pattern in (FORMAT_LABELS, FORMAT_PHRASES):
+        for match in pattern.finditer(prompt):
+            if NEGATED_INSTRUCTION.search(prompt[:match.start()]):
+                continue
+            value = "".join(next(group for group in match.groups() if group).lower().split())
+            ratios.add(FORMAT_NAMES.get(value, value))
+    if len(ratios) == 1:
+        ratio = next(iter(ratios))
+        if ratio in IMAGE_SIZES:
+            return ratio
+    return None
+
+
+def direct_prompt_seconds(prompt: str) -> int | None:
+    """Read the total length, leaving durations of individual actions alone."""
+    prompt = QUOTED_TEXT.sub(" ", prompt)
+    lengths = {
+        int(next(group for group in match.groups() if group))
+        for match in CLIP_LENGTH.finditer(prompt)
+        if not NEGATED_INSTRUCTION.search(prompt[:match.start()])
+    }
+    return next(iter(lengths)) if len(lengths) == 1 else None
 
 
 def _open_reference(source: Path | BinaryIO) -> Image.Image:
@@ -54,12 +105,16 @@ def _reference_jpeg(frame: Image.Image) -> bytes:
 
 
 def prepare_wan_reference(
-    source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
+    source: Path | BinaryIO, frame_size: tuple[int, int] | None, *,
+    wan_14b: bool = False, preserve_framing: bool = False,
 ) -> tuple[bytes, tuple[int, int]]:
     """Prepare the exact starting frame that will be shown in the preview."""
     photo = _open_reference(source)
     size = frame_size or wan_reference_size(photo.width, photo.height, wan_14b=wan_14b)
-    frame = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
+    if preserve_framing:
+        frame = ImageOps.pad(photo, size, Image.Resampling.LANCZOS, color="black")
+    else:
+        frame = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
     return _reference_jpeg(frame), size
 
 
@@ -122,14 +177,21 @@ def read_direct_output(prediction: dict[str, Any], *, image: bool) -> bytes:
 
 def verify_direct_output(
     data: bytes, *, image: bool, expected_seconds: int | None = None,
+    expected_size: tuple[int, int] | None = None,
 ) -> bytes:
     if image:
         _check_output_size(data)
         with Image.open(io.BytesIO(data), formats=["PNG"]) as generated:
+            _verify_frame_size(generated.size, expected_size)
             generated.verify()
     else:
-        verify_direct_clip(data, expected_seconds=expected_seconds)
+        verify_direct_clip(data, expected_seconds=expected_seconds, expected_size=expected_size)
     return data
+
+
+def _verify_frame_size(actual: tuple[int, int], expected: tuple[int, int] | None) -> None:
+    if expected is not None and actual != expected:
+        raise VideoGenerationError(f"The render did not match the requested {expected[0]} × {expected[1]} frame.")
 
 
 def _check_output_size(data: bytes) -> None:
@@ -139,6 +201,7 @@ def _check_output_size(data: bytes) -> None:
 
 def verify_direct_clip(
     data: bytes, *, expected_seconds: int | None = None, minimum_fps: int | None = None,
+    expected_size: tuple[int, int] | None = None,
 ) -> float | None:
     """Verify delivery, with a full decode and freeze check for new GPU renders."""
     _check_output_size(data)
@@ -146,6 +209,7 @@ def verify_direct_clip(
         path = Path(directory) / "clip.mp4"
         path.write_bytes(data)
         metadata = _verified_clip(path)
+        _verify_frame_size((metadata["width"], metadata["height"]), expected_size)
         duration = metadata["videoDurationSeconds"] or metadata["durationSeconds"]
         fps = metadata["frameRate"]
         frame_seconds = 1 / (fps or 24)

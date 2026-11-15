@@ -22,8 +22,8 @@ from silver_screen.ai_video import (
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
 from silver_screen.comfyui import (
-    ComfyUIClient, VIDEO_SIZES, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
-    WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, comfyui_ready, make_comfyui_client, video_controls_ready,
+    IMAGE_SIZES, ComfyUIClient, VIDEO_SIZES, WAN_14B_LANDSCAPE_HD, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
+    WAN_LANDSCAPE_HD, comfyui_ready, image_size_ready, make_comfyui_client, video_controls_ready, wan_aspect_size,
 )
 from silver_screen.direct_generation import (
     CLIP_MODEL,
@@ -31,6 +31,8 @@ from silver_screen.direct_generation import (
     FILM_LIMIT,
     IMAGE_MODEL,
     assemble_direct_film,
+    direct_prompt_aspect,
+    direct_prompt_seconds,
     finish_direct_clip,
     prepare_edit_reference,
     prepare_wan_reference,
@@ -48,7 +50,7 @@ from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
 
-AUTO_FRAME = "Auto · match the photo’s proportions"
+AUTO_FRAME = "Auto"
 WAN_5B_LABEL = "Wan 2.2 5B · 24 fps"
 WAN_14B_LABEL = "Wan 2.2 14B · 16 fps"
 WAN_14B_DEFAULT_STEPS = 28
@@ -150,10 +152,12 @@ def refresh_render(job, film_shots, *, wait=False):
                 job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
             try:
                 if is_image:
-                    verify_direct_output(data, image=True)
+                    verify_direct_output(data, image=True, expected_size=job.get("requested_size"))
                 else:
                     expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
-                    job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
+                    job["actual_seconds"] = verify_direct_clip(
+                        data, expected_seconds=expected, expected_size=job.get("requested_size"),
+                    )
             except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
                 save_prediction(dict(prediction, status="failed", error=str(exc)))
                 return
@@ -320,8 +324,10 @@ if modal_ready:
 prepared_reference = None
 prepared_end = None
 prepared_edit = None
+end_image = None
 reference_label = "No photo"
 frame_size = None
+frame_format = AUTO_FRAME
 reference = None
 reference_error = None
 if is_image and use_comfyui and comfyui_ready("image_edit"):
@@ -334,8 +340,10 @@ if is_image and use_comfyui and comfyui_ready("image_edit"):
             st.error(reference_error)
         else:
             st.image(prepared_edit, caption="Source image", width=320)
+image_kind = "image_edit" if prepared_edit else "image"
+image_controls = is_image and use_comfyui and image_size_ready(image_kind)
 if use_modal and is_image:
-    st.caption("FLUX.2 Klein" if prepared_edit else "FLUX.1 Schnell")
+    st.caption("FLUX.2 Klein" if prepared_edit or image_controls else "FLUX.1 Schnell")
 if reference_ready and not is_image:
     if shot:
         choices = ["No photo", *(label for label, photo in cast_photos.items() if photo)]
@@ -356,21 +364,22 @@ if reference_ready and not is_image:
                 reference = library_photos[reference_label]
 wan_14b = False
 if use_modal and not is_image:
-    if video_controls and reference is not None:
+    if video_controls:
+        model_choices = (WAN_14B_LABEL, WAN_5B_LABEL) if reference is not None else (WAN_5B_LABEL, WAN_14B_LABEL)
         wan_14b = st.selectbox(
-            "Render model", (WAN_14B_LABEL, WAN_5B_LABEL),
-            help="14B uses more Modal GPU time and supports clips up to five seconds.",
+            "Render model", model_choices, key="wan-model-with-photo" if reference is not None else "wan-model-from-text",
+            help="14B is available from a prompt alone or with a starting photo. It uses more Modal GPU time and supports clips up to five seconds.",
         ) == WAN_14B_LABEL
     else:
         st.caption(WAN_5B_LABEL)
 if video_controls:
     with st.expander("Starting frame and render size", expanded=reference is not None):
         sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
-        size = st.selectbox(
+        frame_format = st.selectbox(
             "Frame size", (AUTO_FRAME, *sizes),
-            help="Fixed frame sizes center-crop the photo to fill the frame. Check the preview for faces and hands.",
+            help="Auto uses the format in your prompt or the starting photo’s proportions. Fixed sizes crop the photo to fill the frame.",
         )
-        frame_size = sizes.get(size)
+        frame_size = sizes.get(frame_format)
         if reference is not None:
             try:
                 prepared_reference, frame_size = prepare_wan_reference(reference, frame_size, wan_14b=wan_14b)
@@ -405,8 +414,14 @@ with st.form("direct_create"):
     duration = 8
     ratio = "16:9"
     audio = True
-    video_options = {}
+    render_options = {}
+    image_format = AUTO_FRAME
     seed_text = ""
+    if image_controls:
+        image_format = st.selectbox(
+            "Frame format", (AUTO_FRAME, *IMAGE_SIZES),
+            help="Auto uses the format in your prompt. Otherwise an edit follows the source photo and a new image is square.",
+        )
     if not use_comfyui:
         ratios = ("1:1", "16:9", "9:16", "4:3", "3:4") if is_image else ("16:9", "9:16")
         ratio = st.selectbox("Aspect ratio", ratios)
@@ -418,6 +433,7 @@ with st.form("direct_create"):
                 "Clip length in seconds", min_value=2, max_value=maximum,
                 value=min(shot.seconds if shot else default_duration, maximum),
                 key=f"wan-clip-length-{shot_number}-{maximum}",
+                help="A total clip length stated in the prompt sets the render duration.",
             )
         else:
             durations = (8, 6, 4)
@@ -436,16 +452,16 @@ with st.form("direct_create"):
                           if wan_14b else "More steps increase render time. Compare shots using the same seed."),
                 )
                 seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
-                default_negative = WAN_MOTION_NEGATIVE_PROMPT if use_modal else ""
-                negative = st.text_area("Things to avoid (optional)", placeholder=default_negative or None)
-                negative = ", ".join(filter(None, (default_negative, negative.strip())))
-                video_options = {"video_size": frame_size or WAN_LANDSCAPE_HD, "steps": steps, "negative_prompt": negative}
+                negative = st.text_area("Things to avoid (optional)")
+                default_size = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
+                render_options = {"video_size": frame_size or default_size, "steps": steps, "negative_prompt": negative}
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
     generate = st.form_submit_button("Generate", type="primary", disabled=active or reference_error is not None)
 
 if generate and not active:
     model = IMAGE_MODEL if is_image else CLIP_MODEL
     started = monotonic()
+    requested_size = None
     try:
         if reference_label in ("Co-star photo", "Both of you in one photo"):
             if not cast_permission:
@@ -462,6 +478,30 @@ if generate and not active:
                             raise ValueError
                     except ValueError as exc:
                         raise VideoGenerationError("Use a whole-number seed from 0 to 9007199254740991.") from exc
+                    if use_modal:
+                        render_options["allow_retake"] = False
+                if image_controls:
+                    requested_format = direct_prompt_aspect(prompt) if image_format == AUTO_FRAME else image_format
+                    if requested_format:
+                        requested_size = IMAGE_SIZES[requested_format]
+                        render_options["image_size"] = requested_size
+                if video_controls:
+                    requested_duration = direct_prompt_seconds(prompt)
+                    if requested_duration is not None:
+                        if not 2 <= requested_duration <= maximum:
+                            raise VideoGenerationError(f"This model supports clips from 2 to {maximum} seconds. Your prompt asks for {requested_duration}.")
+                        duration = requested_duration
+                    if frame_format == AUTO_FRAME and (requested_format := direct_prompt_aspect(prompt)):
+                        requested_size = wan_aspect_size(requested_format, wan_14b=wan_14b)
+                        render_options["video_size"] = requested_size
+                        if reference is not None:
+                            prepared_reference, _ = prepare_wan_reference(
+                                reference, requested_size, wan_14b=wan_14b, preserve_framing=True,
+                            )
+                        if end_image is not None:
+                            prepared_end, _ = prepare_wan_reference(
+                                end_image, requested_size, wan_14b=True, preserve_framing=True,
+                            )
                 if prepared_edit is not None or prepared_reference is not None:
                     photo = prepared_edit if prepared_edit is not None else prepared_reference
                     image = "data:image/jpeg;base64," + base64.b64encode(photo).decode("ascii")
@@ -470,13 +510,13 @@ if generate and not active:
                 if reference is not None and not image:
                     raise VideoGenerationError("The starting image could not be prepared.")
                 if use_modal:
-                    video_options["save_image" if is_image else "save_clip"] = True
+                    render_options["save_image" if is_image else "save_clip"] = True
                 if wan_14b:
-                    video_options["wan_14b"] = True
+                    render_options["wan_14b"] = True
                 if prepared_end is not None:
-                    video_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
-                prediction = make_comfyui_client(kind="image_edit" if prepared_edit else workflow_kind).create_prediction(
-                    prompt, seed=seed, duration=duration, image=image, **video_options,
+                    render_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
+                prediction = make_comfyui_client(kind=image_kind if is_image else workflow_kind).create_prediction(
+                    prompt, seed=seed, duration=duration, image=image, **render_options,
                 )
             else:
                 prediction = submit_direct_generation(
@@ -486,7 +526,12 @@ if generate and not active:
         job = {
             "backend": backend, "model": model, "prediction": prediction,
             "started": started, "requested_seconds": duration,
+            "submitted_prompt": prompt,
         }
+        if requested_size is not None:
+            job["requested_size"] = requested_size
+        if negative_prompt := render_options.get("negative_prompt"):
+            job["submitted_negative_prompt"] = negative_prompt
         if shot:
             job["filename"] = f"last-train-out-{shot_number:02d}.mp4"
             job["shot_number"] = shot_number
@@ -514,6 +559,16 @@ if job:
     job_backend = job.get("backend", "Replicate")
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
+    if submitted_prompt := job.get("submitted_prompt"):
+        with st.expander("Prompt used"):
+            st.code(submitted_prompt, language=None)
+            if submitted_negative := job.get("submitted_negative_prompt"):
+                st.caption("Things to avoid")
+                st.code(submitted_negative, language=None)
+            if output_size := job.get("requested_size"):
+                st.caption(f"Frame size · {output_size[0]} × {output_size[1]}")
+            if job["model"] == CLIP_MODEL:
+                st.caption(f"Clip length · {job['requested_seconds']} seconds")
     if warning := job.get("history_warning"):
         st.warning(warning)
 

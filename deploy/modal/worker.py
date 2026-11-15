@@ -34,6 +34,11 @@ WAN_14B_MODELS = (
     'diffusion_models/wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors',
     'vae/wan_2.1_vae.safetensors',
 )
+WAN_14B_TEXT_MODELS = (
+    'diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors',
+    'diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors',
+    'vae/wan_2.1_vae.safetensors',
+)
 STANDARD_TIMEOUT = 1500
 WAN_14B_TIMEOUT = 2700
 WAN_14B_GPUS = ['H100', 'L40S']
@@ -80,6 +85,10 @@ wan_14b_image = image.run_commands(*[
     f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
     for path in WAN_14B_MODELS
 ])
+wan_14b_text_image = image.run_commands(*[
+    f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
+    for path in WAN_14B_TEXT_MODELS
+])
 image_editor = image.run_commands(*[
     f'mkdir -p {COMFY}/models/{Path(path).parent} && '
     f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {url}'
@@ -102,6 +111,9 @@ if modal.is_local():
     wan_14b_image = wan_14b_image.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
+    wan_14b_text_image = wan_14b_text_image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
     image_editor = image_editor.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
@@ -122,9 +134,11 @@ def render(kind: str, prompt: str, settings: dict) -> bytes | dict:
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
 )
 def edit_image(kind: str, prompt: str, settings: dict) -> bytes | dict:
-    if kind != 'image_edit' or not settings.get('image'):
+    if kind not in {'image', 'image_edit'}:
+        raise VideoGenerationError('Choose an image render.')
+    if kind == 'image_edit' and not settings.get('image'):
         raise VideoGenerationError('Upload the image you want to edit.')
-    return _render(kind, prompt, settings)
+    return _render(kind, prompt, settings, image_workflow='flux-klein-text.json')
 
 
 @app.function(
@@ -134,6 +148,18 @@ def edit_image(kind: str, prompt: str, settings: dict) -> bytes | dict:
 def render_wan14(kind: str, prompt: str, settings: dict) -> bytes | dict:
     if kind != 'video' or not settings.get('image'):
         raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
+    if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
+        raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
+    return _render(kind, prompt, settings, wan_14b=True)
+
+
+@app.function(
+    image=wan_14b_text_image, gpu=WAN_14B_GPUS, max_containers=1, scaledown_window=5, timeout=WAN_14B_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def render_wan14_text(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    if kind != 'video' or settings.get('image') or settings.get('end_image'):
+        raise VideoGenerationError('Choose Wan 2.2 14B with a starting photo to use a reference.')
     if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
         raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
     return _render(kind, prompt, settings, wan_14b=True)
@@ -205,18 +231,23 @@ def _review_hands(data: bytes, reference: str) -> dict:
 
 
 def _render_take(client, prompt: str, settings: dict, *, verify_fps: int | None) -> bytes:
-    from silver_screen.direct_generation import verify_direct_clip
+    from silver_screen.direct_generation import verify_direct_clip, verify_direct_output
 
     prediction = client.wait(client.create_prediction(prompt, **settings))
     data = client.read_output(prediction)
     if verify_fps is not None:
-        verify_direct_clip(data, expected_seconds=settings.get('duration', 8), minimum_fps=verify_fps)
+        verify_direct_clip(
+            data, expected_seconds=settings.get('duration', 8), minimum_fps=verify_fps,
+            expected_size=settings.get('video_size'),
+        )
+    elif settings.get('image_size') is not None:
+        verify_direct_output(data, image=True, expected_size=settings['image_size'])
     return data
 
 
 def _render(
     kind: str, prompt: str, settings: dict, *, wan_14b: bool = False,
-    timeout: int | None = None, allow_retake: bool = True,
+    timeout: int | None = None, allow_retake: bool = True, image_workflow: str = 'flux-schnell.json',
 ) -> bytes | dict:
     from silver_screen.comfyui import ComfyUIClient
 
@@ -226,17 +257,19 @@ def _render(
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     save_image = settings.pop('save_image', False) and kind in {'image', 'image_edit'}
     check_hands = settings.pop('check_hands', False) and kind == 'video'
+    allow_retake = settings.pop('allow_retake', True) and allow_retake
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
     reference = settings.get('image') if save_clip or check_hands else None
     hand_review = None
     reference_workflow = 'wan-reference-14b.json' if wan_14b else 'wan-reference.json'
+    video_workflow = 'wan-text-14b.json' if wan_14b and not settings.get('image') else 'wan-video.json'
     fps = WAN_14B_FPS if wan_14b else 24
     os.environ.update(
         SILVER_SCREEN_COMFYUI_URL='http://127.0.0.1:8188',
-        SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW='/opt/workflows/flux-schnell.json',
+        SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW=f'/opt/workflows/{image_workflow}',
         SILVER_SCREEN_COMFYUI_IMAGE_EDIT_WORKFLOW='/opt/workflows/flux-klein-edit.json',
-        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW='/opt/workflows/wan-video.json',
+        SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=f'/opt/workflows/{video_workflow}',
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
         SILVER_SCREEN_COMFYUI_FPS=str(fps),
     )

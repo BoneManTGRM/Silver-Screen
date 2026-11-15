@@ -6,7 +6,7 @@ import os
 from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
-from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient
+from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient, image_size_ready
 from .hand_review import HAND_REVIEW_UNAVAILABLE
 from .modal_clip_archive import (
     CLIPS_VOLUME, MODAL_RENDER_ID, RecentRender, delete_saved_media, latest_renders, media_was_deleted,
@@ -91,12 +91,16 @@ class ModalComfyUIClient(ComfyUIClient):
             if not settings.get('image'):
                 raise VideoGenerationError('Upload the image you want to edit.')
             function = 'edit_image'
+        elif self.kind == 'image' and image_size_ready('image'):
+            function = 'edit_image'
         if wan_14b:
-            if self.kind != 'video' or not settings.get('image'):
-                raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
+            if self.kind != 'video':
+                raise VideoGenerationError('Choose a video render for Wan 2.2 14B.')
+            if settings.get('end_image') and not settings.get('image'):
+                raise VideoGenerationError('An ending image requires a starting photo.')
             if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
                 raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
-            function = 'render_wan14'
+            function = 'render_wan14' if settings.get('image') else 'render_wan14_text'
         try:
             call = self.modal.Function.from_name(self.app, function).spawn(self.kind, prompt, settings)
         except self.modal.exception.Error as exc:

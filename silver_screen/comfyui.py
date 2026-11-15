@@ -8,7 +8,7 @@ import os
 import secrets
 import urllib.error
 import urllib.request
-from math import ceil, floor, log, sqrt
+from math import ceil, floor, gcd, log, sqrt
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -49,6 +49,15 @@ WAN_14B_VIDEO_SIZES = {
     "Portrait HD · 720 × 1280": WAN_14B_LANDSCAPE_HD[::-1],
     **COMPACT_VIDEO_SIZES,
 }
+IMAGE_SIZES = {
+    "1:1": (1024, 1024),
+    "16:9": (1280, 720),
+    "9:16": (720, 1280),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+    "21:9": (1344, 576),
+}
+IMAGE_SIZE_MARKERS = {"__IMAGE_WIDTH__", "__IMAGE_HEIGHT__"}
 VIDEO_CONTROL_MARKERS = {"__WIDTH__", "__HEIGHT__", "__STEPS__", "__NEGATIVE_PROMPT__"}
 WAN_14B_SPLIT_MARKER = "__WAN_14B_SPLIT_STEP__"
 
@@ -75,18 +84,28 @@ def wan_reference_size(width: int, height: int, *, wan_14b: bool) -> tuple[int, 
     )
 
 
-def _valid_wan_reference_size(size: tuple[int, int], *, wan_14b: bool) -> bool:
+def wan_aspect_size(ratio: str, *, wan_14b: bool) -> tuple[int, int]:
+    """Fit an exact aspect ratio within the model's pixel and stride limits."""
+    parts = [int(part) for part in ratio.split(":")]
+    divisor = gcd(*parts)
+    stride, pixel_limit = _wan_frame_limits(wan_14b)
+    width, height = (part // divisor * stride for part in parts)
+    scale = min(1280 // max(width, height), int(sqrt(pixel_limit / (width * height))))
+    return width * scale, height * scale
+
+
+def _valid_wan_size(size: tuple[int, int], *, wan_14b: bool) -> bool:
     width, height = size
     stride, pixel_limit = _wan_frame_limits(wan_14b)
     return width * height <= pixel_limit and all(256 <= side <= 1280 and side % stride == 0 for side in (width, height))
 
 
-def _wan_14b_split_step(steps: int) -> int:
+def _wan_14b_split_step(steps: int, *, text_to_video: bool = False) -> int:
     # ComfyUI's simple scheduler samples 1,000 shifted timesteps from high to low.
-    # Wan I2V switches experts at the first shifted timestep below 0.900.
+    shift, boundary = (12, 0.875) if text_to_video else (5, 0.9)
     for step in range(1, steps):
         time = (1000 - step * 1000 // steps) / 1000
-        if 5 * time / (1 + 4 * time) < 0.9:
+        if shift * time / (1 + (shift - 1) * time) < boundary:
             return step
     return steps - 1
 
@@ -148,13 +167,21 @@ def _markers(workflow: dict[str, Any]) -> set[str]:
     return {value for node in workflow.values() for value in node["inputs"].values() if isinstance(value, str)}
 
 
-def video_controls_ready(kind: str) -> bool:
+def _controls_ready(kind: str, markers: set[str]) -> bool:
     if not comfyui_ready(kind):
         return False
     try:
-        return VIDEO_CONTROL_MARKERS <= _markers(_workflow(kind))
+        return markers <= _markers(_workflow(kind))
     except VideoGenerationError:
         return False
+
+
+def video_controls_ready(kind: str) -> bool:
+    return _controls_ready(kind, VIDEO_CONTROL_MARKERS)
+
+
+def image_size_ready(kind: str) -> bool:
+    return _controls_ready(kind, IMAGE_SIZE_MARKERS)
 
 
 class ComfyUIClient:
@@ -238,6 +265,7 @@ class ComfyUIClient:
         end_image: str | None = None,
         generate_audio: bool | None = None,
         video_size: tuple[int, int] | None = None,
+        image_size: tuple[int, int] | None = None,
         steps: int | None = None,
         negative_prompt: str = "",
     ) -> dict[str, Any]:
@@ -260,10 +288,24 @@ class ComfyUIClient:
             workflow[end_node] = {"class_type": "LoadImage", "inputs": {"image": "__END_IMAGE__"}}
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
-        if kind not in {"image", "image_edit"}:
+        if kind in {"image", "image_edit"}:
+            if image_size is not None:
+                if image_size not in IMAGE_SIZES.values():
+                    raise VideoGenerationError("Choose a supported image format.")
+                required.update(IMAGE_SIZE_MARKERS)
+                width, height = image_size
+            elif kind == "image_edit" and IMAGE_SIZE_MARKERS <= markers:
+                size_nodes = [key for key, node in workflow.items() if node["class_type"] == "GetImageSize"]
+                if len(size_nodes) != 1:
+                    raise VideoGenerationError("The image-edit workflow needs one source size node.")
+                width, height = [size_nodes[0], 0], [size_nodes[0], 1]
+            else:
+                width, height = IMAGE_SIZES["1:1"]
+            replacements.update(__IMAGE_WIDTH__=width, __IMAGE_HEIGHT__=height)
+        else:
             if video_size is not None and not (
                 video_size in self.video_sizes.values()
-                or image and _valid_wan_reference_size(video_size, wan_14b=wan_14b)
+                or _valid_wan_size(video_size, wan_14b=wan_14b)
             ):
                 raise VideoGenerationError("Choose a supported Wan video size.")
             max_steps = WAN_14B_STEPS if wan_14b else 32
@@ -282,7 +324,9 @@ class ComfyUIClient:
                                 __SPLIT_STEP__=sampling_steps // 2,
                                 __NEGATIVE_PROMPT__=negative_prompt)
             if wan_14b:
-                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(sampling_steps)
+                replacements[WAN_14B_SPLIT_MARKER] = _wan_14b_split_step(
+                    sampling_steps, text_to_video=kind == "video",
+                )
             required.add("__FRAMES__")
             if video_size is not None or steps is not None or negative_prompt:
                 required.update(VIDEO_CONTROL_MARKERS)

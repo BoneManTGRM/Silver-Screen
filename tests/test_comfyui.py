@@ -188,9 +188,31 @@ def test_direct_create_edits_an_uploaded_image_and_offers_a_download(comfy_serve
     assert workflow["7"]["inputs"]["text"] == "Change the background to blue."
     assert workflow["8"]["inputs"]["latent"] == ["6", 0]
     assert workflow["10"]["inputs"]["steps"] == 4
+    assert workflow["11"]["inputs"]["width"] == ["9", 0]
+    assert workflow["11"]["inputs"]["height"] == ["9", 1]
     assert len(uploads) == 1
     assert app.session_state["direct_create_job"]["data"] == media["result.png"]
     assert "Download image" in [element.proto.label for element in app.get("download_button")]
+
+
+def test_direct_create_renders_new_images_in_the_prompt_format(comfy_server, monkeypatch):
+    submissions, _, media = comfy_server
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv(WORKFLOW_ENV["image"], str(root / "deploy/runpod/workflows/flux-klein-text.json"))
+    output = io.BytesIO()
+    Image.new("RGB", (720, 1280), "ivory").save(output, format="PNG")
+    media["result.png"] = output.getvalue()
+    prompt = '  Aspect ratio 9:16.\nWrite "NOVA" at the top.  '
+    app = AppTest.from_file(root / "pages/0_Direct_Create.py").run()
+    app.text_area[0].set_value(prompt)
+    generate_button(app).click().run()
+    assert not app.exception
+    assert not app.error
+    graph = submissions["job-1"]
+    assert graph["4"]["inputs"]["text"] == prompt
+    assert graph["5"]["inputs"]["width"] == graph["6"]["inputs"]["width"] == 720
+    assert graph["5"]["inputs"]["height"] == graph["6"]["inputs"]["height"] == 1280
+    assert app.session_state["direct_create_job"]["submitted_prompt"] == prompt
 
 
 def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_server):
@@ -519,7 +541,7 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     page = Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py"
     app = AppTest.from_file(page).run()
     app.radio[0].set_value("Video clip").run()
-    assert not any(box.label == "Render model" for box in app.selectbox)
+    assert next(box for box in app.selectbox if box.label == "Render model").value == "Wan 2.2 5B · 24 fps"
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
     models = next(box for box in app.selectbox if box.label == "Render model")
     assert models.value == "Wan 2.2 14B · 16 fps"
@@ -530,6 +552,7 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert not any(box.label == "Keep hands in frame" for box in app.checkbox)
     app.text_area[0].set_value("The runner lifts both hands.")
     app.text_area[1].set_value("camera shake")
+    next(input_ for input_ in app.text_input if input_.label == "Seed (optional)").set_value("17")
     generate_button(app).click().run()
     assert not app.exception
     assert not app.error
@@ -552,15 +575,77 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
     assert prompt == "The runner lifts both hands."
-    assert "camera shake" in settings["negative_prompt"]
-    assert "blurry subject" in settings["negative_prompt"]
-    assert "wrist stumps" in settings["negative_prompt"]
+    assert settings["negative_prompt"] == "camera shake"
+    assert settings["seed"] == 17
+    assert settings["allow_retake"] is False
     assert settings["video_size"] == (720, 1280)
     assert settings["save_clip"] is True
     assert settings["duration"] == 3
     assert settings["steps"] == 28
     assert settings["image"].startswith("data:image/jpeg;base64,")
     assert "wan_14b" not in settings
+
+
+def test_direct_create_14b_text_render_uses_the_requested_length_and_framing(comfy_server, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    workflow = root / "deploy/runpod/workflows/wan-video.json"
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflow))
+    monkeypatch.setenv(WORKFLOW_ENV["reference"], str(root / "deploy/runpod/workflows/wan-reference.json"))
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    call_id = "fc-" + "5" * 26
+    submissions = []
+
+    def lookup(app_name, function):
+        def spawn(kind, prompt, settings):
+            submissions.append((app_name, function, kind, prompt, settings))
+            return SimpleNamespace(object_id=call_id)
+        return SimpleNamespace(spawn=spawn)
+
+    def pending(**kwargs):
+        raise modal_errors.TimeoutError()
+
+    volume = empty_archive()
+    volume.batch_upload = lambda **_: nullcontext(SimpleNamespace(put_file=lambda *_: None))
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Function=SimpleNamespace(from_name=lookup),
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=pending)),
+        Volume=SimpleNamespace(from_name=lambda _: volume),
+        exception=modal_errors,
+    ))
+    app = AppTest.from_file(root / "pages/0_Direct_Create.py").run()
+    app.radio[0].set_value("Video clip").run()
+    next(box for box in app.selectbox if box.label == "Render model").select("Wan 2.2 14B · 16 fps").run()
+    prompt = "  A 4-second vertical clip.\nMove the red disk left to right.  "
+    app.text_area[0].set_value(prompt)
+    generate_button(app).click().run()
+    assert not app.exception
+    assert not app.error
+    app_name, function, kind, submitted, settings = submissions[0]
+    assert (app_name, function, kind, submitted) == ("test-renderer", "render_wan14_text", "video", prompt)
+    assert settings["duration"] == 4
+    assert settings["video_size"] == (720, 1280)
+    assert settings["negative_prompt"] == ""
+    assert settings["image"] is None
+    assert app.query_params == {"render": call_id, "render_seconds": "4"}
+
+
+def test_wan_14b_text_workflow_uses_the_native_model_boundary(comfy_server, monkeypatch):
+    submissions, uploads, _ = comfy_server
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv(WORKFLOW_ENV["video"], str(root / "deploy/runpod/workflows/wan-text-14b.json"))
+    monkeypatch.setenv("SILVER_SCREEN_COMFYUI_FPS", "16")
+    client = ComfyUIClient()
+    client.create_prediction("The red disk slides right.", duration=2, seed=17, steps=28, video_size=(832, 480))
+    graph = submissions["job-1"]
+    assert not uploads
+    assert graph["5"]["inputs"]["text"] == "The red disk slides right."
+    assert graph["8"]["inputs"]["length"] == 33
+    assert graph["9"]["inputs"]["shift"] == graph["10"]["inputs"]["shift"] == 12.0
+    assert graph["11"]["inputs"]["end_at_step"] == graph["12"]["inputs"]["start_at_step"] == 18
+    assert graph["11"]["inputs"]["cfg"] == 4.0
+    assert graph["12"]["inputs"]["cfg"] == 3.0
 
 
 @pytest.mark.parametrize("two_anchors", [False, True])
