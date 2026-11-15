@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from itertools import product
 from math import dist
 from pathlib import Path
+from statistics import median
 from tempfile import TemporaryDirectory
 from typing import Any, Iterable
 import subprocess
@@ -24,6 +25,7 @@ MAX_REVIEW_FRAMES = 100
 Point = tuple[float, float]
 HAND_REVIEW_NOT_CHECKED = {"status": "insufficient_reference"}
 HAND_REVIEW_UNAVAILABLE = {"status": "unavailable"}
+BODY_REVIEW_UNAVAILABLE = {"status": "unavailable"}
 BODY_LABELS = {"1": "the person starting on the left", "2": "the person starting on the right"}
 HAND_REVIEW_WARNINGS = {
     "possible_loss": "A hand could not be detected in parts of this take where the wrist appeared visible. Check the footage before using it.",
@@ -31,6 +33,15 @@ HAND_REVIEW_WARNINGS = {
     "insufficient_reference": "No reference hand could be tracked well enough to check hand continuity.",
     "unavailable": "The hand-continuity check was unavailable for this render.",
 }
+BODY_SEGMENTS = {
+    "shoulders": (11, 12), "hips": (23, 24),
+    "left torso": (11, 23), "right torso": (12, 24),
+    "left upper arm": (11, 13), "right upper arm": (12, 14),
+    "left forearm": (13, 15), "right forearm": (14, 16),
+    "left thigh": (23, 25), "right thigh": (24, 26),
+    "left shin": (25, 27), "right shin": (26, 28),
+}
+BODY_DRIFT_RATIO = 1.4
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,7 @@ class Body:
     scale: float
     wrists: dict[str, Wrist]
     silhouette: tuple[tuple[Point, Point, float], ...] = ()
+    measurements: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -156,13 +168,14 @@ class HandReviewer:
         return self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=self._array(source))
 
     def _bodies(self, image: Image.Image) -> list[Body]:
-        poses = self.pose.detect(self._image(image)).pose_landmarks
-        if len(poses) > 2:
+        detections = self.pose.detect(self._image(image))
+        if len(detections.pose_landmarks) > 2:
             return []
-        return [body for pose in poses if (body := self._body(image.size, pose)) is not None]
+        return [body for pose, world in zip(detections.pose_landmarks, detections.pose_world_landmarks)
+                if (body := self._body(image.size, pose, world)) is not None]
 
     @staticmethod
-    def _body(size: tuple[int, int], landmarks: list[Any]) -> Body | None:
+    def _body(size: tuple[int, int], landmarks: list[Any], world: list[Any]) -> Body | None:
         width, height = size
 
         def confidence(index: int) -> float:
@@ -177,6 +190,10 @@ class HandReviewer:
             x, y = point(first)
             u, v = point(second)
             return (x + u) / 2, (y + v) / 2
+
+        def world_point(index: int) -> tuple[float, float, float]:
+            mark = world[index]
+            return mark.x, mark.y, mark.z
 
         if any(confidence(index) < 0.58 for index in (11, 12)):
             return None
@@ -203,7 +220,13 @@ class HandReviewer:
             crop = (x - radius, y - radius, x + radius, y + radius)
             if length >= 25 and 0 <= px < width and 0 <= py < height:
                 wrists[side] = Wrist((px, py), (ex, ey), crop)
-        return Body(center, scale, wrists, tuple(silhouette))
+        measurements = {
+            name: dist(world_point(first), world_point(second))
+            for name, (first, second) in BODY_SEGMENTS.items()
+            if all(confidence(index) >= 0.72 and 0 <= landmarks[index].x <= 1 and 0 <= landmarks[index].y <= 1
+                   for index in (first, second))
+        }
+        return Body(center, scale, wrists, tuple(silhouette), measurements)
 
     @staticmethod
     def _overlaps_wrist(wrist: Wrist, wrists: list[Wrist]) -> bool:
@@ -229,12 +252,21 @@ class HandReviewer:
     def _hand_key(self, index: int, side: str) -> str:
         return f"{index + 1}:{side}" if len(self.start) == 2 else side
 
-    def _frame(self, image: Image.Image, tracks: list[Track]) -> dict[str, bool]:
+    def _frame(
+        self, image: Image.Image, tracks: list[Track], *, check_body: bool,
+    ) -> tuple[dict[str, bool], dict[int, tuple[str, ...]]]:
         bodies = self._bodies(image)
         assignments = _match_bodies(tracks, bodies)
         positions = [wrist for body in bodies for wrist in body.wrists.values()]
         for track, body in zip(tracks, assignments):
             track.update(body)
+        proportions = {}
+        if check_body:
+            for index, actor in enumerate(assignments):
+                if actor is not None:
+                    changed = measure_body_changes(self.start[index].measurements, actor.measurements)
+                    if changed is not None:
+                        proportions[index] = changed
         observations = {}
         for (index, side), reference in self.reference.items():
             actor = assignments[index]
@@ -249,14 +281,21 @@ class HandReviewer:
                 and not _expected_hand_behind_body(wrist, bodies)
             ):
                 observations[self._hand_key(index, side)] = detected
-        return observations
+        return observations, proportions
 
     def review(self, data: bytes) -> dict:
-        if not self.reference:
-            return HAND_REVIEW_NOT_CHECKED.copy()
+        return self.review_continuity(data)["hand_review"]
+
+    def review_continuity(self, data: bytes, *, check_body: bool = False) -> dict:
+        bodies = [index for index, body in enumerate(self.start) if len(body.measurements) >= 3] if check_body else []
+        reviews = {"hand_review": HAND_REVIEW_NOT_CHECKED.copy()}
+        if check_body:
+            reviews["body_review"] = {"status": "insufficient_reference"}
+        if not self.reference and not bodies:
+            return reviews
         ffmpeg = _ffmpeg_path()
         if not ffmpeg:
-            return HAND_REVIEW_UNAVAILABLE.copy()
+            return {name: {"status": "unavailable"} for name in reviews}
         with TemporaryDirectory(prefix="silver-hand-review-") as directory:
             root = Path(directory)
             source = root / "render.mp4"
@@ -269,13 +308,58 @@ class HandReviewer:
             ], check=True, capture_output=True, timeout=30)
             frames = sorted(root.glob("frame-*.jpg"))
             if not frames:
-                return HAND_REVIEW_UNAVAILABLE.copy()
+                return {name: {"status": "unavailable"} for name in reviews}
             tracks = [Track(body) for body in self.start]
-            samples = []
+            hands, proportions = [], []
             for frame in frames:
                 with Image.open(frame) as decoded:
-                    samples.append(self._frame(decoded.convert("RGB"), tracks))
-        return summarize_hand_review((self._hand_key(*key) for key in self.reference), samples)
+                    hand_frame, body_frame = self._frame(decoded.convert("RGB"), tracks, check_body=bool(bodies))
+                    hands.append(hand_frame)
+                    proportions.append(body_frame)
+        reviews["hand_review"] = summarize_hand_review((self._hand_key(*key) for key in self.reference), hands)
+        if bodies:
+            reviews["body_review"] = summarize_body_review(bodies, proportions)
+        return reviews
+
+
+def measure_body_changes(reference: dict[str, float], current: dict[str, float]) -> tuple[str, ...] | None:
+    """Use visible 3D segments and compare ratios so camera scale and pose are less influential."""
+    ratios = {name: current[name] / length for name, length in reference.items()
+              if length > 0.01 and current.get(name, 0.0) > 0.01}
+    if len(ratios) < 3:
+        return None
+    torso = [ratios[name] for name in ("shoulders", "hips", "left torso", "right torso") if name in ratios]
+    if len(torso) < 2:
+        return None
+    scale = median(torso)
+    return tuple(name for name, value in ratios.items() if not 1 / BODY_DRIFT_RATIO <= value / scale <= BODY_DRIFT_RATIO)
+
+
+def summarize_body_review(bodies: Iterable[int], frames: list[dict[int, tuple[str, ...]]]) -> dict:
+    indices = list(bodies)
+    coverage = []
+    for body in indices:
+        eligible = sum(body in frame for frame in frames)
+        coverage.append(eligible / max(1, len(frames)))
+    for index in range(len(frames) - 3):
+        window = frames[index:index + 4]
+        for body in indices:
+            shared = set(window[0].get(body, ())).intersection(*(item.get(body, ()) for item in window[1:]))
+            if shared:
+                return {"status": "possible_distortion", "body_parts": sorted(shared),
+                        "first_issue_seconds": index / REVIEW_FPS, "sampled_frames": len(frames)}
+    return {"status": "tracked" if len(frames) >= 4 and min(coverage, default=0) >= 0.65 else "inconclusive",
+            "sampled_frames": len(frames)}
+
+
+def body_review_message(review: dict) -> str:
+    return {
+        "possible_distortion": "Visible body proportions may have changed. Compare the take with the starting photo before using it.",
+        "inconclusive": "The person was not clear in enough frames to confirm body proportions.",
+        "insufficient_reference": "The starting photo did not show enough of the body to check its proportions.",
+        "unavailable": "Silver Screen could not check body proportions for this take.",
+        "tracked": "Visible body proportions stayed within the continuity check’s tolerance.",
+    }.get(review.get("status"), "")
 
 
 def summarize_hand_review(reference_sides: Iterable[str], samples: list[dict[str, bool]]) -> dict:

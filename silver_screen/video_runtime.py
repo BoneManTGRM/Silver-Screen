@@ -479,6 +479,14 @@ def choose_tgrm_repair(error: str, attempt: int) -> dict[str, Any]:
         strategy = "preserve_hand_anatomy"
         suffix = "Keep wrists and hands connected during the planned movement, with natural finger anatomy. Preserve intentional occlusion."
         seed_delta = 23
+    elif "face may have drifted" in lowered:
+        strategy = "preserve_face"
+        suffix = "Preserve the face shape, eyes, brows, nose, mouth, and distinctive details from the starting photo throughout this action."
+        seed_delta = 31
+    elif "body proportions may have changed" in lowered:
+        strategy = "preserve_body_proportions"
+        suffix = "Keep the subject’s build, body proportions, limbs, and wardrobe consistent with the starting photo. Use natural movement and avoid abrupt changes of perspective."
+        seed_delta = 37
     elif "timeout" in lowered or "timed out" in lowered:
         strategy = "retry_with_simplified_motion"
         suffix = "Use one clear camera move and one clear subject action."

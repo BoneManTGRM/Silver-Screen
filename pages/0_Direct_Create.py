@@ -37,12 +37,14 @@ from silver_screen.direct_generation import (
     finish_direct_clip,
     prepare_edit_reference,
     prepare_wan_reference,
+    preserve_reference_appearance,
     read_direct_output,
     submit_direct_generation,
     verify_direct_clip,
     verify_direct_output,
 )
-from silver_screen.hand_review import hand_review_message
+from silver_screen.face_review import face_review_message
+from silver_screen.hand_review import body_review_message, hand_review_message
 from silver_screen.modal_clip_archive import MODAL_RENDER_ID, RecentRender
 from silver_screen.modal_renderer import (
     ModalComfyUIClient, delete_modal_render, modal_configured, recent_modal_renders, remember_modal_render,
@@ -106,13 +108,23 @@ def load_recent_renders() -> None:
         st.session_state["recent_render_error"] = str(exc)
 
 
-def needs_hand_review(job: dict) -> bool:
-    return job["prediction"].get("hand_review", {}).get("status") == "possible_loss" and not job.get("hand_reviewed")
+def needs_reference_review(job: dict) -> bool:
+    if job.get("reference_reviewed"):
+        return False
+    prediction = job["prediction"]
+    hands = prediction.get("hand_review", {}).get("status")
+    face = prediction.get("face_review", {}).get("status")
+    body = prediction.get("body_review", {}).get("status")
+    return (
+        (hands == "possible_loss" and not job.get("hand_reviewed"))
+        or face in {"possible_drift", "inconclusive", "unavailable"}
+        or body in {"possible_distortion", "inconclusive", "unavailable"}
+    )
 
 
 def retain_film_shot(job: dict, film_shots: dict, data: bytes) -> None:
     number = job.get("shot_number")
-    if not number or needs_hand_review(job):
+    if not number or needs_reference_review(job):
         return
     existing_size = sum(len(clip) for key, clip in film_shots.items() if key != number)
     if existing_size + len(data) > FILM_LIMIT:
@@ -356,6 +368,8 @@ frame_size = None
 frame_format = AUTO_FRAME
 reference = None
 reference_error = None
+preserve_framing = True
+check_reference = False
 if is_image and use_comfyui and comfyui_ready("image_edit"):
     source_image = st.file_uploader("Image to edit (optional)", type=["png", "jpg", "jpeg", "webp"], key="direct-edit-image")
     if source_image is not None:
@@ -386,8 +400,10 @@ if reference_ready and not is_image:
         )
         if library_photos:
             reference_label = st.selectbox("Or use a saved cast photo", ["No photo", *library_photos])
-            if reference_label != "No photo":
+            if reference is None and reference_label != "No photo":
                 reference = library_photos[reference_label]
+            elif reference is not None:
+                reference_label = "Uploaded photo"
 wan_14b = False
 if use_modal and not is_image:
     if video_controls:
@@ -403,12 +419,22 @@ if video_controls:
         sizes = WAN_14B_VIDEO_SIZES if wan_14b else VIDEO_SIZES
         frame_format = st.selectbox(
             "Frame size", (AUTO_FRAME, *sizes),
-            help="Auto uses the format in your prompt or the starting photo’s proportions. Fixed sizes crop the photo to fill the frame.",
+            help="Auto uses the format in your prompt or the starting photo’s proportions.",
         )
         frame_size = sizes.get(frame_format)
         if reference is not None:
+            crop = st.checkbox("Crop the photo to fill the frame", disabled=frame_format == AUTO_FRAME)
+            preserve_framing = frame_format == AUTO_FRAME or not crop
+            if use_modal:
+                check_reference = st.checkbox(
+                    "Preserve face and body", value=True,
+                    help="Ask the model to preserve appearance and check the finished clip against the starting photo. "
+                         "The worker can try one more take when it detects a change.",
+                )
             try:
-                prepared_reference, frame_size = prepare_wan_reference(reference, frame_size, wan_14b=wan_14b)
+                prepared_reference, frame_size = prepare_wan_reference(
+                    reference, frame_size, wan_14b=wan_14b, preserve_framing=preserve_framing,
+                )
             except VideoGenerationError as exc:
                 reference_error = str(exc)
                 st.error(reference_error)
@@ -421,7 +447,9 @@ if video_controls:
                     )
                     if end_image is not None:
                         try:
-                            prepared_end, _ = prepare_wan_reference(end_image, frame_size, wan_14b=True)
+                            prepared_end, _ = prepare_wan_reference(
+                                end_image, frame_size, wan_14b=True, preserve_framing=preserve_framing,
+                            )
                         except VideoGenerationError as exc:
                             reference_error = f"Ending image. {exc}"
                             st.error(reference_error)
@@ -488,7 +516,10 @@ if generate and not active:
     model = IMAGE_MODEL if is_image else CLIP_MODEL
     started = monotonic()
     requested_size = None
+    render_prompt = prompt
     try:
+        if not prompt.strip():
+            raise VideoGenerationError("Enter a prompt before generating.")
         if reference_label in ("Co-star photo", "Both of you in one photo"):
             if not cast_permission:
                 raise VideoGenerationError("Confirm your co-star agreed to this use of their likeness.")
@@ -512,6 +543,8 @@ if generate and not active:
                         requested_size = IMAGE_SIZES[requested_format]
                         render_options["image_size"] = requested_size
                 if video_controls:
+                    if use_modal:
+                        requested_size = render_options["video_size"]
                     requested_duration = direct_prompt_seconds(prompt)
                     if requested_duration is not None:
                         if not 2 <= requested_duration <= maximum:
@@ -537,12 +570,16 @@ if generate and not active:
                     raise VideoGenerationError("The starting image could not be prepared.")
                 if use_modal:
                     render_options["save_image" if is_image else "save_clip"] = True
+                    if not is_image:
+                        render_options.update(check_face=check_reference, check_body=check_reference)
+                        if check_reference and image:
+                            render_prompt = preserve_reference_appearance(prompt)
                 if wan_14b:
                     render_options["wan_14b"] = True
                 if prepared_end is not None:
                     render_options["end_image"] = "data:image/jpeg;base64," + base64.b64encode(prepared_end).decode("ascii")
                 prediction = make_comfyui_client(kind=image_kind if is_image else workflow_kind).create_prediction(
-                    prompt, seed=seed, duration=duration, image=image, **render_options,
+                    render_prompt, seed=seed, duration=duration, image=image, **render_options,
                 )
             else:
                 prediction = submit_direct_generation(
@@ -552,7 +589,7 @@ if generate and not active:
         job = {
             "backend": backend, "model": model, "prediction": prediction,
             "started": started, "requested_seconds": duration,
-            "submitted_prompt": prompt,
+            "submitted_prompt": render_prompt,
         }
         if requested_size is not None:
             job["requested_size"] = requested_size
@@ -637,19 +674,22 @@ if job:
                 st.video(job["data"], format="video/mp4")
             if review := job["prediction"].get("hand_review"):
                 if message := hand_review_message(review):
-                    if review.get("status") == "possible_loss":
-                        st.warning(message)
-                        if needs_hand_review(job) and st.button("Use this take", key=f"hand-review-{prediction_id}"):
-                            job["hand_reviewed"] = True
-                            retain_film_shot(job, film_shots, job.get("finished_data", job["data"]))
-                            st.rerun()
-                    else:
-                        st.caption(message)
+                    (st.warning if review.get("status") == "possible_loss" else st.caption)(message)
+            if review := job["prediction"].get("face_review"):
+                if not http_preview and (message := face_review_message(review)):
+                    (st.warning if review.get("status") != "matched" else st.caption)(message)
+            if review := job["prediction"].get("body_review"):
+                if not http_preview and (message := body_review_message(review)):
+                    (st.warning if review.get("status") != "tracked" else st.caption)(message)
+            if needs_reference_review(job) and st.button("Use this take", key=f"reference-review-{prediction_id}"):
+                job["reference_reviewed"] = True
+                retain_film_shot(job, film_shots, job.get("finished_data", job["data"]))
+                st.rerun()
             if seconds := job.get("requested_seconds") or job.get("actual_seconds"):
                 elapsed = job.get("elapsed_seconds")
                 timing = f" · ready in {elapsed:.1f} seconds" if elapsed is not None else ""
                 st.caption(f"{seconds:g}-second clip{timing}")
-            seed = job["prediction"].get("hand_review", {}).get("selected_seed", job.get("seed"))
+            seed = (job["prediction"].get("face_review") or job["prediction"].get("hand_review") or {}).get("selected_seed", job.get("seed"))
             if seed is not None:
                 st.caption(f"Seed {seed}")
             if render_model := job.get("render_model"):
@@ -716,7 +756,7 @@ if job:
                     st.download_button(
                         "Download edited clip", job["finished_data"], f"{Path(filename).stem}-edited.mp4", "video/mp4",
                     )
-            if st.button("Add clip to custom film", disabled=needs_hand_review(job)):
+            if st.button("Add clip to custom film", disabled=needs_reference_review(job)):
                 clip = job.get("finished_data", job["data"])
                 clip_id = f"{job_backend}:{prediction_id}"
                 previous = custom_shots.get(clip_id)

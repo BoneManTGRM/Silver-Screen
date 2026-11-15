@@ -369,10 +369,14 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     writer_kind = brief.get("screenplayWriter")
     if result.get("status") == "complete" and writer_kind:
         from .direct_generation import finish_short_video
+        from .screenplay_writer import TRAILER_KINDS
 
         card = brief.get("adEndCard") or {}
         runtime = (result.get("options") or {}).get("targetRuntimeSeconds")
         filename = "advertisement.mp4" if writer_kind == "ad" else "movie.mp4"
+        if writer_kind in TRAILER_KINDS:
+            filename = "trailer.mp4"
+            card = {"brand": brief.get("title") or ""}
         source = (audio or {}).get("captioned_video_path") or (audio or {}).get("final_video_path")
         source = source or (result.get("media") or {}).get("final_video_path")
         if not source or not runtime:

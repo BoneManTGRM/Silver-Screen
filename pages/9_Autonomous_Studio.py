@@ -16,9 +16,9 @@ from silver_screen.autonomous_studio import (
     QUALITY_PROFILES, active_production, continue_autonomous_production,
     enqueue_production, prepare_autonomous_plan, start_autonomous_production,
 )
-from silver_screen.runtime import create_run_id, list_resumable_runs, load_run_manifest, list_runs
+from silver_screen.runtime import RUN_ID_PATTERN, create_run_id, list_resumable_runs, load_run_manifest, list_runs
 from silver_screen.science import GENRES, SCIENCE, TONES
-from silver_screen.screenplay_writer import SCREENPLAY_LENGTHS
+from silver_screen.screenplay_writer import PRODUCTION_LABELS, SCREENPLAY_LENGTHS, TRAILER_KINDS
 from silver_screen.video_runtime import load_video_queue
 from silver_screen.voice_providers import provider_capabilities
 
@@ -30,6 +30,7 @@ openai_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
 voice_caps = provider_capabilities()
 draft = st.session_state.get("screenplay-production")
 render_task = st.session_state.get("screenplay-render-task")
+production_id = st.query_params.get("production", "")
 
 if render_task and render_task[1].done():
     _, future = st.session_state.pop("screenplay-render-task")
@@ -42,6 +43,27 @@ if render_task and render_task[1].done():
         st.session_state.pop("screenplay-production-started", None)
         st.error(str(exc))
     render_task = None
+
+if production_id and not draft and not render_task and not st.session_state.get("autonomous_result"):
+    try:
+        if not RUN_ID_PATTERN.fullmatch(production_id):
+            raise ValueError("Invalid production link.")
+        if future := active_production(production_id):
+            render_task = (production_id, future)
+        else:
+            manifest = load_run_manifest(production_id)
+            if (manifest.get("brief") or {}).get("screenplayWriter") not in PRODUCTION_LABELS:
+                raise ValueError("This link is for a different studio workflow.")
+            if manifest.get("status") == "complete":
+                render_task = (production_id, enqueue_production(
+                    production_id, lambda: continue_autonomous_production(production_id),
+                ))
+            else:
+                st.info("This production has a saved checkpoint. Continue it below to check or finish the remaining shots.")
+    except (ValueError, OSError):
+        st.warning("This production could not be reopened. Check Saved productions below.")
+    if render_task:
+        st.session_state["screenplay-render-task"] = render_task
 
 
 @st.fragment(run_every=3)
@@ -69,9 +91,12 @@ def show_production_progress(run_id, future):
 
 if draft:
     is_ad = draft["kind"] == "ad"
+    label = PRODUCTION_LABELS[draft["kind"]].lower()
+    clip_duration = SCREENPLAY_LENGTHS[draft["seconds"]]
+    shot_count = draft["seconds"] // clip_duration
     started = st.session_state.get("screenplay-production-started") == draft["seed"] or bool(render_task)
     st.header(draft["title"])
-    st.caption(f"{draft['seconds']} seconds planned · five clips · {video_backend()} video")
+    st.caption(f"{draft['seconds']} seconds planned · {shot_count} clips · {video_backend()} video")
     st.text(draft["premise"])
     if product := draft.get("adProduct"):
         st.text(" · ".join(part for part in (product["name"], product["appearance"]) if part))
@@ -97,9 +122,12 @@ if draft:
                 "I have permission to use this product photo."
                 if is_ad else "Everyone shown in the photo agreed to this scene and its audience."
             )
-            call_budget = st.number_input("Maximum video requests", min_value=5, max_value=15, value=5)
+            call_budget = st.number_input(
+                "Maximum video requests", min_value=shot_count, max_value=shot_count * 3, value=shot_count,
+                key=f"writer-video-requests-{shot_count}", help="Allow extra requests if you want failed shots to be retried.",
+            )
             render_draft = st.form_submit_button(
-                "Render advertisement" if is_ad else "Render movie",
+                f"Render {label}",
                 type="primary", disabled=not video_ready,
             )
     if not video_ready:
@@ -118,11 +146,11 @@ if draft:
             st.error("This photo could not be opened. Choose a readable JPEG, PNG, or WebP photo.")
         else:
             try:
-                with st.spinner("Preparing the five-shot plan…"):
+                with st.spinner(f"Preparing {shot_count} shots…"):
                     plan = prepare_autonomous_plan(
                         draft, target_runtime_seconds=draft["seconds"],
-                        clip_duration_seconds=SCREENPLAY_LENGTHS[draft["seconds"]], max_shots=5,
-                        config={"qualityProfile": "cinematic", "continuous": True, "batchSize": 5,
+                        clip_duration_seconds=clip_duration, max_shots=shot_count,
+                        config={"qualityProfile": "cinematic", "continuous": True, "batchSize": shot_count,
                                 "maxProviderCalls": int(call_budget), "semanticQa": False,
                                 "transitionMode": "off"},
                     )
@@ -136,13 +164,14 @@ if draft:
                 st.session_state["screenplay-render-task"] = (run_id, future)
                 st.session_state["screenplay-production-started"] = draft["seed"]
                 st.session_state.pop("autonomous_result", None)
+                st.query_params["production"] = run_id
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 else:
     st.caption(SCIENCE["credit"])
     st.write("Plan a film, render the approved shots, and continue from a saved checkpoint.")
-    st.page_link("pages/0_Write_a_Movie.py", label="Write a movie or advertisement from one idea")
+    st.page_link("pages/0_Write_a_Movie.py", label="Write a movie, advertisement, or trailer")
 
 with st.sidebar:
     make_clicked = False
@@ -199,7 +228,12 @@ with st.sidebar:
         and (item.get("brief") or {}).get("screenplayWriter")
     )
     run_map = {f"{item.get('runId')} | {item.get('status')} | {item.get('title') or (item.get('brief') or {}).get('title') or 'Untitled'}": item for item in jobs}
-    selected_run = st.selectbox("Saved autonomous checkpoint", list(run_map) or ["No autonomous checkpoints"], disabled=not run_map)
+    run_labels = list(run_map)
+    preferred_run = next((index for index, item in enumerate(jobs) if item.get("runId") == production_id), 0)
+    selected_run = st.selectbox(
+        "Saved autonomous checkpoint", run_labels or ["No autonomous checkpoints"],
+        index=min(preferred_run, max(0, len(run_labels) - 1)), disabled=not run_map,
+    )
 
 
 def _progress(stage: str, percent: int, message: str) -> None:
@@ -277,6 +311,7 @@ if continue_clicked:
             st.session_state["screenplay-render-task"] = (run_id, future)
             st.session_state.pop("autonomous_plan", None)
             st.session_state.pop("autonomous_result", None)
+            st.query_params["production"] = run_id
             st.rerun()
         with st.spinner("Continuing the durable production and rerunning finishing..."):
             st.session_state["autonomous_result"] = continue_autonomous_production(
@@ -292,7 +327,7 @@ if output:
     media, metrics = result.get("media") or {}, (result.get("media") or {}).get("metrics") or {}
     status = str(result.get("status") or (output.get("job") or {}).get("status") or "unknown")
     writer_kind = (result.get("brief") or {}).get("screenplayWriter")
-    st.header("Advertisement" if writer_kind == "ad" else "Production result")
+    st.header(PRODUCTION_LABELS.get(writer_kind, "Production result"))
     short_path = ((output.get("job") or {}).get("artifacts") or {}).get("shortVideo")
     short_video = Path(short_path) if short_path and Path(short_path).is_file() else None
     audio = output.get("audio") or {}
@@ -337,6 +372,8 @@ if output:
             download_label = "Download preview"
         elif writer_kind == "ad" and short_video:
             download_label = "Download advertisement"
+        elif writer_kind in TRAILER_KINDS and short_video:
+            download_label = "Download trailer"
         elif writer_kind and not short_video:
             download_label = "Download assembled footage"
         else:

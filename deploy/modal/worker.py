@@ -14,7 +14,8 @@ import modal
 
 from silver_screen.ai_video import PredictionPending, VideoGenerationError
 from silver_screen.comfyui import WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
-from silver_screen.hand_review import HAND_REVIEW_UNAVAILABLE, MODEL_DIR, HandReviewer
+from silver_screen.face_review import COMPARATOR_FILE, DETECTOR_FILE, FACE_REVIEW_UNAVAILABLE, FaceReviewer
+from silver_screen.hand_review import BODY_REVIEW_UNAVAILABLE, HAND_REVIEW_UNAVAILABLE, MODEL_DIR, HandReviewer
 from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip, save_completed_image
 
 COMFY = Path('/opt/ComfyUI')
@@ -57,15 +58,21 @@ HAND_REVIEW_MODELS = {
     'pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task':
         '5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1',
 }
+OPENCV_MODELS = 'https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models'
+FACE_REVIEW_MODELS = {
+    f'face_detection_yunet/{DETECTOR_FILE}': 'ebafce4e3c118d6554634be5c27ab333b4c047a9a8c3faf1d7cf93101c22f0f0',
+    f'face_recognition_sface/{COMPARATOR_FILE}': '0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79',
+}
 
 
-def _with_hand_review(base_image):
+def _with_reference_review(base_image):
     return base_image.pip_install('mediapipe==0.10.32', 'opencv-contrib-python==5.0.0.93').run_commands(
         f'mkdir -p {MODEL_DIR}',
         *[
-            f'curl -fL --retry 3 --connect-timeout 15 -o {MODEL_DIR / Path(path).name} {MEDIAPIPE_MODELS}/{path}'
+            f'curl -fL --retry 3 --connect-timeout 15 -o {MODEL_DIR / Path(path).name} {origin}/{path}'
             f' && echo "{digest}  {MODEL_DIR / Path(path).name}" | sha256sum -c -'
-            for path, digest in HAND_REVIEW_MODELS.items()
+            for origin, models in ((MEDIAPIPE_MODELS, HAND_REVIEW_MODELS), (OPENCV_MODELS, FACE_REVIEW_MODELS))
+            for path, digest in models.items()
         ],
     )
 
@@ -101,8 +108,8 @@ image_editor = image.run_commands(*[
          'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors'),
     )
 ])
-image = _with_hand_review(image)
-wan_14b_image = _with_hand_review(wan_14b_image)
+image = _with_reference_review(image)
+wan_14b_image = _with_reference_review(wan_14b_image)
 if modal.is_local():
     workflows = Path(__file__).resolve().parents[2] / 'deploy/runpod/workflows'
     image = image.add_local_python_source('silver_screen').add_local_dir(
@@ -230,6 +237,35 @@ def _review_hands(data: bytes, reference: str) -> dict:
         return HAND_REVIEW_UNAVAILABLE.copy()
 
 
+def _review_body_and_hands(data: bytes, reference: str) -> dict:
+    try:
+        photo = base64.b64decode(reference.partition(',')[2], validate=True)
+        with ExitStack() as resources:
+            return HandReviewer(MODEL_DIR, photo, resources).review_continuity(data, check_body=True)
+    except Exception:
+        logging.warning('Could not check body or hand continuity for this clip.', exc_info=True)
+        return {'body_review': BODY_REVIEW_UNAVAILABLE.copy(), 'hand_review': HAND_REVIEW_UNAVAILABLE.copy()}
+
+
+def _review_faces(data: bytes, reference: str) -> dict:
+    try:
+        photo = base64.b64decode(reference.partition(',')[2], validate=True)
+        return FaceReviewer(MODEL_DIR, photo).review(data)
+    except Exception:
+        logging.warning('Could not check face continuity for this clip.', exc_info=True)
+        return FACE_REVIEW_UNAVAILABLE.copy()
+
+
+def _better_reference_take(before: dict, after: dict) -> bool:
+    bad = {'hand_review': 'possible_loss', 'face_review': 'possible_drift', 'body_review': 'possible_distortion'}
+    good = {'hand_review': 'tracked', 'face_review': 'matched', 'body_review': 'tracked'}
+    flagged = [name for name, status in bad.items() if before.get(name, {}).get('status') == status]
+    required = [name for name, status in good.items() if name in flagged or before.get(name, {}).get('status') == status]
+    if not flagged or any(after.get(name, {}).get('status') != good[name] for name in required):
+        return False
+    return all(after.get(name, {}).get('status') != status for name, status in bad.items())
+
+
 def _render_take(client, prompt: str, settings: dict, *, verify_fps: int | None) -> bytes:
     from silver_screen.direct_generation import verify_direct_clip, verify_direct_output
 
@@ -257,11 +293,26 @@ def _render(
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     save_image = settings.pop('save_image', False) and kind in {'image', 'image_edit'}
     check_hands = settings.pop('check_hands', False) and kind == 'video'
+    check_face = settings.pop('check_face', False) and kind == 'video'
+    check_body = settings.pop('check_body', False) and kind == 'video'
+    face_reference = settings.pop('face_reference', None) or settings.get('image')
     allow_retake = settings.pop('allow_retake', True) and allow_retake
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
     reference = settings.get('image') if save_clip or check_hands else None
-    hand_review = None
+    face_reference = face_reference if check_face else None
+    reviews = {}
+
+    def review(data: bytes) -> dict:
+        result = {}
+        if face_reference and check_body:
+            result.update(_review_body_and_hands(data, face_reference))
+        elif reference:
+            result['hand_review'] = _review_hands(data, reference)
+        if face_reference:
+            result['face_review'] = _review_faces(data, face_reference)
+        return result
+
     reference_workflow = 'wan-reference-14b.json' if wan_14b else 'wan-reference.json'
     video_workflow = 'wan-text-14b.json' if wan_14b and not settings.get('image') else 'wan-video.json'
     fps = WAN_14B_FPS if wan_14b else 24
@@ -297,24 +348,26 @@ def _render(
             if wan_14b:
                 client.video_sizes = WAN_14B_VIDEO_SIZES
                 client.timeout_seconds = min(2400, timeout - 150)
-            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands else None)
-            if reference:
-                hand_review = _review_hands(data, reference)
-                elapsed = time.monotonic() - started
-                remaining = timeout - elapsed - RETAKE_RESERVE
-                if save_clip and allow_retake and hand_review['status'] == 'possible_loss' and elapsed < remaining:
-                    # Retry once with a different latent seed. Keep the first take unless the second tracks.
-                    client.timeout_seconds = int(remaining)
-                    hand_review['retake_attempted'] = True
-                    try:
-                        repair = dict(settings, seed=(int(settings.get('seed', 0)) + 1) % (2**53))
-                        alternate = _render_take(client, prompt, repair, verify_fps=fps)
-                        alternate_review = _review_hands(alternate, reference)
-                        if alternate_review['status'] == 'tracked':
-                            data, hand_review = alternate, alternate_review
-                            hand_review.update(selected_seed=repair['seed'], retake_attempted=True)
-                    except (VideoGenerationError, OSError, subprocess.SubprocessError):
-                        logging.warning('A hand-continuity retake did not complete.', exc_info=True)
+            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands or check_face else None)
+            reviews = review(data)
+            elapsed = time.monotonic() - started
+            remaining = timeout - elapsed - RETAKE_RESERVE
+            flagged = any(item['status'] in {'possible_loss', 'possible_drift', 'possible_distortion'}
+                          for item in reviews.values())
+            if save_clip and allow_retake and flagged and elapsed < remaining:
+                client.timeout_seconds = int(remaining)
+                for item in reviews.values():
+                    item['retake_attempted'] = True
+                try:
+                    repair = dict(settings, seed=(int(settings.get('seed', 0)) + 1) % (2**53))
+                    alternate = _render_take(client, prompt, repair, verify_fps=fps)
+                    alternate_reviews = review(alternate)
+                    if _better_reference_take(reviews, alternate_reviews):
+                        data, reviews = alternate, alternate_reviews
+                        for item in reviews.values():
+                            item.update(selected_seed=repair['seed'], retake_attempted=True)
+                except (VideoGenerationError, OSError, subprocess.SubprocessError):
+                    logging.warning('A reference-continuity retake did not complete.', exc_info=True)
         except PredictionPending as exc:
             raise VideoGenerationError('The GPU render reached its time limit. Try a shorter clip or a smaller frame size.') from exc
         finally:
@@ -325,9 +378,7 @@ def _render(
                 process.kill()
                 process.wait()
     if save_clip or save_image:
-        result = {'data': data}
-        if hand_review is not None:
-            result['hand_review'] = hand_review
+        result = {'data': data, **reviews}
         try:
             render_id = modal.current_function_call_id() or ''
             if save_image:
@@ -336,9 +387,9 @@ def _render(
                 verify_direct_output(data, image=True)
                 save_completed_image(clips_volume, CLIPS_MOUNT, render_id, data)
             else:
-                save_completed_clip(clips_volume, CLIPS_MOUNT, render_id, data, hand_review=hand_review)
+                save_completed_clip(clips_volume, CLIPS_MOUNT, render_id, data, **reviews)
         except (modal.exception.Error, OSError, RuntimeError, ValueError):
             logging.exception('Could not store a completed Silver Screen render.')
             return dict(result, archive_failed=True)
         return dict(result, archived=True)
-    return {'data': data, 'hand_review': hand_review} if hand_review is not None else data
+    return {'data': data, **reviews} if reviews else data

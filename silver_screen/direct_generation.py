@@ -125,6 +125,14 @@ def prepare_edit_reference(source: Path | BinaryIO) -> bytes:
     return _reference_jpeg(photo)
 
 
+def preserve_reference_appearance(prompt: str) -> str:
+    return (
+        f"{prompt}\n\nKeep the appearance of the people in the starting image throughout the shot. "
+        "Preserve facial features, body proportions, hairstyle, clothing, and accessories "
+        "while performing the requested motion and camera direction."
+    )
+
+
 def submit_direct_generation(
     client: ReplicateVideoClient,
     prompt: str,

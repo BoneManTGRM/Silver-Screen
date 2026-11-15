@@ -479,8 +479,8 @@ def run_pipeline(
         )
         repaired_state = tgrm_result.get("state") or film
         _timed_stage(timings, "repairSeconds", started)
-        if normalized.get("screenplayWriter") == "ad":
-            repaired_state["screenplayWriter"] = "ad"
+        if writer_kind := normalized.get("screenplayWriter"):
+            repaired_state["screenplayWriter"] = writer_kind
 
         result: dict[str, Any] = {
             "status": "running",
@@ -642,9 +642,10 @@ def resume_video_run(
         raise PipelineError(
             "The run has no persisted film state", run_id=run_id
         )
-    is_ad = (result.get("brief") or {}).get("screenplayWriter") == "ad"
-    if is_ad:
-        state["screenplayWriter"] = "ad"
+    writer_kind = (result.get("brief") or {}).get("screenplayWriter")
+    is_ad = writer_kind == "ad"
+    if writer_kind:
+        state["screenplayWriter"] = writer_kind
     started = time.perf_counter()
     workspace.update(
         status="running",

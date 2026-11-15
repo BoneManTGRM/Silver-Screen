@@ -574,12 +574,14 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     app_name, function, kind, prompt, settings = submissions[0]
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
-    assert prompt == "The runner lifts both hands."
+    assert prompt.startswith("The runner lifts both hands.\n\n")
+    assert "Preserve facial features, body proportions" in prompt
     assert settings["negative_prompt"] == "camera shake"
     assert settings["seed"] == 17
     assert settings["allow_retake"] is False
     assert settings["video_size"] == (720, 1280)
     assert settings["save_clip"] is True
+    assert settings["check_face"] and settings["check_body"]
     assert settings["duration"] == 3
     assert settings["steps"] == 28
     assert settings["image"].startswith("data:image/jpeg;base64,")
@@ -930,7 +932,7 @@ def test_two_performers_keep_separate_tracks_and_report_the_affected_wrist(monke
     first, second = actor(43), actor(154)
     monkeypatch.setattr(reviewer, "_bodies", lambda frame: [second, first])
     monkeypatch.setattr(reviewer, "_has_hand", lambda frame, wrist: wrist is first.wrists["left"])
-    observations = reviewer._frame(Image.new("RGB", (300, 200)), tracks)
+    observations, _ = reviewer._frame(Image.new("RGB", (300, 200)), tracks, check_body=False)
     assert observations == {"1:left": True, "2:left": False}
     assert tracks[0].body is first and tracks[1].body is second
     intact = {"1:left": True, "2:left": True}
@@ -940,30 +942,45 @@ def test_two_performers_keep_separate_tracks_and_report_the_affected_wrist(monke
     assert "left hand of the person starting on the right" in hand_review_message(result)
     # When the missing landmarks are near a thigh, their absence is ambiguous.
     second = Body(second.center, second.scale, second.wrists, (((175, 60), (191, 120), 15),))
-    assert reviewer._frame(Image.new("RGB", (300, 200)), tracks) == {"1:left": True}
+    assert reviewer._frame(Image.new("RGB", (300, 200)), tracks, check_body=False)[0] == {"1:left": True}
 
 
 def test_hand_review_uses_visible_detail_at_frame_edge_without_flagging_a_crop(monkeypatch):
     from silver_screen.hand_review import HandReviewer, Track
 
     image = Image.new("RGB", (300, 200))
-    landmarks = [SimpleNamespace(x=0.5, y=0.5, visibility=1, presence=1) for _ in range(33)]
+    landmarks = [SimpleNamespace(x=0.5, y=0.5, z=0.0, visibility=1, presence=1) for _ in range(33)]
     landmarks[11].x, landmarks[12].x, landmarks[13].x = 0.30, 0.45, 0.17
     landmarks[13].y = 0.64
     landmarks[15].x, landmarks[15].y = 0.06, 0.83
     reviewer = HandReviewer.__new__(HandReviewer)
-    body = reviewer._body(image.size, landmarks)
+    body = reviewer._body(image.size, landmarks, landmarks)
     wrist = body.wrists["left"]
     assert not wrist.has_full_crop(image.size)
     reviewer.start = [body]
     reviewer.reference = {(0, "left"): wrist}
     monkeypatch.setattr(reviewer, "_bodies", lambda frame: [body])
     monkeypatch.setattr(reviewer, "_has_hand", lambda frame, target: True)
-    assert reviewer._frame(image, [Track(body)]) == {"left": True}
+    assert reviewer._frame(image, [Track(body)], check_body=False)[0] == {"left": True}
     monkeypatch.setattr(reviewer, "_has_hand", lambda frame, target: False)
-    assert reviewer._frame(image, [Track(body)]) == {}
+    assert reviewer._frame(image, [Track(body)], check_body=False)[0] == {}
     landmarks[15].x = -0.01
-    assert "left" not in reviewer._body(image.size, landmarks).wrists
+    assert "left" not in reviewer._body(image.size, landmarks, landmarks).wrists
+
+
+def test_body_review_flags_sustained_distortion_without_treating_uniform_scale_as_change():
+    from silver_screen.hand_review import measure_body_changes, summarize_body_review
+
+    original = {"shoulders": 0.34, "hips": 0.32, "left torso": 0.51, "left forearm": 0.25}
+    uniform = {name: length * 1.5 for name, length in original.items()}
+    assert measure_body_changes(original, uniform) == ()
+    assert measure_body_changes(original, {"left forearm": 0.8}) is None
+    changed = measure_body_changes(original, {**uniform, "left forearm": 0.61})
+    assert changed == ("left forearm",)
+    assert summarize_body_review([0], [{0: ()}, {0: changed}, {}, {0: ()}, {0: ()}])["status"] == "tracked"
+    result = summarize_body_review([0], [{0: ()}] * 4 + [{0: changed}] * 4)
+    assert result["status"] == "possible_distortion"
+    assert result["first_issue_seconds"] == 0.5
 
 
 def test_film_queue_excludes_a_flagged_take_and_accepts_the_retry(comfy_server, tmp_path, monkeypatch):

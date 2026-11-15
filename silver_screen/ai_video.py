@@ -851,6 +851,10 @@ def _process_prediction(
         directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
         if directive:
             prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
+    if queue.get("referenceMode") == "cast" and image:
+        from .direct_generation import preserve_reference_appearance
+
+        prompt = preserve_reference_appearance(prompt)
     attempt_seed = (
         int(shot.get("seed", 0) or 0)
         + int((repair or {}).get("seedDelta", 0) or 0)
@@ -876,6 +880,10 @@ def _process_prediction(
 
         if isinstance(client, ModalComfyUIClient):
             settings["check_hands"] = True
+            settings["check_face"] = True
+            settings["check_body"] = True
+            if initial_image and initial_image != image:
+                settings["face_reference"] = initial_image
     if queue.get("referenceMode") == "product":
         settings["generate_audio"] = False
         if queue.get("backend") == "comfyui":
@@ -888,6 +896,17 @@ def _process_prediction(
                     "duplicate products, jump cuts, unrelated objects, camera shake, "
                     "unreadable lettering, subtitles, watermarks, on-screen captions"
                 )
+    if queue.get("writtenProduction") and queue.get("backend") == "comfyui":
+        from .comfyui import ComfyUIClient, video_controls_ready
+
+        if isinstance(client, ComfyUIClient) and video_controls_ready("reference" if image else "video"):
+            if image:
+                from .direct_generation import prepare_wan_reference
+
+                photo = io.BytesIO(base64.b64decode(image.split(",", 1)[1], validate=True))
+                prepared, size = prepare_wan_reference(photo, (832, 480), preserve_framing=True)
+                settings["image"] = "data:image/jpeg;base64," + base64.b64encode(prepared).decode("ascii")
+                settings["video_size"] = size
     prediction = client.create_prediction(prompt, **settings)
     shot["status"] = "submitted"
     _update_prediction_in_queue(queue, root, shot, prediction)
@@ -933,34 +952,44 @@ def _verify_prediction_output(
     shot: dict[str, Any],
     config: VideoProductionConfig,
 ) -> None:
-    from .hand_review import hand_review_message
+    from .face_review import face_review_message
+    from .hand_review import body_review_message, hand_review_message
 
     clip_path = root / "clips" / f"{shot.get('id')}.mp4"
     client.download_output(prediction, clip_path)
     verification = verify_mp4(clip_path, expected_duration=config.clip_duration_seconds)
-    shot.pop("handReview", None)
-    review = prediction.get("hand_review")
-    if isinstance(review, dict):
-        shot["handReview"] = review
-        if review.get("status") == "possible_loss":
-            rejected = clip_path.parent / "review" / f"{clip_path.stem}-attempt-{int(shot.get('attempts') or 1):02d}.mp4"
-            rejected.parent.mkdir(exist_ok=True)
-            clip_path.replace(rejected)
-            shot["handReviewCandidate"] = _store_relative(root, rejected)
-            raise VideoGenerationError(hand_review_message(review))
+    reviews = (
+        ("face_review", "faceReview", "possible_drift", face_review_message),
+        ("body_review", "bodyReview", "possible_distortion", body_review_message),
+        ("hand_review", "handReview", "possible_loss", hand_review_message),
+    )
+    for key, field, flagged, message in reviews:
+        shot.pop(field, None)
+        review = prediction.get(key)
+        if isinstance(review, dict):
+            shot[field] = review
+            inconclusive = queue.get("referenceMode") == "cast" and key == "face_review" and review.get("status") in {
+                "inconclusive", "no_reference_face", "unavailable",
+            }
+            if review.get("status") == flagged or inconclusive:
+                rejected = clip_path.parent / "review" / f"{clip_path.stem}-attempt-{int(shot.get('attempts') or 1):02d}.mp4"
+                rejected.parent.mkdir(exist_ok=True)
+                clip_path.replace(rejected)
+                shot[f"{field}Candidate"] = _store_relative(root, rejected)
+                raise VideoGenerationError(message(review))
     duration = verification.get("durationSeconds")
-    if queue.get("referenceMode") == "product":
-        if not duration or not verification.get("width") or not verification.get("height"):
-            raise VideoGenerationError("The advertisement shot does not have a readable video track.")
-        expected_frames = config.clip_duration_seconds * 24
-        if duration < (expected_frames - 1) / 24 - 0.001:
-            raise VideoGenerationError(
-                f"Advertisement shot is {duration:.2f}s. It needs {config.clip_duration_seconds}s."
-            )
-        if round(duration * 24) != expected_frames:
-            # Normalize Wan's boundary frame to the planned edit duration.
-            from .direct_generation import finish_short_video
+    if queue.get("writtenProduction") or queue.get("referenceMode") == "product":
+        from .direct_generation import _verify_render_motion, finish_short_video
 
+        fps = verification.get("frameRate")
+        duration = verification.get("videoDurationSeconds") or duration
+        if not duration or not fps or not verification.get("width") or not verification.get("height"):
+            raise VideoGenerationError("The shot does not have a readable video track.")
+        expected_seconds = config.clip_duration_seconds
+        if duration + 1 / fps + 0.001 < expected_seconds:
+            raise VideoGenerationError(f"The shot is {duration:.2f}s. It needs {expected_seconds}s.")
+        _verify_render_motion(clip_path, duration)
+        if abs(duration - expected_seconds) >= 0.5 / fps:
             finish_short_video(clip_path, clip_path, seconds=config.clip_duration_seconds)
             verification = verify_mp4(clip_path)
             duration = verification["durationSeconds"]
@@ -1059,6 +1088,7 @@ def generate_ai_video(
     backend = str(saved_queue.get("backend") or "replicate") if saved_queue else video_backend()
     initial_image_data = image_to_data_url(initial_image)
     is_ad = state.get("screenplayWriter") == "ad"
+    written = bool(state.get("screenplayWriter"))
     if is_ad:
         config = replace(config, use_continuity_frames=False)
         reference = root / "ad-product-reference.txt"
@@ -1069,6 +1099,17 @@ def generate_ai_video(
                 atomic_write_text(reference, initial_image_data)
             elif reference.read_text(encoding="ascii") != initial_image_data:
                 raise VideoGenerationError("Start a new advertisement to use a different product photo.")
+        elif reference.is_file():
+            initial_image_data = reference.read_text(encoding="ascii")
+    elif written:
+        reference = root / "cast-reference.txt"
+        if initial_image is not None and not initial_image_data:
+            raise VideoGenerationError("The lead photo could not be prepared.")
+        if initial_image_data:
+            if not reference.exists():
+                atomic_write_text(reference, initial_image_data)
+            elif reference.read_text(encoding="ascii") != initial_image_data:
+                raise VideoGenerationError("Start a new production to use a different lead photo.")
         elif reference.is_file():
             initial_image_data = reference.read_text(encoding="ascii")
     if backend == "comfyui":
@@ -1084,6 +1125,13 @@ def generate_ai_video(
     queue = _ensure_queue(state, root, config, queue=saved_queue, backend=backend)
     if is_ad:
         queue["referenceMode"] = "product"
+    elif written and initial_image_data and backend == "comfyui":
+        from .modal_renderer import ModalComfyUIClient
+
+        if isinstance(client, ModalComfyUIClient):
+            queue["referenceMode"] = "cast"
+    if written:
+        queue["writtenProduction"] = True
     _reconcile_verified_files(queue, root)
     update_video_metrics(queue)
     save_video_queue(root, queue)

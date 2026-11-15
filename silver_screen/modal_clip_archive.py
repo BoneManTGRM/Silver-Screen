@@ -54,10 +54,17 @@ def _write_file(directory: Path, destination: Path, data: bytes) -> None:
             staged.unlink(missing_ok=True)
 
 
-def save_completed_clip(volume: Any, directory: Path, render_id: str, data: bytes, *, hand_review: dict | None = None) -> None:
+def save_completed_clip(
+    volume: Any, directory: Path, render_id: str, data: bytes, *,
+    hand_review: dict | None = None, face_review: dict | None = None, body_review: dict | None = None,
+) -> None:
     destination = directory / clip_filename(render_id)
-    if hand_review is not None:
-        _write_file(directory, destination.with_suffix(".json"), json.dumps(hand_review).encode())
+    reviews = (
+        {"hand_review": hand_review, "face_review": face_review, "body_review": body_review}
+        if face_review or body_review else hand_review
+    )
+    if reviews:
+        _write_file(directory, destination.with_suffix(".json"), json.dumps(reviews).encode())
     _write_file(directory, destination, data)
     volume.commit()
 
@@ -68,18 +75,22 @@ def save_completed_image(volume: Any, directory: Path, render_id: str, data: byt
     volume.commit()
 
 
-def read_saved_hand_review(volume: Any, render_id: str) -> dict | None:
+def read_saved_reviews(volume: Any, render_id: str) -> dict:
     filename = Path(clip_filename(render_id)).with_suffix(".json").name
     metadata = bytearray()
     try:
         for chunk in volume.read_file(filename):
             metadata.extend(chunk)
             if len(metadata) > MAX_REVIEW_BYTES:
-                return None
+                return {}
         data = json.loads(metadata)
     except (FileNotFoundError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if isinstance(data.get("status"), str):
+        return {"hand_review": data}  # Legacy clips stored only the hand review.
+    return {key: data[key] for key in ("hand_review", "face_review", "body_review") if isinstance(data.get(key), dict)}
 
 
 def _read_media(volume: Any, filename: str) -> bytes:

@@ -15,7 +15,7 @@ from silver_screen.autonomous_studio import (
     prepare_autonomous_plan,
     start_autonomous_production,
 )
-from silver_screen.screenplay_writer import SCREENPLAY_LENGTHS, screenplay_draft
+from silver_screen.screenplay_writer import SCREENPLAY_LENGTHS, screenplay_draft, screenplay_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,14 @@ def _draft(seconds: int) -> dict:
         "A low close-up follows the white sole of the shoe through a turn.",
         "The camera pushes closer as the runner places the shoe on the bench.",
     ]
+    if seconds == 60:
+        actions[4:4] = [
+            "A runner in the teal shoe carefully steps over a shallow puddle.",
+            "The camera tilts up as the shoe pushes against a low ramp.",
+            "The runner lifts one foot to wipe dust from the white sole.",
+            "The camera pans past the matching laces as both feet come to rest.",
+            "Sunlight moves across the mesh as the runner sets the shoe upright.",
+        ]
     return screenplay_draft(
         {
             "title": "First Light", "logline": "A runner starts before dawn.",
@@ -135,6 +143,16 @@ def test_render_button_finishes_all_five_advertisement_shots(tmp_path, configure
     result = app.session_state["autonomous_result"]
     _assert_finished(result, 20, renderer, 5)
     assert all(settings["duration"] == 4 and not settings["image"] for _, settings in renderer.calls)
+    before = len(renderer.calls)
+    reopened = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/9_Autonomous_Studio.py")
+    reopened.query_params["production"] = result["runId"]
+    reopened.run(timeout=15)
+    _, saved = reopened.session_state["screenplay-render-task"]
+    saved.result(timeout=90)
+    reopened.run(timeout=15)
+    assert not reopened.exception
+    assert [button.proto.label for button in reopened.get("download_button")] == ["Download advertisement"]
+    assert len(renderer.calls) == before
 
 
 def test_resumed_advertisement_rejects_cut_and_keeps_same_product_photo(tmp_path, configure_studio):
@@ -164,3 +182,64 @@ def test_resumed_advertisement_rejects_cut_and_keeps_same_product_photo(tmp_path
     assert photo.startswith("data:image/jpeg;base64,")
     assert all(settings["image"] == photo and settings["duration"] == 6 for _, settings in renderer.calls)
     assert len(list(Path(first["result"]["run"]["workspace"]).glob("media/visual_quality/rejected/*/*.mp4"))) == 1
+
+
+def test_sixty_second_ad_has_ten_distinct_timed_prompts(configure_studio):
+    draft = _draft(60)
+    plan = prepare_autonomous_plan(
+        draft, target_runtime_seconds=60, clip_duration_seconds=6, max_shots=10,
+        config={"maxProviderCalls": 10, "transitionMode": "off", "semanticQa": False},
+    )
+    assert plan["executionPlan"]["plannedShots"] == 10
+    assert plan["renderPlan"]["plannedRuntimeSeconds"] == 60
+    assert len(set(draft["shotDirection"]["shotPromptOverrides"].values())) == 10
+    assert draft["authoredScript"].endswith("NARRATOR: Find your stride.")
+
+
+@pytest.mark.parametrize("kind,seconds", [("movie_trailer", 30), ("series_trailer", 60)])
+def test_trailer_script_to_verified_export(tmp_path, configure_studio, kind, seconds):
+    count = seconds // 6
+    request = screenplay_request("A pilot finds a city inside a storm.", "Vale", seconds, 77, kind=kind)
+    scenes = request["response_format"]["json_schema"]["schema"]["properties"]["scenes"]
+    assert (scenes["minItems"], scenes["maxItems"]) == (count, count)
+    locations = ["mountain", "bridge", "harbor", "cockpit", "forest", "hangar", "desert", "tower", "station", "river"]
+    draft = screenplay_draft(
+        {
+            "title": "Storm City", "logline": "A pilot finds a city inside a storm.",
+            "genre": "scifi", "tone": "cinematic",
+            "lead": {"name": "Vale" if kind == "movie_trailer" else "", "role": "Pilot", "appearance": "Gray flight jacket"},
+            "support": {"name": "Robyn", "role": "Dispatcher", "appearance": "Blue wool coat"},
+            "scenes": [
+                {"heading": f"EXT. {location.upper()} - NIGHT", "speaker": "none", "line": "",
+                 "action": action} for location, action in zip(locations, [
+                    "Vale hooks a line to a steel rail while fog rolls over the mountain.",
+                    "From beneath the bridge, a flash briefly lights three windows in the cloud.",
+                    "A rocking freighter cuts its engine as ripples turn toward the deserted harbor.",
+                    "Robyn lifts a microphone as a pulse passes through the instrument panel behind Vale.",
+                    "A distant pulse bends the pine trees midway down the ridge and the forest darkens.",
+                    "Vale crosses the empty hangar carrying a dented flight recorder with a red light.",
+                    "A wide pan follows a moving wall of dust across abandoned tracks in the desert.",
+                    "A rotating beam exposes hanging cables above a crowded stairwell inside the tower.",
+                    "The swing of a clock hand reveals a row of empty chairs along the platform.",
+                    "Robyn steps onto a small boat, watching a door rise from the river.",
+                ][:count])
+            ],
+        },
+        idea="A pilot finds a city inside a storm.", lead="Vale" if kind == "movie_trailer" else "", seconds=seconds, seed=77, kind=kind,
+    )
+    renderer = MockRenderer(_fixture_clip(tmp_path / "shot.mp4", 6))
+    assert draft["cast"][0]["name"] == ("Vale" if kind == "movie_trailer" else "Lead")
+    configure_studio.setattr(comfyui, "make_comfyui_client", lambda **kwargs: renderer)
+    plan = prepare_autonomous_plan(
+        draft, target_runtime_seconds=seconds, clip_duration_seconds=6, max_shots=count,
+        config={"continuous": True, "batchSize": count, "maxProviderCalls": count, "semanticQa": False,
+                "transitionMode": "off"},
+    )
+    result = start_autonomous_production(plan)
+    assert result["result"]["brief"]["screenplayWriter"] == kind
+    assert result["result"]["media"]["status"] == "complete"
+    assert len(renderer.calls) == count
+    assert len(result["edl"]["tracks"]["video"]) == count
+    path = Path(result["job"]["artifacts"]["shortVideo"])
+    assert path.name == "trailer.mp4"
+    assert verify_mp4(path)["durationSeconds"] == seconds

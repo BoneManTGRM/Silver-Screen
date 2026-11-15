@@ -177,7 +177,9 @@ def install_creative_controls() -> None:
             )
         normalized["creativeDirection"] = direction
         normalized["authoredScript"] = authored
-        if authored and brief.get("screenplayWriter") in ("film", "ad"):
+        from .screenplay_writer import PRODUCTION_LABELS
+
+        if authored and brief.get("screenplayWriter") in PRODUCTION_LABELS:
             normalized["screenplayWriter"] = brief["screenplayWriter"]
             if brief["screenplayWriter"] == "ad" and isinstance(brief.get("adEndCard"), dict):
                 normalized["adEndCard"] = {

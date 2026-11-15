@@ -9,7 +9,7 @@ st.set_page_config(
 
 page = st.navigation({
     "Create": [
-        st.Page("pages/0_Write_a_Movie.py", title="Movie and Ad Writer", default=True),
+        st.Page("pages/0_Write_a_Movie.py", title="Movie, Ad and Trailer Writer", default=True),
         st.Page("pages/0_Direct_Create.py", title="Direct Create"),
         st.Page("pages/0_Cast_Library.py", title="Cast Library"),
     ],

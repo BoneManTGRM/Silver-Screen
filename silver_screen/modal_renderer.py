@@ -7,10 +7,11 @@ from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
 from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient, image_size_ready
-from .hand_review import HAND_REVIEW_UNAVAILABLE
+from .face_review import FACE_REVIEW_UNAVAILABLE
+from .hand_review import BODY_REVIEW_UNAVAILABLE, HAND_REVIEW_UNAVAILABLE
 from .modal_clip_archive import (
     CLIPS_VOLUME, MODAL_RENDER_ID, RecentRender, delete_saved_media, latest_renders, media_was_deleted,
-    read_saved_hand_review, read_saved_media, remember_submitted_render,
+    read_saved_media, read_saved_reviews, remember_submitted_render,
 )
 
 
@@ -160,8 +161,9 @@ class ModalComfyUIClient(ComfyUIClient):
                 result['warning'] = 'The render finished, but Modal could not confirm the save. Download your copy now.'
             elif data.get('archived') is True:
                 result['archived'] = True
-            if isinstance(data.get('hand_review'), dict):
-                result['hand_review'] = data['hand_review']
+            for key in ('hand_review', 'face_review', 'body_review'):
+                if isinstance(data.get(key), dict):
+                    result[key] = data[key]
             data = data.get('data')
         if isinstance(data, str) and data.startswith(f'{prediction_id}: '):
             # The dashboard quality check returns a summary. Its MP4 lives in the archive.
@@ -191,12 +193,13 @@ class ModalComfyUIClient(ComfyUIClient):
             raise PredictionPending('Could not read the saved render from Modal. Check it again.') from exc
         try:
             if not data.startswith(b'\x89PNG\r\n\x1a\n'):
-                if review := read_saved_hand_review(volume, prediction_id):
-                    result['hand_review'] = review
+                result.update(read_saved_reviews(volume, prediction_id))
         except self.modal.exception.NotFoundError:
             pass  # Clips made before hand review have no sidecar.
         except (self.modal.exception.Error, OSError):
             result['hand_review'] = HAND_REVIEW_UNAVAILABLE.copy()
+            result['face_review'] = FACE_REVIEW_UNAVAILABLE.copy()
+            result['body_review'] = BODY_REVIEW_UNAVAILABLE.copy()
         return self._complete_prediction(dict(result, archived=True), data)
 
     def _complete_prediction(self, result: dict[str, Any], data: Any) -> dict[str, Any]:

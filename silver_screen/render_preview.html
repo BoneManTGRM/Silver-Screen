@@ -54,13 +54,14 @@
         const result = await response.json();
         if (result.status === "succeeded") {
           const media = result.image ? image : clip;
-          status.textContent = result.image ? "Your image is ready." : "Your clip is ready.";
+          status.textContent = result.image ? "Your image is ready." :
+            (result.face_needs_review || result.body_needs_review) ? "Your clip is ready to review." : "Your clip is ready.";
           media.src = path + "/media";
           media.hidden = false;
           download.textContent = result.image ? "Download image" : "Download clip";
           download.hidden = false;
-          warning.textContent = result.warning || "";
-          warning.hidden = !result.warning;
+          warning.textContent = [result.warning, result.face_notice, result.body_notice].filter(Boolean).join(" ");
+          warning.hidden = !warning.textContent;
           finished = true;
         } else if (["failed", "canceled", "missing"].includes(result.status)) {
           status.textContent = result.error || "Modal did not finish this render.";

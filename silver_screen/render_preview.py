@@ -12,6 +12,8 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .ai_video import PredictionPending, VideoGenerationError
+from .face_review import face_review_message
+from .hand_review import body_review_message
 from .modal_clip_archive import MODAL_RENDER_ID
 from .modal_renderer import ModalComfyUIClient
 
@@ -81,6 +83,12 @@ def _render_status(request: Request) -> Response:
     }
     if data is not None:
         result["image"] = data.startswith(b"\x89PNG\r\n\x1a\n")
+        if review := prediction.get("face_review"):
+            result["face_notice"] = face_review_message(review)
+            result["face_needs_review"] = review.get("status") in {"possible_drift", "inconclusive", "unavailable"}
+        if review := prediction.get("body_review"):
+            result["body_notice"] = body_review_message(review)
+            result["body_needs_review"] = review.get("status") in {"possible_distortion", "inconclusive", "unavailable"}
     return JSONResponse(result, status_code=404 if result["status"] == "missing" else 200, headers=_PRIVATE)
 
 

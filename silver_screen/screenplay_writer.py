@@ -13,7 +13,14 @@ from .science import GENRES, TONES
 from .script_sync import estimate_speech_seconds
 
 
-SCREENPLAY_LENGTHS = {20: 4, 30: 6}
+SCREENPLAY_LENGTHS = {20: 4, 30: 6, 60: 6}
+PRODUCTION_LABELS = {
+    "film": "Movie",
+    "ad": "Advertisement",
+    "movie_trailer": "Movie trailer",
+    "series_trailer": "Series trailer",
+}
+TRAILER_KINDS = {"movie_trailer", "series_trailer"}
 IDEA_LIMIT = 1600
 LEAD_LIMIT = 60
 
@@ -37,28 +44,43 @@ _STRING = {"type": "string"}
 _CAST = _object(name=_STRING, role=_STRING, appearance=_STRING)
 
 
-def _scene_array(**fields: Any) -> dict[str, Any]:
+def screenplay_lengths(kind: str) -> tuple[int, ...]:
+    if kind == "film":
+        return (20, 30)
+    if kind == "ad":
+        return tuple(SCREENPLAY_LENGTHS)
+    if kind in TRAILER_KINDS:
+        return (30, 60)
+    raise ScreenplayError("Choose a movie, advertisement, movie trailer, or series trailer.")
+
+
+def _scene_array(shots: int, **fields: Any) -> dict[str, Any]:
     return {
-        "type": "array", "minItems": 5, "maxItems": 5,
+        "type": "array", "minItems": shots, "maxItems": shots,
         "items": _object(**fields),
     }
 
 
-_FILM_SCHEMA = _object(
-    title=_STRING, logline=_STRING, genre={"enum": list(GENRES)}, tone={"enum": list(TONES)},
-    lead=_CAST, support=_CAST,
-    scenes=_scene_array(
-        heading=_STRING, action=_STRING,
-        speaker={"enum": ["lead", "support", "none"]}, line=_STRING,
-    ),
-)
-_AD_SCHEMA = _object(
-    title=_STRING, logline=_STRING, product=_STRING, appearance=_STRING, brand=_STRING,
-    scenes=_scene_array(setting=_STRING, action=_STRING, line=_STRING),
-)
-_COMMON = """Write five ordered shots in the language of the user's brief. Use headings like 'EXT. LOCATION - NIGHT'. Each action is one 15–28 word paragraph in present tense, with visible movement and specific objects. Vary the camera angle and blocking. Keep names, wardrobe, and props consistent. Each shot has at most one very short line. Use 'none' with an empty line when silence works better. Cast names must be distinct and use ordinary name characters. If the user supplies a lead name, use it exactly. Return only the requested JSON."""
+def _screenplay_schema(kind: str, shots: int) -> dict[str, Any]:
+    if kind == "ad":
+        return _object(
+            title=_STRING, logline=_STRING, product=_STRING, appearance=_STRING, brand=_STRING,
+            scenes=_scene_array(shots, setting=_STRING, action=_STRING, line=_STRING),
+        )
+    return _object(
+        title=_STRING, logline=_STRING, genre={"enum": list(GENRES)}, tone={"enum": list(TONES)},
+        lead=_CAST, support=_CAST,
+        scenes=_scene_array(
+            shots, heading=_STRING, action=_STRING,
+            speaker={"enum": ["lead", "support", "none"]}, line=_STRING,
+        ),
+    )
+
+
+_COMMON = """Write the requested number of ordered shots in the language of the user's brief. Use headings like 'EXT. LOCATION - NIGHT'. Each action is one 15–28 word paragraph in present tense, with visible movement and specific objects. Vary the camera angle and blocking. Keep names, wardrobe, and props consistent. Each shot has at most one very short line. Use 'none' with an empty line when silence works better. Give both cast members distinct, nonempty names with ordinary name characters. If the user supplies a lead name, use it exactly. Otherwise choose a specific name for the lead. Return only the requested JSON."""
 _FILM = """You write original short films. Give the story a striking opening, an escalating problem, a reversal, a decisive choice by the lead, and a final image that pays off a physical detail from the opening. Respect the requested genre, casting, tone, and relationship. Show the lead by name in each action. If the user wants to star and leaves the name blank, invent a screen name for them. Avoid stock dialogue, generic spectacle, and reciting the brief. When the story calls for intimacy, portray consenting adults in a way that serves the characters and plot. For fictional danger, describe the visible movie action without operational instructions for real-world harm."""
-_AD = """Write a five-shot product commercial in the language of the brief. Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and visual details, without inventing product specifications or performance claims. Plan a hook, a reveal, a use demonstration, a detail, and a final product shot. Keep that same product visible in all five shots. Each shot has one physical action and one camera move, with a setting, framing, 15–25 words of visible action, and an optional short voiceover line. Use hard cuts between shots. Keep people, backgrounds, and props secondary to the product. Leave clear space below the product in the final shot for the editor's end card. Use the supplied call to action if there is one. Return only the requested JSON."""
+_AD = """Write the requested number of shots for a product commercial in the language of the brief. Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and visual details, without inventing product specifications or performance claims. Start with a hook, reveal the product, vary demonstrations and detail shots, and close on the product. Keep the same product visible in every shot. Each shot has one physical action and one camera move, with a setting, framing, 15–25 words of visible action, and an optional short voiceover line. Use hard cuts between shots. Keep people, backgrounds, and props secondary to the product. Leave clear space below the product in the last shot for the editor's end card. Use the supplied call to action if there is one. Return only the requested JSON."""
+_TRAILER = """Write a promotional trailer for the movie or series described in the brief. Open with a striking image or question, establish the lead and central conflict, build tension with a varied montage, and end on a memorable unresolved beat. For a series trailer, reveal the recurring premise and suggest stories across episodes. For a movie trailer, build around the lead's goal and the stakes of one story. Preserve supplied names, title, and story details. Keep the climax and major twists unrevealed. Use one camera setup and one clear action per shot. Compose the final shot with room for a title in the lower third. The editor adds the title, so do not request on-screen text from the video generator."""
 _SLUGLINE = re.compile(r"^(?:INT\.|EXT\.)\s+\S.*$", re.IGNORECASE)
 _SPEAKER = re.compile(r"[\w .'’-]+")
 
@@ -97,26 +119,28 @@ def screenplay_request(
         raise ScreenplayError(f"Enter a brief between 3 and {IDEA_LIMIT:,} characters.")
     if len(lead) > LEAD_LIMIT or (lead and not _SPEAKER.fullmatch(lead)):
         raise ScreenplayError("Use a short name with letters, spaces, or ordinary name punctuation.")
-    if seconds not in SCREENPLAY_LENGTHS:
-        raise ScreenplayError("Choose 20 or 30 seconds for the short screenplay.")
-    if kind not in {"film", "ad"}:
-        raise ScreenplayError("Choose a movie or advertisement.")
+    if seconds not in screenplay_lengths(kind):
+        raise ScreenplayError("Choose one of the available lengths for this production.")
     clip = SCREENPLAY_LENGTHS[seconds]
+    shots = seconds // clip
+    instruction = _AD if kind == "ad" else ((_FILM if kind == "film" else _TRAILER) + "\n\n" + _COMMON)
     return {
         "model": "screenplay",
         "messages": [
-            {"role": "system", "content": _AD if kind == "ad" else _FILM + "\n\n" + _COMMON},
+            {"role": "system", "content": instruction},
             {"role": "user", "content": json.dumps({
-                "brief": idea, "lead name": lead, "seconds per shot": clip,
+                "brief": idea, "production": PRODUCTION_LABELS[kind],
+                "number of shots": shots, "seconds per shot": clip,
                 "maximum words in a line": clip * 2,
+                **({"lead name": lead} if lead else {}),
                 **({"end card text": end_card} if kind == "ad" and end_card else {}),
             }, ensure_ascii=False)},
         ],
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": "screenplay", "schema": _AD_SCHEMA if kind == "ad" else _FILM_SCHEMA},
+            "json_schema": {"name": "screenplay", "schema": _screenplay_schema(kind, shots)},
         },
-        "temperature": 0.9, "top_p": 0.9, "seed": seed, "max_tokens": 1250,
+        "temperature": 0.9, "top_p": 0.9, "seed": seed, "max_tokens": 2500 if shots > 5 else 1250,
     }
 
 
@@ -126,6 +150,10 @@ def screenplay_draft(
 ) -> dict[str, Any]:
     """Validate model output and produce the exact script used by production."""
     try:
+        if seconds not in screenplay_lengths(kind):
+            raise ValueError
+        clip_seconds = SCREENPLAY_LENGTHS[seconds]
+        shot_count = seconds // clip_seconds
         title, logline = _text(raw["title"], 120), _text(raw["logline"], 400)
         card = {}
         if kind == "ad":
@@ -153,10 +181,9 @@ def screenplay_draft(
         else:
             genre, tone = raw["genre"], raw["tone"]
             names = {role: _text(raw[role]["name"], LEAD_LIMIT) for role in ("lead", "support")}
-            if lead and names["lead"].casefold() != lead.casefold():
+            if lead and names["lead"] and names["lead"].casefold() != lead.casefold():
                 raise ValueError
-            if lead:
-                names["lead"] = lead
+            names["lead"] = lead or names["lead"] or ("Lead" if names["support"].casefold() != "lead" else "Protagonist")
             if names["lead"].casefold() == names["support"].casefold():
                 raise ValueError
             cast = []
@@ -169,11 +196,10 @@ def screenplay_draft(
         if (
             not title or len(logline) < 12 or genre not in GENRES or tone not in TONES
             or not all(_SPEAKER.fullmatch(name) for name in names.values())
-            or len(raw["scenes"]) != 5
+            or len(raw["scenes"]) != shot_count
         ):
             raise ValueError
         scenes, overrides, seen = [], {}, set()
-        clip_seconds = SCREENPLAY_LENGTHS[seconds]
         cta = _text(card.get("cta"), 64)
         for index, scene in enumerate(raw["scenes"], 1):
             action = _text(scene["action"], 520)
@@ -183,7 +209,7 @@ def screenplay_draft(
                 if not _SLUGLINE.fullmatch(heading):
                     heading = f"INT. {heading}"
                 speaker = "lead" if line else "none"
-                if index == 5 and cta and estimate_speech_seconds(cta) <= clip_seconds - 0.35:
+                if index == shot_count and cta and estimate_speech_seconds(cta) <= clip_seconds - 0.35:
                     speaker, line = "lead", cta
             else:
                 heading = _text(scene["heading"], 140).upper()
