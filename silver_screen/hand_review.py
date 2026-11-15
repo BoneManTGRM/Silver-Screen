@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -341,13 +342,19 @@ def summarize_body_review(bodies: Iterable[int], frames: list[dict[int, tuple[st
     for body in indices:
         eligible = sum(body in frame for frame in frames)
         coverage.append(eligible / max(1, len(frames)))
-    for index in range(len(frames) - 3):
-        window = frames[index:index + 4]
+    # Isolated pose estimates can return to the normal range during a sustained change.
+    # Require four samples for the same body part within a six-sample window.
+    for end in range(3, len(frames)):
+        start = max(0, end - 5)
+        window = frames[start:end + 1]
         for body in indices:
-            shared = set(window[0].get(body, ())).intersection(*(item.get(body, ()) for item in window[1:]))
-            if shared:
-                return {"status": "possible_distortion", "body_parts": sorted(shared),
-                        "first_issue_seconds": index / REVIEW_FPS, "sampled_frames": len(frames)}
+            observations = [frame.get(body, ()) for frame in window]
+            counts = Counter(part for parts in observations for part in parts)
+            flagged = sorted(part for part, count in counts.items() if count >= 4)
+            if flagged:
+                first = next(index for index, parts in enumerate(observations, start) if any(part in parts for part in flagged))
+                return {"status": "possible_distortion", "body_parts": flagged,
+                        "first_issue_seconds": first / REVIEW_FPS, "sampled_frames": len(frames)}
     return {"status": "tracked" if len(frames) >= 4 and min(coverage, default=0) >= 0.65 else "inconclusive",
             "sampled_frames": len(frames)}
 

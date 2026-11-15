@@ -983,6 +983,22 @@ def test_body_review_flags_sustained_distortion_without_treating_uniform_scale_a
     assert result["first_issue_seconds"] == 0.5
 
 
+def test_body_review_flags_distortion_across_an_intermittent_clean_sample():
+    from silver_screen.hand_review import summarize_body_review
+
+    clean = {0: ()}
+    forearm = {0: ("right forearm",)}
+    samples = [clean] * 8 + [forearm, forearm, forearm, clean, forearm, forearm]
+    report = summarize_body_review([0], samples)
+    assert report["status"] == "possible_distortion"
+    assert report["body_parts"] == ["right forearm"]
+    assert report["first_issue_seconds"] == 1.0
+
+    thigh = {0: ("right thigh",)}
+    assert summarize_body_review([0], [forearm, thigh] * 4)["status"] == "tracked"
+    assert summarize_body_review([0], [forearm, clean, clean, clean] * 3)["status"] == "tracked"
+
+
 def test_film_queue_excludes_a_flagged_take_and_accepts_the_retry(comfy_server, tmp_path, monkeypatch):
     from silver_screen import ai_video
     from silver_screen.video_runtime import choose_tgrm_repair
