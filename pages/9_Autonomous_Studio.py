@@ -112,7 +112,7 @@ if draft:
                 "Product photo (optional)" if is_ad else "Lead photo (optional)",
                 type=["png", "jpg", "jpeg", "webp"],
                 help=(
-                    "Use a tightly cropped photo of the product you want to see in the ad."
+                    "Upload a clear photo of the actual product for a live-action look. Each shot starts from this image."
                     if is_ad else "The video model uses this image as the first frame."
                 ),
             )
@@ -121,6 +121,9 @@ if draft:
             authorized = st.checkbox(
                 "I have permission to use this product photo."
                 if is_ad else "Everyone shown in the photo agreed to this scene and its audience."
+            )
+            allow_still = is_ad and st.checkbox(
+                "Allow nearly still shots", help="Keep subtle movement when the ad calls for a quiet hold.",
             )
             call_budget = st.number_input(
                 "Maximum video requests", min_value=shot_count, max_value=shot_count * 3, value=shot_count,
@@ -147,8 +150,10 @@ if draft:
         else:
             try:
                 with st.spinner(f"Preparing {shot_count} shots…"):
+                    shot_direction = {**(draft.get("shotDirection") or {}), "allowStillProductShots": allow_still}
                     plan = prepare_autonomous_plan(
-                        draft, target_runtime_seconds=draft["seconds"],
+                        {**draft, "shotDirection": shot_direction},
+                        target_runtime_seconds=draft["seconds"],
                         clip_duration_seconds=clip_duration, max_shots=shot_count,
                         config={"qualityProfile": "cinematic", "continuous": True, "batchSize": shot_count,
                                 "maxProviderCalls": int(call_budget), "semanticQa": False,
@@ -347,6 +352,8 @@ if output:
     else:
         if media.get("stopReason") == "prediction_pending":
             st.info("A render is still pending. Continue the saved job to check it.")
+        elif media.get("stopReason") == "provider_prompt_rejected":
+            st.error("The render provider declined the prompt. Its response is shown below.")
         elif media.get("stopReason") == "provider_call_budget_exhausted":
             st.warning("The render used all approved GPU requests. The preview contains only completed shots.")
         elif media.get("stopReason") == "shot_retry_budget_exhausted":

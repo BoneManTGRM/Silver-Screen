@@ -31,6 +31,7 @@ from .video_runtime import (
     create_video_queue,
     detect_video_fractures,
     extend_video_queue,
+    is_provider_prompt_rejection,
     load_video_queue,
     normalize_video_config,
     queue_paths,
@@ -1125,6 +1126,7 @@ def generate_ai_video(
     queue = _ensure_queue(state, root, config, queue=saved_queue, backend=backend)
     if is_ad:
         queue["referenceMode"] = "product"
+        queue.setdefault("allowStillProductShots", bool((state.get("shotDirection") or {}).get("allowStillProductShots")))
     elif written and initial_image_data and backend == "comfyui":
         from .modal_renderer import ModalComfyUIClient
 
@@ -1174,6 +1176,10 @@ def generate_ai_video(
             queue["completedAt"] = utc_now()
             break
         submitted = shot.get("status") == "submitted"
+        if not submitted and is_provider_prompt_rejection(shot.get("lastError")):
+            shot["status"] = "blocked"
+            queue.update(status="blocked", stopReason="provider_prompt_rejected")
+            break
         reason = None if submitted else budget_stop_reason(queue, config)
         if reason:
             queue["status"] = "blocked"
@@ -1236,6 +1242,12 @@ def generate_ai_video(
             error = str(exc)
             shot["lastError"] = error
             shot["providerStatus"] = "failed"
+            if is_provider_prompt_rejection(error):
+                shot["status"] = "blocked"
+                queue.update(status="blocked", stopReason="provider_prompt_rejected")
+                record_video_event(queue, "shot_blocked", shot_id=str(shot.get("id")), detail=error)
+                save_video_queue(root, queue)
+                break
             repair = choose_tgrm_repair(
                 error, int(shot.get("attempts", 0) or 0) + 1
             )

@@ -130,6 +130,28 @@ def _sharpness(array: np.ndarray, *, product_shot: bool = False) -> float:
     return min(1.0, float(strength) * 4.5)
 
 
+def _product_motion_area(arrays: list[np.ndarray]) -> float:
+    """Measure sustained, localized change in a continuous product shot."""
+    frames = []
+    for frame in arrays:
+        height, width, channels = frame.shape
+        # Average neighboring pixels and ignore the frame edges so compression
+        # noise and small border changes cannot pass as action.
+        coarse = frame.reshape(height // 2, 2, width // 2, 2, channels).mean(axis=(1, 3))
+        y, x = height // 40, width // 40
+        frames.append(coarse[y:height // 2 - y, x:width // 2 - x])
+
+    # Compare frames roughly a quarter of the shot apart. Subtract common
+    # exposure and color shifts, then use the median to ignore isolated flashes.
+    lag = max(1, len(frames) // 4)
+    changes = []
+    for before, after in zip(frames[:-lag], frames[lag:]):
+        delta = after - before
+        delta -= np.median(delta, axis=(0, 1))
+        changes.append(float((np.abs(delta).max(axis=2) >= 0.06).mean()))
+    return float(np.median(changes))
+
+
 def _histogram(array: np.ndarray) -> np.ndarray:
     parts = []
     for channel in range(3):
@@ -173,6 +195,8 @@ def analyze_clip(
     frames = _sample_frames(path, root, int(cfg["sampleFrames"]), max(seconds, 0.1))
     arrays = [_array(frame) for frame in frames]
     product_shot = bool(cfg.get("singleShot"))
+    allow_still = product_shot and bool(cfg.get("allowStillProductShots"))
+    motion_area = _product_motion_area(arrays) if product_shot else None
     sharpness_values = [_sharpness(item, product_shot=product_shot) for item in arrays]
     luminance = [float(item.mean()) for item in arrays]
     contrast = [float(item.std()) for item in arrays]
@@ -191,7 +215,7 @@ def analyze_clip(
     sharpness_score = float(np.mean(sharpness_values))
     exposure_score = float(max(0.0, 1.0 - abs(float(np.mean(luminance)) - 0.48) * 1.8 - clipping * 1.8))
     contrast_score = float(max(0.0, min(1.0, float(np.mean(contrast)) * 5.0)))
-    motion_score = float(max(0.0, 1.0 - max(0.0, freeze_ratio - 0.18) * 1.8))
+    motion_score = 1.0 if allow_still else float(max(0.0, 1.0 - max(0.0, freeze_ratio - 0.18) * 1.8))
     stability_score = float(max(0.0, 1.0 - flicker * 2.2))
     score = float(
         0.23 * sharpness_score
@@ -211,7 +235,10 @@ def analyze_clip(
         add("soft_or_blurred", "high", "The sampled frames are too soft or blurred.", "Request a stable, sharply focused retake with restrained camera motion.")
     if flicker > float(cfg["maximumFlicker"]):
         add("flicker", "high", "Luminance changes abruptly across the clip.", "Lock practical lighting and exposure; prohibit pulsing or flashing illumination.")
-    if freeze_ratio > float(cfg["maximumFreezeRatio"]):
+    if motion_area is not None and motion_area < 0.01 and not allow_still:
+        add("insufficient_product_motion", "high", "The product shot lacks clear, sustained on-screen movement.",
+            "Start the visible action in the approved shot promptly and show its outcome. Keep the product in focus and the exposure steady.")
+    elif not allow_still and freeze_ratio > float(cfg["maximumFreezeRatio"]):
         add("frozen_motion", "medium", "Too many sampled intervals are nearly identical.", "Require one physically readable action and subtle natural performance motion.")
     if clipping > 0.18:
         add("exposure_clipping", "medium", "Large image regions are crushed or blown out.", "Use controlled highlight rolloff and preserve shadow detail.")
@@ -241,6 +268,7 @@ def analyze_clip(
             "exposure": round(exposure_score, 6),
             "contrast": round(contrast_score, 6),
             "motion": round(motion_score, 6),
+            **({"localizedMotionArea": round(motion_area, 6)} if motion_area is not None else {}),
             "stability": round(stability_score, 6),
             "flicker": round(flicker, 6),
             "freezeRatio": round(freeze_ratio, 6),
@@ -284,7 +312,8 @@ def inspect_run(run_id: str, *, output_root: str = "runs") -> dict[str, Any]:
             clip,
             work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
             reference_paths=[str(path) for path in references],
-            config={"singleShot": queue.get("referenceMode") == "product"},
+            config={"singleShot": queue.get("referenceMode") == "product",
+                    "allowStillProductShots": queue.get("allowStillProductShots", False)},
         )
         report["shotId"] = shot.get("id")
         report["order"] = shot.get("order")

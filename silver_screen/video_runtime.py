@@ -467,6 +467,14 @@ def detect_video_fractures(queue: dict[str, Any]) -> list[dict[str, Any]]:
     return fractures
 
 
+def is_provider_prompt_rejection(error: object) -> bool:
+    detail = str(error or "").casefold()
+    return any(marker in detail for marker in (
+        "moderation", "safety filter", "safety policy", "safety system", "content policy",
+        "flagged as sensitive", "responsibleaipolicyviolation", "nsfw",
+    ))
+
+
 def choose_tgrm_repair(error: str, attempt: int) -> dict[str, Any]:
     """Choose the smallest bounded correction for a failed video shot."""
 
@@ -491,14 +499,10 @@ def choose_tgrm_repair(error: str, attempt: int) -> dict[str, Any]:
         strategy = "retry_with_simplified_motion"
         suffix = "Use one clear camera move and one clear subject action."
         seed_delta = 29
-    elif "429" in lowered or "rate" in lowered:
+    elif any(marker in lowered for marker in ("429", "rate limit", "rate-limited", "too many requests", "throttled")):
         strategy = "backoff_and_retry"
         suffix = "Preserve the same scene and continuity state."
         seed_delta = 0
-    elif "moderation" in lowered or "safety" in lowered or "policy" in lowered:
-        strategy = "sanitize_prompt"
-        suffix = "Keep the scene non-graphic, non-sexual, and suitable for a general audience."
-        seed_delta = 43
     elif "audio" in lowered:
         strategy = "disable_audio"
         suffix = "Generate visually coherent silent footage; audio will be handled separately."

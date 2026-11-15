@@ -228,6 +228,7 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
             raw.get("shotPromptOverrides")
         ),
         "useAuthoredShotPrompts": _bool_value(raw.get("useAuthoredShotPrompts"), False),
+        "allowStillProductShots": _bool_value(raw.get("allowStillProductShots"), False),
         "coverageGate": _bool_value(
             raw.get("coverageGate"),
             os.getenv("SILVER_SCREEN_SHOT_COVERAGE_GATE", "1")

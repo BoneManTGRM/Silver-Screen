@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .production_resilience import retry_after_seconds
+from .video_runtime import is_provider_prompt_rejection
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ def diagnose_provider_error(error: object) -> ProviderDiagnosis:
             "Create a new token, replace REPLICATE_API_TOKEN in Streamlit secrets, then reboot the app.",
             False,
         )
+    if is_provider_prompt_rejection(text):
+        return ProviderDiagnosis("safety_rejection", "The render provider declined the prompt", text[:1200], False)
     if "http 403" in lower or "forbidden" in lower or "permission" in lower:
         return ProviderDiagnosis(
             "permission_denied",
@@ -92,13 +95,6 @@ def diagnose_provider_error(error: object) -> ProviderDiagnosis:
             "The provider request was interrupted",
             "Continue the same saved production so Silver-Screen can recover the existing prediction ID.",
             True,
-        )
-    if "safety" in lower or "policy" in lower or "moderation" in lower:
-        return ProviderDiagnosis(
-            "safety_rejection",
-            "The model rejected the prompt",
-            "Revise the premise or scene to remove the rejected content, then start a new production.",
-            False,
         )
     if "download" in lower or "output" in lower or "mp4" in lower or "ffprobe" in lower:
         return ProviderDiagnosis(

@@ -9,7 +9,7 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 from silver_screen import comfyui
-from silver_screen.ai_video import PredictionPending, verify_mp4
+from silver_screen.ai_video import PredictionPending, VideoGenerationError, verify_mp4
 from silver_screen.autonomous_studio import (
     continue_autonomous_production,
     prepare_autonomous_plan,
@@ -53,11 +53,16 @@ def _draft(seconds: int) -> dict:
     )
 
 
-def _fixture_clip(path: Path, seconds: int, *, abrupt_cut: bool = False) -> Path:
-    filters = ["-vf", "negate=enable='gte(t,2)'"] if abrupt_cut else []
+def _fixture_clip(path: Path, seconds: int, *, abrupt_cut: bool = False, near_still: bool = False) -> Path:
+    filters = []
+    if abrupt_cut:
+        filters = ["-vf", "negate=enable='gte(t,2)'"]
+    elif near_still:
+        filters = ["-vf", "trim=end_frame=1,tpad=stop_mode=clone:stop_duration=10,"
+                   "eq=brightness='0.012*sin(t*16)':eval=frame,noise=alls=3:allf=t+u"]
     subprocess.run(
         ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=192x108:rate=24",
-         *filters, "-frames:v", str(seconds * 24 + 1), "-c:v", "libx264", "-threads", "2", str(path)],
+         *filters, "-frames:v", str(seconds * 24 + 1), "-c:v", "libx264", "-crf", "12", "-threads", "2", str(path)],
         check=True, timeout=30,
     )
     return path
@@ -67,9 +72,10 @@ class MockRenderer:
     model = "comfyui/workflow"
     supports_reference = True
 
-    def __init__(self, clip: Path, cut: Path | None = None):
+    def __init__(self, clip: Path, cut: Path | None = None, *, first_take: Path | None = None):
         self.clip = clip
         self.cut = cut
+        self.first_take = first_take
         self.calls = []
         self.recovered = []
         self.pending = cut is not None
@@ -91,6 +97,8 @@ class MockRenderer:
     def download_output(self, prediction, path):
         path.parent.mkdir(parents=True, exist_ok=True)
         source = self.cut if prediction["id"] == "clip-2" and self.cut else self.clip
+        if prediction["id"] == "clip-1" and self.first_take:
+            source = self.first_take
         shutil.copyfile(source, path)
         return path
 
@@ -182,6 +190,50 @@ def test_resumed_advertisement_rejects_cut_and_keeps_same_product_photo(tmp_path
     assert photo.startswith("data:image/jpeg;base64,")
     assert all(settings["image"] == photo and settings["duration"] == 6 for _, settings in renderer.calls)
     assert len(list(Path(first["result"]["run"]["workspace"]).glob("media/visual_quality/rejected/*/*.mp4"))) == 1
+
+
+@pytest.mark.parametrize("allow_still", [False, True])
+def test_ad_handles_near_still_shots_by_operator_choice(tmp_path, configure_studio, allow_still):
+    renderer = MockRenderer(
+        _fixture_clip(tmp_path / "moving.mp4", 4),
+        first_take=_fixture_clip(tmp_path / "near-still.mp4", 4, near_still=True),
+    )
+    configure_studio.setattr(comfyui, "make_comfyui_client", lambda **kwargs: renderer)
+    draft = _draft(20)
+    draft["shotDirection"]["allowStillProductShots"] = allow_still
+    plan = prepare_autonomous_plan(
+        draft, target_runtime_seconds=20, clip_duration_seconds=4, max_shots=5,
+        config={"continuous": True, "batchSize": 5, "maxProviderCalls": 6, "semanticQa": False,
+                "transitionMode": "off"},
+    )
+    result = start_autonomous_production(plan)
+    _assert_finished(result, 20, renderer, 5 if allow_still else 6)
+    if not allow_still:
+        assert "Retake direction" in renderer.calls[1][0]
+        assert "visible action in the approved shot" in renderer.calls[1][0]
+
+
+def test_provider_policy_rejection_preserves_prompt_and_does_not_resubmit(tmp_path, configure_studio):
+    renderer = MockRenderer(_fixture_clip(tmp_path / "shot.mp4", 4))
+    error = "HTTP 422: Request declined by the provider content policy."
+
+    def reject_prediction(prediction, *, on_update=None):
+        raise VideoGenerationError(error)
+
+    configure_studio.setattr(renderer, "wait", reject_prediction)
+    configure_studio.setattr(comfyui, "make_comfyui_client", lambda **kwargs: renderer)
+    plan = prepare_autonomous_plan(
+        _draft(20), target_runtime_seconds=20, clip_duration_seconds=4, max_shots=5,
+        config={"continuous": True, "batchSize": 5, "maxProviderCalls": 6, "semanticQa": False,
+                "transitionMode": "off"},
+    )
+    result = start_autonomous_production(plan)
+    for production in (result, continue_autonomous_production(result["runId"])):
+        media = production["result"]["media"]
+        assert media["stopReason"] == "provider_prompt_rejected"
+        assert media["queue"]["shots"][0]["lastError"] == error
+        assert "ties its laces" in media["queue"]["shots"][0]["prompt"]
+    assert len(renderer.calls) == 1
 
 
 def test_sixty_second_ad_has_ten_distinct_timed_prompts(configure_studio):

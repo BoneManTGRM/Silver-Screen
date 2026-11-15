@@ -64,7 +64,7 @@ def _scene_array(shots: int, **fields: Any) -> dict[str, Any]:
 def _screenplay_schema(kind: str, shots: int) -> dict[str, Any]:
     if kind == "ad":
         return _object(
-            title=_STRING, logline=_STRING, product=_STRING, appearance=_STRING, brand=_STRING,
+            title=_STRING, logline=_STRING, product=_STRING, appearance=_STRING, brand=_STRING, visual_style=_STRING,
             scenes=_scene_array(shots, setting=_STRING, action=_STRING, line=_STRING),
         )
     return _object(
@@ -79,7 +79,20 @@ def _screenplay_schema(kind: str, shots: int) -> dict[str, Any]:
 
 _COMMON = """Write the requested number of ordered shots in the language of the user's brief. Use headings like 'EXT. LOCATION - NIGHT'. Each action is one 15–28 word paragraph in present tense, with visible movement and specific objects. Vary the camera angle and blocking. Keep names, wardrobe, and props consistent. Each shot has at most one very short line. Use 'none' with an empty line when silence works better. Give both cast members distinct, nonempty names with ordinary name characters. If the user supplies a lead name, use it exactly. Otherwise choose a specific name for the lead. Return only the requested JSON."""
 _FILM = """You write original short films. Give the story a striking opening, an escalating problem, a reversal, a decisive choice by the lead, and a final image that pays off a physical detail from the opening. Respect the requested genre, casting, tone, and relationship. Show the lead by name in each action. If the user wants to star and leaves the name blank, invent a screen name for them. Avoid stock dialogue, generic spectacle, and reciting the brief. When the story calls for intimacy, portray consenting adults in a way that serves the characters and plot. For fictional danger, describe the visible movie action without operational instructions for real-world harm."""
-_AD = """Write the requested number of shots for a product commercial in the language of the brief. Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and visual details, without inventing product specifications or performance claims. Start with a hook, reveal the product, vary demonstrations and detail shots, and close on the product. Keep the same product visible in every shot. Each shot has one physical action and one camera move, with a setting, framing, 15–25 words of visible action, and an optional short voiceover line. Use hard cuts between shots. Keep people, backgrounds, and props secondary to the product. Leave clear space below the product in the last shot for the editor's end card. Use the supplied call to action if there is one. Return only the requested JSON."""
+_AD = (
+    "Write the requested number of shots for a product commercial in the language of the brief. "
+    "Name the specific product and describe one consistent design in 15–25 words, including its color, shape, and materials. "
+    "Use brand only when the user explicitly named it. When the brief is sparse, choose a concrete product concept and "
+    "visual details, without inventing product specifications or performance claims. "
+    "Use the brief's requested visual style. Use photorealistic live-action photography when it leaves style open. "
+    "Open on an immediate visual hook, then show distinct product interactions, reveals, or demonstrations. "
+    "Give each shot one clear on-screen event. Name what moves, the movement, and what visibly changes by the end. "
+    "Follow the requested actions and framing. Use one camera setup that makes the action easy to see. "
+    "Keep the same product visible, and keep people, backgrounds, and props secondary to it. "
+    "Include a setting, 15–25 words of visible action, and an optional short voiceover line for each shot. "
+    "Use hard cuts between shots. Leave space below the product in the final shot for the editor's end card. "
+    "Use the supplied call to action if there is one. Return only the requested JSON."
+)
 _TRAILER = """Write a promotional trailer for the movie or series described in the brief. Open with a striking image or question, establish the lead and central conflict, build tension with a varied montage, and end on a memorable unresolved beat. For a series trailer, reveal the recurring premise and suggest stories across episodes. For a movie trailer, build around the lead's goal and the stakes of one story. Preserve supplied names, title, and story details. Keep the climax and major twists unrevealed. Use one camera setup and one clear action per shot. Compose the final shot with room for a title in the lower third. The editor adds the title, so do not request on-screen text from the video generator."""
 _SLUGLINE = re.compile(r"^(?:INT\.|EXT\.)\s+\S.*$", re.IGNORECASE)
 _SPEAKER = re.compile(r"[\w .'’-]+")
@@ -178,6 +191,7 @@ def screenplay_draft(
             cast = []
             product = _text(raw.get("product"), 100) or brand or _text(idea, 100)
             appearance = _text(raw.get("appearance"), 320)
+            visual_style = _text(raw.get("visual_style"), 160).rstrip(".") or "Photorealistic live-action photography"
         else:
             genre, tone = raw["genre"], raw["tone"]
             names = {role: _text(raw[role]["name"], LEAD_LIMIT) for role in ("lead", "support")}
@@ -238,10 +252,10 @@ def screenplay_draft(
         shot_direction["audioStrategy"] = "silent"
         shot_direction["shotPromptOverrides"] = {
             order: " ".join(part for part in (
-                f"Photorealistic commercial. Featured product: {product}.",
-                f"Product appearance: {appearance.rstrip('.')}." if appearance else "",
                 action,
-                "A single continuous shot with readable product motion and the product in clear focus.",
+                "Show the action from start to finish in one continuous shot, with the product in clear focus.",
+                f"Visual style: {visual_style}. Featured product: {product}.",
+                f"Product appearance: {appearance.rstrip('.')}." if appearance else "",
                 "Preserve its color, proportions, materials, and existing markings throughout the shot.",
                 "Clean composition without on-screen titles or added graphics.",
             ) if part)

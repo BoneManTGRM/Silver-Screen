@@ -53,7 +53,8 @@ def install_visual_quality_supervisor() -> None:
             report = analyze_clip(
                 clip,
                 work_dir=root / "visual_quality" / str(shot.get("id") or "shot"),
-                config={"singleShot": queue.get("referenceMode") == "product"},
+                config={"singleShot": queue.get("referenceMode") == "product",
+                        "allowStillProductShots": queue.get("allowStillProductShots", False)},
             )
         except VisualQualityError as exc:
             # Synthetic test artifacts, constrained hosts, or unavailable FFmpeg
