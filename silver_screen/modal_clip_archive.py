@@ -26,6 +26,7 @@ class RecentRender(NamedTuple):
     requested_seconds: int | None
     saved: bool
     image: bool
+    submitted_at: int | None = None
 
 
 def clip_filename(render_id: str) -> str:
@@ -139,5 +140,7 @@ def latest_renders(volume: Any, limit: int = 20) -> list[RecentRender]:
     for render_id in (submitted.keys() | saved.keys()) - deleted:
         started, seconds = submitted.get(render_id, (0, -1))
         timestamp, image = saved.get(render_id, (started, seconds == 0))
-        entries.append(RecentRender(render_id, timestamp, seconds if seconds > 0 else None, render_id in saved, image))
+        entries.append(RecentRender(
+            render_id, timestamp, seconds if seconds > 0 else None, render_id in saved, image, started or None,
+        ))
     return nlargest(limit, entries, key=lambda entry: (entry.timestamp, entry.render_id))

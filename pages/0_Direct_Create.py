@@ -40,7 +40,7 @@ from silver_screen.direct_generation import (
     verify_direct_output,
 )
 from silver_screen.hand_review import hand_review_message
-from silver_screen.modal_clip_archive import MODAL_RENDER_ID
+from silver_screen.modal_clip_archive import MODAL_RENDER_ID, RecentRender
 from silver_screen.modal_renderer import (
     ModalComfyUIClient, delete_modal_render, modal_configured, recent_modal_renders, remember_modal_render,
 )
@@ -81,6 +81,24 @@ def recover_modal_job(render_id: str, seconds: str = "", *, image: bool = False)
     return job
 
 
+def open_recent_render(entry: RecentRender) -> dict:
+    job = recover_modal_job(entry.render_id, str(entry.requested_seconds or ""), image=entry.image)
+    job["read_saved_render"] = entry.saved
+    job["history_saved"] = True
+    save_render_job(job)
+    return job
+
+
+def load_recent_renders() -> None:
+    try:
+        st.session_state["recent_modal_renders"] = {
+            entry.render_id: entry for entry in recent_modal_renders()
+        }
+        st.session_state.pop("recent_render_error", None)
+    except VideoGenerationError as exc:
+        st.session_state["recent_render_error"] = str(exc)
+
+
 def needs_hand_review(job: dict) -> bool:
     return job["prediction"].get("hand_review", {}).get("status") == "possible_loss" and not job.get("hand_reviewed")
 
@@ -100,7 +118,8 @@ def retain_film_shot(job: dict, film_shots: dict, data: bytes) -> None:
 
 def refresh_render(job, film_shots, *, wait=False):
     def save_prediction(update):
-        job["prediction"] = update
+        if update.get("status") != "succeeded":
+            job["prediction"] = update
 
     prediction = job["prediction"]
     is_image = job["model"] == IMAGE_MODEL
@@ -113,35 +132,39 @@ def refresh_render(job, film_shots, *, wait=False):
         )
         if isinstance(client, ModalComfyUIClient) and job.get("read_saved_render"):
             prediction = client.get_saved_prediction(prediction["id"])
-            save_prediction(prediction)
         elif wait:
             prediction = client.wait(prediction, on_update=save_prediction)
         elif prediction.get("status") not in TERMINAL_STATUSES:
-            prediction = client.get_prediction(prediction["id"])
+            prediction = (
+                client.get_prediction(prediction["id"], prefer_saved=True)
+                if isinstance(client, ModalComfyUIClient)
+                else client.get_prediction(prediction["id"])
+            )
+        if prediction.get("status") != "succeeded":
             save_prediction(prediction)
-        if prediction.get("status") == "succeeded":
-            if isinstance(client, ComfyUIClient):
-                data = client.read_output(prediction)
-                if job.get("recovered"):
-                    is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
-                    job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
-                try:
-                    if is_image:
-                        verify_direct_output(data, image=True)
-                    else:
-                        expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
-                        job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
-                except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
-                    save_prediction(dict(prediction, status="failed", error=str(exc)))
-                    return
-                job["data"] = data
-                if prediction.get("archived") and not job.get("read_saved_render"):
-                    st.session_state.pop("recent_modal_renders", None)
-            else:
-                job["data"] = read_direct_output(prediction, image=is_image)
-            if "started" in job:
-                job["elapsed_seconds"] = monotonic() - job["started"]
-            retain_film_shot(job, film_shots, job["data"])
+            return
+        if isinstance(client, ComfyUIClient):
+            data = client.read_output(prediction)
+            if job.get("recovered"):
+                is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
+                job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
+            try:
+                if is_image:
+                    verify_direct_output(data, image=True)
+                else:
+                    expected = job.get("requested_seconds") if prediction["id"].startswith("fc-") else None
+                    job["actual_seconds"] = verify_direct_clip(data, expected_seconds=expected)
+            except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
+                save_prediction(dict(prediction, status="failed", error=str(exc)))
+                return
+        else:
+            data = read_direct_output(prediction, image=is_image)
+        job.update(prediction=prediction, data=data)
+        if isinstance(client, ModalComfyUIClient) and prediction.get("archived") and not job.get("read_saved_render"):
+            st.session_state.pop("recent_modal_renders", None)
+        if "started" in job:
+            job["elapsed_seconds"] = monotonic() - job["started"]
+        retain_film_shot(job, film_shots, data)
     except (VideoGenerationError, OSError, SubprocessError, Image.DecompressionBombError) as exc:
         job["check_error"] = str(exc)
 
@@ -199,11 +222,25 @@ with st.expander("Create offline on iPhone"):
 
 job = st.session_state.get("direct_create_job")
 render_id = st.query_params.get("render", "")
+modal_ready = modal_configured()
+if modal_ready and "recent_modal_renders" not in st.session_state:
+    load_recent_renders()
+
 if job is None and MODAL_RENDER_ID.fullmatch(render_id):
     job = recover_modal_job(render_id, st.query_params.get("render_seconds", ""))
     st.session_state["direct_create_job"] = job
 elif job and not render_id and MODAL_RENDER_ID.fullmatch(job["prediction"].get("id") or ""):
     save_render_job(job)
+
+if modal_ready and "recent_modal_renders" in st.session_state and not st.session_state.get("initial_render_checked"):
+    st.session_state["initial_render_checked"] = True
+    if job is None:
+        latest = max(
+            (entry for entry in st.session_state["recent_modal_renders"].values() if entry.submitted_at is not None),
+            key=lambda entry: (entry.submitted_at, entry.render_id), default=None,
+        )
+        if latest is not None:
+            job = open_recent_render(latest)
 
 if job and job.get("requested_seconds") and job["model"] == CLIP_MODEL:
     st.session_state.setdefault("direct_create_output", "Video clip")
@@ -216,7 +253,6 @@ backend = st.radio(
     horizontal=True,
 )
 use_comfyui = backend == "ComfyUI"
-modal_ready = modal_configured()
 use_modal = use_comfyui and modal_ready
 reference_ready = use_comfyui and comfyui_ready("reference")
 video_controls = (
@@ -262,14 +298,10 @@ if not use_comfyui:
 
 if modal_ready:
     with st.expander("Recent renders", expanded=not job):
-        refresh_history = st.button("Refresh recent renders", key="direct-refresh-saved-clips")
-        if refresh_history or "recent_modal_renders" not in st.session_state:
-            try:
-                st.session_state["recent_modal_renders"] = {
-                    entry.render_id: entry for entry in recent_modal_renders()
-                }
-            except VideoGenerationError as exc:
-                st.warning(str(exc))
+        if st.button("Refresh recent renders", key="direct-refresh-saved-clips"):
+            load_recent_renders()
+        if history_error := st.session_state.get("recent_render_error"):
+            st.warning(history_error)
         if renders := st.session_state.get("recent_modal_renders"):
             selected_id = st.selectbox(
                 "Render", renders, index=None, placeholder="Choose a render",
@@ -280,11 +312,7 @@ if modal_ready:
                 ),
             )
             if st.button("Open render", disabled=selected_id is None):
-                entry = renders[selected_id]
-                selected_job = recover_modal_job(selected_id, str(entry.requested_seconds or ""), image=entry.image)
-                selected_job["read_saved_render"] = entry.saved
-                selected_job["history_saved"] = True
-                save_render_job(selected_job)
+                open_recent_render(renders[selected_id])
                 st.rerun()
         else:
             st.caption("New images and clips appear here after submission.")
@@ -518,6 +546,7 @@ if job:
             st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
         else:
             filename = job.get("filename", "silver-screen.mp4")
+            st.success("Your clip is ready.")
             st.video(job["data"], format="video/mp4")
             if review := job["prediction"].get("hand_review"):
                 if message := hand_review_message(review):

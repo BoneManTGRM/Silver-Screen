@@ -103,7 +103,15 @@ class ModalComfyUIClient(ComfyUIClient):
             raise VideoGenerationError(f'Modal could not submit the render ({type(exc).__name__}).') from exc
         return {'id': call.object_id, 'status': 'starting', 'model': self.model}
 
-    def get_prediction(self, prediction_id: str, prediction_url: str | None = None) -> dict[str, Any]:
+    def get_prediction(
+        self, prediction_id: str, prediction_url: str | None = None, *, prefer_saved: bool = False,
+    ) -> dict[str, Any]:
+        if prefer_saved:
+            try:
+                if saved := self._find_saved_prediction(prediction_id):
+                    return saved
+            except PredictionPending:
+                pass  # An archive outage can still leave the Modal call result available.
         result = {'id': prediction_id, 'status': 'processing', 'model': self.model}
         try:
             data = self.modal.FunctionCall.from_id(prediction_id).get(timeout=0)
@@ -157,17 +165,22 @@ class ModalComfyUIClient(ComfyUIClient):
         return self._complete_prediction(result, data)
 
     def get_saved_prediction(self, prediction_id: str) -> dict[str, Any]:
-        result = {'id': prediction_id, 'model': self.model}
-        unavailable = dict(result, status='failed', error='Modal no longer has a result for this render ID.')
+        return self._find_saved_prediction(prediction_id) or {
+            'id': prediction_id, 'model': self.model, 'status': 'failed',
+            'error': 'Modal no longer has a result for this render ID.',
+        }
+
+    def _find_saved_prediction(self, prediction_id: str) -> dict[str, Any] | None:
         if not MODAL_RENDER_ID.fullmatch(prediction_id):
-            return unavailable
+            return None
+        result = {'id': prediction_id, 'model': self.model}
         try:
             volume = self.modal.Volume.from_name(CLIPS_VOLUME)
             if media_was_deleted(volume, prediction_id):
                 return dict(result, status='failed', error='This render was deleted from Silver Screen.')
             data = read_saved_media(volume, prediction_id)
         except (FileNotFoundError, self.modal.exception.NotFoundError):
-            return unavailable
+            return None
         except VideoGenerationError as exc:
             return dict(result, status='failed', error=str(exc))
         except (self.modal.exception.Error, OSError) as exc:

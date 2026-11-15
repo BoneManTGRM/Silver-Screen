@@ -236,7 +236,8 @@ def test_direct_create_reenables_generate_after_modal_failure(monkeypatch):
     assert not generate_button(app).disabled
 
 
-def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, monkeypatch):
+@pytest.mark.parametrize("from_archive", [False, True])
+def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, monkeypatch, from_archive):
     _, _, media = comfy_server
     monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
     monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
@@ -244,6 +245,7 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     call_id = "fc-" + "1" * 26
     submissions = []
     checks = []
+    completed = False
 
     def spawn(kind, prompt, settings):
         submissions.append((kind, prompt))
@@ -252,14 +254,21 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     def get(*, timeout):
         assert timeout == 0
         checks.append(timeout)
-        if len(checks) == 1:
+        if from_archive or not completed:
             raise modal_errors.TimeoutError
         return media["result.mp4"]
+
+    def read_file(path):
+        if from_archive and completed and path == f"{call_id}.mp4":
+            yield media["result.mp4"]
+        else:
+            raise FileNotFoundError(path)
 
     def unavailable_upload(**kwargs):
         raise modal_errors.ServiceError("test history write outage")
 
     volume = empty_archive()
+    volume.read_file = read_file
     volume.batch_upload = unavailable_upload
 
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
@@ -278,6 +287,7 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     assert app.query_params == {"render": call_id, "render_seconds": "8"}
 
     # AppTest has no browser timer, so simulate the scheduled refresh without clicking a widget.
+    completed = True
     app.run()
     assert not app.exception
     assert not app.error
@@ -286,7 +296,7 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     assert app.get("video")
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
     assert submissions == [("video", "A paper pinwheel spins.")]
-    assert len(checks) == 2
+    assert len(checks) == (1 if from_archive else 2)
 
 
 def test_direct_create_reloads_modal_job_and_reports_a_manual_check(comfy_server, monkeypatch):
@@ -528,9 +538,11 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
 
     # Reopening the bare page has neither the old session nor the render URL.
     reopened = AppTest.from_file(page).run()
-    next(box for box in reopened.selectbox if box.label == "Render").select(call_id).run()
+    assert generate_button(reopened).disabled
+    assert reopened.query_params == {"render": call_id, "render_seconds": "3"}
+    assert any("Waiting for Modal" in notice.value for notice in reopened.info)
     completed = True
-    next(button for button in reopened.button if button.label == "Open render").click().run()
+    reopened.run()
     assert not reopened.exception
     assert not reopened.error
     assert reopened.get("video")
