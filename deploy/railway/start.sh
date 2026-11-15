@@ -13,7 +13,7 @@ unset SILVER_SCREEN_PASSWORD
 # Safari can omit Basic Auth on WebSocket and media requests.
 SILVER_SCREEN_SESSION_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')
 export SILVER_SCREEN_SESSION_KEY
-streamlit run streamlit_app.py --server.headless=true --server.address=127.0.0.1 --server.port=8501 &
+python -m uvicorn railway_studio:app --host 127.0.0.1 --port 8501 --no-access-log &
 studio_pid=$!
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 proxy_pid=$!

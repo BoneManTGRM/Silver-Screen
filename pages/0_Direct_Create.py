@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 import secrets
 from datetime import datetime, timezone
@@ -49,6 +50,10 @@ from silver_screen.modal_renderer import (
 from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
+
+HTTP_RENDER_PREVIEW = os.getenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW") == "1"
+if HTTP_RENDER_PREVIEW:
+    from silver_screen.render_preview import clear_render_preview, poll_modal_render, render_preview_html
 
 AUTO_FRAME = "Auto"
 WAN_5B_LABEL = "Wan 2.2 5B · 24 fps"
@@ -124,6 +129,7 @@ def refresh_render(job, film_shots, *, wait=False):
             job["prediction"] = update
 
     prediction = job["prediction"]
+    data = None
     is_image = job["model"] == IMAGE_MODEL
     job.pop("check_error", None)
     try:
@@ -132,21 +138,23 @@ def refresh_render(job, film_shots, *, wait=False):
             if job.get("backend") == "ComfyUI"
             else ReplicateVideoClient(model=job["model"])
         )
-        if isinstance(client, ModalComfyUIClient) and job.get("read_saved_render"):
+        if isinstance(client, ModalComfyUIClient) and HTTP_RENDER_PREVIEW and not wait:
+            prediction, data = poll_modal_render(prediction["id"])
+        elif isinstance(client, ModalComfyUIClient) and job.get("read_saved_render"):
             prediction = client.get_saved_prediction(prediction["id"])
         elif wait:
             prediction = client.wait(prediction, on_update=save_prediction)
         elif prediction.get("status") not in TERMINAL_STATUSES:
-            prediction = (
-                client.get_prediction(prediction["id"], prefer_saved=True)
-                if isinstance(client, ModalComfyUIClient)
-                else client.get_prediction(prediction["id"])
-            )
+            if isinstance(client, ModalComfyUIClient):
+                prediction = client.get_prediction(prediction["id"], prefer_saved=True)
+            else:
+                prediction = client.get_prediction(prediction["id"])
         if prediction.get("status") != "succeeded":
             save_prediction(prediction)
             return
         if isinstance(client, ComfyUIClient):
-            data = client.read_output(prediction)
+            if data is None:
+                data = client.read_output(prediction)
             if job.get("recovered"):
                 is_image = data.startswith(b"\x89PNG\r\n\x1a\n")
                 job["model"] = IMAGE_MODEL if is_image else CLIP_MODEL
@@ -159,6 +167,7 @@ def refresh_render(job, film_shots, *, wait=False):
                         data, expected_seconds=expected, expected_size=job.get("requested_size"),
                     )
             except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
+                job["invalid_media"] = True
                 save_prediction(dict(prediction, status="failed", error=str(exc)))
                 return
         else:
@@ -174,7 +183,12 @@ def refresh_render(job, film_shots, *, wait=False):
 
 
 @st.fragment(run_every=5)
-def show_modal_progress(job, film_shots):
+def show_modal_progress(job, film_shots, *, show_status=True):
+    if not show_status:
+        refresh_render(job, film_shots)
+        if job["prediction"].get("status") in TERMINAL_STATUSES:
+            st.rerun()
+        return
     status = st.empty()
     if "started" in job:
         minutes, seconds = divmod(int(monotonic() - job["started"]), 60)
@@ -230,9 +244,13 @@ modal_ready = modal_configured()
 if modal_ready and "recent_modal_renders" not in st.session_state:
     load_recent_renders()
 
-if job is None and MODAL_RENDER_ID.fullmatch(render_id):
-    job = recover_modal_job(render_id, st.query_params.get("render_seconds", ""))
-    st.session_state["direct_create_job"] = job
+if MODAL_RENDER_ID.fullmatch(render_id) and (not job or job["prediction"].get("id") != render_id):
+    entry = st.session_state.get("recent_modal_renders", {}).get(render_id)
+    if entry is not None:
+        job = open_recent_render(entry)
+    else:
+        job = recover_modal_job(render_id, st.query_params.get("render_seconds", ""))
+        st.session_state["direct_create_job"] = job
 elif job and not render_id and MODAL_RENDER_ID.fullmatch(job["prediction"].get("id") or ""):
     save_render_job(job)
 
@@ -245,6 +263,15 @@ if modal_ready and "recent_modal_renders" in st.session_state and not st.session
         )
         if latest is not None:
             job = open_recent_render(latest)
+
+film_shots = st.session_state.setdefault("action_film_shots", {})
+if job and job.get("read_saved_render") and job["prediction"].get("status") not in TERMINAL_STATUSES:
+    refresh_render(job, film_shots)
+
+if job and HTTP_RENDER_PREVIEW:
+    current_render_id = job["prediction"].get("id") or ""
+    if job["backend"] == "ComfyUI" and MODAL_RENDER_ID.fullmatch(current_render_id):
+        st.markdown(f"[Open current render](/renders/{current_render_id})")
 
 if job and job.get("requested_seconds") and job["model"] == CLIP_MODEL:
     st.session_state.setdefault("direct_create_output", "Video clip")
@@ -270,7 +297,6 @@ shot_number = 0
 cast_photos = dict(library_photos)
 cast_permission = False
 intimacy_permission = False
-film_shots = st.session_state.setdefault("action_film_shots", {})
 custom_shots = st.session_state.setdefault("custom_film_shots", {})
 if not is_image:
     with st.expander("Last Train Out · 60-second action short"):
@@ -557,6 +583,11 @@ if job:
     prediction = job["prediction"]
     prediction_id = prediction.get("id")
     job_backend = job.get("backend", "Replicate")
+    modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
+    valid_render_id = modal_job and MODAL_RENDER_ID.fullmatch(prediction_id) is not None
+    http_preview = valid_render_id and HTTP_RENDER_PREVIEW and not job.get("invalid_media")
+    if http_preview:
+        st.iframe(render_preview_html(prediction_id), height="content", alt="Current render")
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
     if submitted_prompt := job.get("submitted_prompt"):
@@ -572,10 +603,9 @@ if job:
     if warning := job.get("history_warning"):
         st.warning(warning)
 
-    modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
     auto_check = modal_job and active
     if auto_check:
-        show_modal_progress(job, film_shots)
+        show_modal_progress(job, film_shots, show_status=not http_preview)
     elif "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
         check = not generate and st.button("Check render status", key="direct-check-job")
         if check or generate:
@@ -583,7 +613,7 @@ if job:
                 refresh_render(job, film_shots, wait=generate)
             if check and active and job["prediction"].get("status") in TERMINAL_STATUSES:
                 st.rerun()
-    if job["prediction"].get("status") in {"failed", "canceled"}:
+    if not http_preview and job["prediction"].get("status") in {"failed", "canceled"}:
         st.error(job["prediction"].get("error") or f"{job_backend} did not complete the prediction.")
     elif not auto_check and (error := job.get("check_error")):
         st.error(error)
@@ -595,14 +625,16 @@ if job:
         if warning := job.get("film_warning"):
             st.warning(warning)
         if job["model"] == IMAGE_MODEL:
-            st.image(job["data"])
+            if not http_preview:
+                st.image(job["data"])
+                st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
-            st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
         else:
             filename = job.get("filename", "silver-screen.mp4")
-            st.success("Your clip is ready.")
-            st.video(job["data"], format="video/mp4")
+            if not http_preview:
+                st.success("Your clip is ready.")
+                st.video(job["data"], format="video/mp4")
             if review := job["prediction"].get("hand_review"):
                 if message := hand_review_message(review):
                     if review.get("status") == "possible_loss":
@@ -624,7 +656,8 @@ if job:
                 st.caption(render_model)
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
-            st.download_button("Download original clip", job["data"], filename, "video/mp4")
+            if not http_preview:
+                st.download_button("Download original clip", job["data"], filename, "video/mp4")
 
             with st.expander("Record dialogue and export this clip"):
                 samples = saved_clone_samples(library_root) if library_root and voice_clone_ready() else {}
@@ -700,7 +733,7 @@ if job:
                     st.session_state.pop("custom_film_export", None)
                     st.success("Clip added to your custom film.")
 
-        if modal_job and MODAL_RENDER_ID.fullmatch(prediction_id):
+        if valid_render_id:
             image_result = job["model"] == IMAGE_MODEL
             media_label = "image" if image_result else "clip"
             with st.popover(f"Delete {media_label}"):
@@ -711,6 +744,8 @@ if job:
                     except VideoGenerationError as exc:
                         st.error(str(exc))
                     else:
+                        if HTTP_RENDER_PREVIEW:
+                            clear_render_preview()
                         st.session_state.pop("direct_create_job", None)
                         st.session_state.pop("recent_modal_renders", None)
                         st.query_params.pop("render", None)

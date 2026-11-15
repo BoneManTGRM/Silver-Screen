@@ -6,10 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-de
 COPY --from=proxy /usr/bin/caddy /usr/bin/caddy
 WORKDIR /app
 COPY requirements.txt ./
-RUN pip install -r requirements.txt modal==1.6.4
+RUN pip install -r requirements.txt 'streamlit>=1.67,<2' modal==1.6.4
 COPY silver_screen ./silver_screen
 COPY pages ./pages
 COPY streamlit_app.py ./
+COPY deploy/railway/studio.py ./railway_studio.py
 COPY .streamlit ./.streamlit
 COPY deploy/iphone/silver-screen-offline.js ./deploy/iphone/
 COPY deploy/runpod/workflows ./deploy/runpod/workflows

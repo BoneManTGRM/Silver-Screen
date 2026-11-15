@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Silver Screen render</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+    body { margin: 0; color: CanvasText; }
+    .standalone { margin: 20px auto; padding: 0 16px; max-width: 760px; }
+    .inline .standalone-only, .standalone .inline-only, [hidden] { display: none; }
+    p { margin: 0 0 10px; }
+    video, img { display: block; width: auto; max-width: 100%; max-height: 460px; border-radius: 8px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 12px; }
+    a { color: LinkText; }
+    button { font: inherit; padding: 4px 10px; color: inherit; }
+  </style>
+</head>
+<body class="${mode}">
+  <h1 class="standalone-only">Silver Screen render</h1>
+  <p id="status" role="status">Checking the render…</p>
+  <p id="warning" role="status" hidden></p>
+  <video id="clip" controls playsinline preload="metadata" hidden></video>
+  <img id="image" alt="Generated image" hidden>
+  <nav aria-label="Render actions">
+    <button id="check" type="button">Check status</button>
+    <a id="download" href="/renders/${render_id}/media?download=1" hidden>Download</a>
+    <a class="inline-only" href="/renders/${render_id}" target="_blank" rel="noopener">Open render page</a>
+    <a class="standalone-only" href="/Direct_Create?render=${render_id}">Back to Direct Create</a>
+  </nav>
+  <script>
+    const path = "/renders/${render_id}";
+    const status = document.querySelector("#status");
+    const warning = document.querySelector("#warning");
+    const check = document.querySelector("#check");
+    const download = document.querySelector("#download");
+    const clip = document.querySelector("#clip");
+    const image = document.querySelector("#image");
+    let timer, checking = false, finished = false;
+
+    async function refresh() {
+      if (checking || finished) return;
+      clearTimeout(timer);
+      checking = true;
+      check.disabled = true;
+      try {
+        const response = await fetch(path + "/status", {
+          cache: "no-store", signal: AbortSignal.timeout(12000)
+        });
+        if (response.status === 401) {
+          status.textContent = "Reopen the render page to sign back into Silver Screen.";
+          return;
+        }
+        const result = await response.json();
+        if (result.status === "succeeded") {
+          const media = result.image ? image : clip;
+          status.textContent = result.image ? "Your image is ready." : "Your clip is ready.";
+          media.src = path + "/media";
+          media.hidden = false;
+          download.textContent = result.image ? "Download image" : "Download clip";
+          download.hidden = false;
+          warning.textContent = result.warning || "";
+          warning.hidden = !result.warning;
+          finished = true;
+        } else if (["failed", "canceled", "missing"].includes(result.status)) {
+          status.textContent = result.error || "Modal did not finish this render.";
+          finished = true;
+        } else {
+          status.textContent = result.notice || "Rendering on Modal. This page will update when it’s ready.";
+        }
+      } catch {
+        status.textContent = "Waiting for a connection to Silver Screen. Retrying shortly.";
+      } finally {
+        checking = false;
+        check.hidden = finished;
+        check.disabled = false;
+        if (!finished && !document.hidden) timer = setTimeout(refresh, 5000);
+      }
+    }
+    function reportMediaError() {
+      warning.textContent = "The preview couldn’t load. Use Download or try the preview again.";
+      warning.hidden = false;
+      finished = false;
+      check.textContent = "Retry preview";
+      check.hidden = false;
+    }
+    clip.addEventListener("error", reportMediaError);
+    image.addEventListener("error", reportMediaError);
+    check.addEventListener("click", refresh);
+    window.addEventListener("pageshow", refresh);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) refresh();
+    });
+    refresh();
+  </script>
+</body>
+</html>
