@@ -106,11 +106,28 @@ def _array(path: Path) -> np.ndarray:
         return np.asarray(image.convert("RGB").resize((192, 108)), dtype=np.float32) / 255.0
 
 
-def _sharpness(array: np.ndarray) -> float:
+def _sharpness(array: np.ndarray, *, product_shot: bool = False) -> float:
     gray = array.mean(axis=2)
-    gx = np.abs(np.diff(gray, axis=1)).mean()
-    gy = np.abs(np.diff(gray, axis=0)).mean()
-    return float(max(0.0, min(1.0, (gx + gy) * 4.5)))
+    if product_shot:
+        # A clean product shot may have a large seamless background. Measure
+        # strong edges in the interior so empty space does not read as blur.
+        height, width = gray.shape
+        top, left = height // 20, width // 20
+        gray = gray[top:height - top, left:width - left]
+    gx = np.abs(np.diff(gray, axis=1))
+    gy = np.abs(np.diff(gray, axis=0))
+    if product_shot:
+        # Average the strongest two percent in each direction. Taking the
+        # weaker direction prevents a letterbox edge from masking blur.
+        strengths = []
+        for gradient in (gx, gy):
+            values = gradient.ravel()
+            count = max(1, values.size // 50)
+            strengths.append(np.partition(values, -count)[-count:].mean())
+        strength = min(strengths)
+    else:
+        strength = gx.mean() + gy.mean()
+    return min(1.0, float(strength) * 4.5)
 
 
 def _histogram(array: np.ndarray) -> np.ndarray:
@@ -155,7 +172,8 @@ def analyze_clip(
     seconds = float(probe_media(path).get("duration") or 8.0)
     frames = _sample_frames(path, root, int(cfg["sampleFrames"]), max(seconds, 0.1))
     arrays = [_array(frame) for frame in frames]
-    sharpness_values = [_sharpness(item) for item in arrays]
+    product_shot = bool(cfg.get("singleShot"))
+    sharpness_values = [_sharpness(item, product_shot=product_shot) for item in arrays]
     luminance = [float(item.mean()) for item in arrays]
     contrast = [float(item.std()) for item in arrays]
     diffs = [float(np.abs(arrays[index] - arrays[index - 1]).mean()) for index in range(1, len(arrays))]
@@ -201,7 +219,7 @@ def analyze_clip(
         add("appearance_drift", "high", "Broad appearance statistics drift from the authorized reference pack.", "Re-anchor the authorized identity, wardrobe palette, age appearance, and body proportions.")
     if internal_consistency < 0.62:
         add("intra_clip_drift", "high", "The clip changes appearance too strongly within a single shot.", "Keep one actor, wardrobe state, environment, lens, and lighting setup throughout the shot.")
-    if cfg.get("singleShot") and _has_unplanned_cut(path):
+    if product_shot and _has_unplanned_cut(path):
         add("unexpected_cut", "high", "The product shot makes an abrupt visual jump.",
             "Keep the product and setting stable during one continuous camera move.")
 

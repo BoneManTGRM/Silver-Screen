@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFilter
 
 from silver_screen import visual_quality
 from silver_screen.ai_video import scene_prompt
@@ -66,6 +66,39 @@ def test_flicker_and_freeze_create_targeted_findings(monkeypatch, tmp_path: Path
     assert "flicker" in codes
     assert report["hardFailure"] is True
     assert report["repairDirective"]
+
+
+def test_product_sharpness_distinguishes_plain_background_and_severe_blur(monkeypatch, tmp_path: Path) -> None:
+    clip = tmp_path / "product.mp4"
+    clip.touch()
+    monkeypatch.setattr(visual_quality, "probe_media", lambda *args: {"duration": 4.0})
+    monkeypatch.setattr(visual_quality, "_has_unplanned_cut", lambda *args: False)
+    config = {"singleShot": True, "minimumSharpness": 0.18}
+
+    def moving_mug(blur: int) -> list[Path]:
+        frames = []
+        for index in range(8):
+            image = Image.new("RGB", (768, 448), (220, 202, 182))
+            draw = ImageDraw.Draw(image)
+            x = 230 + index * 25
+            draw.rounded_rectangle((x, 95, x + 152, 347), radius=18, fill=(12, 97, 98))
+            draw.rounded_rectangle((x - 4, 75, x + 156, 112), radius=8, fill=(65, 68, 68))
+            draw.rectangle((x + 1, 85, x + 151, 98), fill=(209, 214, 216))
+            draw.rectangle((x + 16, 323, x + 136, 352), fill=(29, 38, 40))
+            path = tmp_path / f"{blur}-{index}.jpg"
+            image.filter(ImageFilter.GaussianBlur(blur)).save(path)
+            frames.append(path)
+        return frames
+
+    sharp = moving_mug(0)
+    monkeypatch.setattr(visual_quality, "_sample_frames", lambda *args: sharp)
+    report = visual_quality.analyze_clip(clip, config=config)
+    assert not report["hardFailure"], report
+    blurred = moving_mug(23)
+    monkeypatch.setattr(visual_quality, "_sample_frames", lambda *args: blurred)
+    report = visual_quality.analyze_clip(clip, config=config)
+    assert report["hardFailure"]
+    assert any(finding["code"] == "soft_or_blurred" for finding in report["findings"])
 
 
 def test_visual_retake_directive_reaches_provider_prompt() -> None:
