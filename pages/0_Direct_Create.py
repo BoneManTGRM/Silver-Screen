@@ -23,7 +23,8 @@ from silver_screen.ai_video import (
 )
 from silver_screen.cast_library import cast_library_root, saved_cast_photos, saved_clone_samples, saved_voice_takes
 from silver_screen.comfyui import (
-    IMAGE_SIZES, ComfyUIClient, VIDEO_SIZES, WAN_14B_LANDSCAPE_HD, WAN_14B_MAX_SECONDS, WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
+    IMAGE_SIZES, ComfyUIClient, VIDEO_SIZES, WAN_14B_EXTENDED_MAX_SECONDS, WAN_14B_LANDSCAPE_HD,
+    WAN_14B_STEPS, WAN_14B_VIDEO_SIZES,
     WAN_LANDSCAPE_HD, comfyui_ready, image_size_ready, make_comfyui_client, video_controls_ready, wan_aspect_size,
 )
 from silver_screen.direct_generation import (
@@ -85,7 +86,7 @@ def recover_modal_job(render_id: str, seconds: str = "", *, image: bool = False)
         "recovered": True,
         "prediction": {"id": render_id, "status": "processing"},
     }
-    if re.fullmatch(r"[2-9]|1[0-2]", seconds):
+    if re.fullmatch(r"[0-9]{1,2}", seconds) and 2 <= int(seconds) <= WAN_14B_EXTENDED_MAX_SECONDS:
         job["requested_seconds"] = int(seconds)
     return job
 
@@ -135,7 +136,7 @@ def retain_film_shot(job: dict, film_shots: dict, data: bytes) -> None:
     st.session_state.pop("action_film_export", None)
 
 
-def refresh_render(job, film_shots, *, wait=False):
+def refresh_render(job, film_shots, *, wait=False, manual=False):
     def save_prediction(update):
         if update.get("status") != "succeeded":
             job["prediction"] = update
@@ -151,7 +152,7 @@ def refresh_render(job, film_shots, *, wait=False):
             else ReplicateVideoClient(model=job["model"])
         )
         if isinstance(client, ModalComfyUIClient) and HTTP_RENDER_PREVIEW and not wait:
-            prediction, data = poll_modal_render(prediction["id"])
+            prediction, data = poll_modal_render(prediction["id"], refresh=manual)
         elif isinstance(client, ModalComfyUIClient) and job.get("read_saved_render"):
             prediction = client.get_saved_prediction(prediction["id"])
         elif wait:
@@ -195,19 +196,14 @@ def refresh_render(job, film_shots, *, wait=False):
 
 
 @st.fragment(run_every=5)
-def show_modal_progress(job, film_shots, *, show_status=True):
-    if not show_status:
-        refresh_render(job, film_shots)
-        if job["prediction"].get("status") in TERMINAL_STATUSES:
-            st.rerun()
-        return
+def show_modal_progress(job, film_shots, *, inline_preview=False):
     status = st.empty()
     if "started" in job:
         minutes, seconds = divmod(int(monotonic() - job["started"]), 60)
         st.caption(f"Time since submission · {minutes}:{seconds:02d}")
     if st.button("Check render status", key="direct-check-job"):
         with st.spinner("Checking Modal…"):
-            refresh_render(job, film_shots)
+            refresh_render(job, film_shots, manual=True)
         job["last_manual_check"] = monotonic()
     else:
         refresh_render(job, film_shots)
@@ -215,12 +211,14 @@ def show_modal_progress(job, film_shots, *, show_status=True):
         st.rerun()
     if error := job.get("check_error"):
         status.warning(error)
-    else:
-        if job.get("history_saved"):
-            recovery = "You can return to this job from Recent renders."
+    elif not inline_preview:
+        if progress := job["prediction"].get("progress"):
+            complete, total = progress["complete"], progress["total"]
+            status.info(f"Rendering segment {complete + 1} of {total}." if complete < total else "Joining the segments.")
         else:
-            recovery = "Keep this page’s link to reopen the same render."
-        status.info(f"Waiting for Modal. {recovery}")
+            recovery = ("You can return to this job from Recent renders." if job.get("history_saved")
+                        else "Keep this page’s link to reopen the same render.")
+            status.info(f"Waiting for Modal. {recovery}")
     if checked := job.get("last_manual_check"):
         seconds_ago = int(monotonic() - checked)
         st.caption(f"Last manual check · {seconds_ago}s ago")
@@ -410,7 +408,7 @@ if use_modal and not is_image:
         model_choices = (WAN_14B_LABEL, WAN_5B_LABEL) if reference is not None else (WAN_5B_LABEL, WAN_14B_LABEL)
         wan_14b = st.selectbox(
             "Render model", model_choices, key="wan-model-with-photo" if reference is not None else "wan-model-from-text",
-            help="14B is available from a prompt alone or with a starting photo. It uses more Modal GPU time and supports clips up to five seconds.",
+            help="14B supports up to 20 seconds. Clips longer than five seconds render in consecutive segments and export as one MP4.",
         ) == WAN_14B_LABEL
     else:
         st.caption(WAN_5B_LABEL)
@@ -481,13 +479,14 @@ with st.form("direct_create"):
         ratio = st.selectbox("Aspect ratio", ratios)
     if not is_image:
         if video_controls:
-            maximum = WAN_14B_MAX_SECONDS if wan_14b else 12
+            maximum = WAN_14B_EXTENDED_MAX_SECONDS if wan_14b else 12
             default_duration = 3 if wan_14b else (5 if use_modal else 8)
             duration = st.number_input(
                 "Clip length in seconds", min_value=2, max_value=maximum,
                 value=min(shot.seconds if shot else default_duration, maximum),
                 key=f"wan-clip-length-{shot_number}-{maximum}",
-                help="A total clip length stated in the prompt sets the render duration.",
+                help=("Clips over five seconds use consecutive GPU renders. A total length in the prompt overrides this value."
+                      if wan_14b else "A total clip length stated in the prompt sets the render duration."),
             )
         else:
             durations = (8, 6, 4)
@@ -571,7 +570,7 @@ if generate and not active:
                 if use_modal:
                     render_options["save_image" if is_image else "save_clip"] = True
                     if not is_image:
-                        render_options.update(check_face=check_reference, check_body=check_reference)
+                        render_options.update(check_face=check_reference, check_body=check_reference, record_stats=True)
                         if check_reference and image:
                             render_prompt = preserve_reference_appearance(prompt)
                 if wan_14b:
@@ -642,7 +641,7 @@ if job:
 
     auto_check = modal_job and active
     if auto_check:
-        show_modal_progress(job, film_shots, show_status=not http_preview)
+        show_modal_progress(job, film_shots, inline_preview=http_preview)
     elif "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
         check = not generate and st.button("Check render status", key="direct-check-job")
         if check or generate:
@@ -694,6 +693,14 @@ if job:
                 st.caption(f"Seed {seed}")
             if render_model := job.get("render_model"):
                 st.caption(render_model)
+            if stats := job["prediction"].get("render_stats"):
+                with st.expander("Render benchmark"):
+                    st.write(f"{stats['model']} · {stats['width']} × {stats['height']} · {stats['fps']} fps")
+                    worker_seconds = stats["gpu_worker_seconds"]
+                    st.write(f"{stats['segments']} render segment(s) · {worker_seconds:.1f}s GPU worker time")
+                    if gpus := stats.get("gpus"):
+                        st.caption(", ".join(gpus))
+                    st.caption(f"{len(job['data']) / 1024**2:.2f} MiB MP4")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
             if not http_preview:

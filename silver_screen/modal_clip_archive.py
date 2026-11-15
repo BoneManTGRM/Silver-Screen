@@ -11,12 +11,12 @@ from tempfile import NamedTemporaryFile
 from typing import Any, NamedTuple
 
 from .ai_video import VideoGenerationError
-from .comfyui import MAX_OUTPUT
+from .comfyui import MAX_OUTPUT, WAN_14B_EXTENDED_MAX_SECONDS
 
 CLIPS_VOLUME = "silver-screen-completed-clips"
 CLIPS_MOUNT = Path("/mnt/silver-screen-clips")
 MODAL_RENDER_ID = re.compile(r"fc-[0-9A-Z]{26}")
-SUBMITTED_RENDER = re.compile(r"(fc-[0-9A-Z]{26})\.(0|[2-9]|1[0-2])\.submitted")
+SUBMITTED_RENDER = re.compile(r"(fc-[0-9A-Z]{26})\.(0|[2-9]|[12][0-9])\.submitted")
 MAX_REVIEW_BYTES = 4096
 
 
@@ -37,7 +37,7 @@ def clip_filename(render_id: str) -> str:
 
 def remember_submitted_render(volume: Any, render_id: str, seconds: int | None) -> None:
     name = f"{render_id}.{0 if seconds is None else seconds}.submitted"
-    if not SUBMITTED_RENDER.fullmatch(name):
+    if not SUBMITTED_RENDER.fullmatch(name) or (seconds is not None and seconds > WAN_14B_EXTENDED_MAX_SECONDS):
         raise ValueError("Invalid media submission.")
     with volume.batch_upload(force=True) as upload:
         upload.put_file(BytesIO(b"\n"), f"/{name}")
@@ -57,11 +57,12 @@ def _write_file(directory: Path, destination: Path, data: bytes) -> None:
 def save_completed_clip(
     volume: Any, directory: Path, render_id: str, data: bytes, *,
     hand_review: dict | None = None, face_review: dict | None = None, body_review: dict | None = None,
+    render_stats: dict | None = None,
 ) -> None:
     destination = directory / clip_filename(render_id)
     reviews = (
-        {"hand_review": hand_review, "face_review": face_review, "body_review": body_review}
-        if face_review or body_review else hand_review
+        {"hand_review": hand_review, "face_review": face_review, "body_review": body_review, "render_stats": render_stats}
+        if face_review or body_review or render_stats else hand_review
     )
     if reviews:
         _write_file(directory, destination.with_suffix(".json"), json.dumps(reviews).encode())
@@ -75,8 +76,7 @@ def save_completed_image(volume: Any, directory: Path, render_id: str, data: byt
     volume.commit()
 
 
-def read_saved_reviews(volume: Any, render_id: str) -> dict:
-    filename = Path(clip_filename(render_id)).with_suffix(".json").name
+def _read_small_json(volume: Any, filename: str) -> dict:
     metadata = bytearray()
     try:
         for chunk in volume.read_file(filename):
@@ -88,9 +88,34 @@ def read_saved_reviews(volume: Any, render_id: str) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
+    return data
+
+
+def read_saved_reviews(volume: Any, render_id: str) -> dict:
+    filename = Path(clip_filename(render_id)).with_suffix(".json").name
+    data = _read_small_json(volume, filename)
     if isinstance(data.get("status"), str):
         return {"hand_review": data}  # Legacy clips stored only the hand review.
-    return {key: data[key] for key in ("hand_review", "face_review", "body_review") if isinstance(data.get(key), dict)}
+    return {key: data[key] for key in ("hand_review", "face_review", "body_review", "render_stats")
+            if isinstance(data.get(key), dict)}
+
+
+def render_progress_filename(render_id: str) -> str:
+    return Path(clip_filename(render_id)).with_suffix(".progress").name
+
+
+def write_render_progress(volume: Any, directory: Path, render_id: str, complete: int, total: int) -> None:
+    filename = render_progress_filename(render_id)
+    _write_file(directory, directory / filename, json.dumps({"complete": complete, "total": total}).encode())
+    volume.commit()
+
+
+def read_render_progress(volume: Any, render_id: str) -> dict:
+    raw = _read_small_json(volume, render_progress_filename(render_id))
+    complete, total = raw.get("complete"), raw.get("total")
+    if type(complete) is int and type(total) is int and 0 <= complete <= total <= 4 and total >= 2:
+        return {"complete": complete, "total": total}
+    return {}
 
 
 def _read_media(volume: Any, filename: str) -> bytes:
@@ -145,6 +170,8 @@ def latest_renders(volume: Any, limit: int = 20) -> list[RecentRender]:
             deleted.add(path.stem)
         elif receipt := SUBMITTED_RENDER.fullmatch(path.name):
             render_id, seconds = receipt.groups()
+            if int(seconds) > WAN_14B_EXTENDED_MAX_SECONDS:
+                continue
             if render_id not in submitted or entry.mtime > submitted[render_id][0]:
                 submitted[render_id] = (entry.mtime, int(seconds))
     entries = []

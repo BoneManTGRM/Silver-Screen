@@ -1,7 +1,8 @@
 """Serve existing Modal renders over authenticated, same-origin HTTP."""
 
 import re
-from functools import lru_cache
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from string import Template
 from threading import Lock
@@ -22,6 +23,10 @@ _TEMPLATE = Template(Path(__file__).with_name("render_preview.html").read_text(e
 _PRIVATE = {"Cache-Control": "private, no-store", "Cross-Origin-Resource-Policy": "same-origin"}
 _LOCK = Lock()
 _RANGE = re.compile(r"bytes=(\d{0,20})-(\d{0,20})")
+_MAX_CHECKS = 2
+_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_CHECKS, thread_name_prefix="render-status")
+_CHECKS: dict[str, Future] = {}
+_CACHE: OrderedDict[str, tuple[float, tuple[dict, bytes | None]]] = OrderedDict()
 
 
 def render_preview_html(render_id: str, *, standalone: bool = False) -> str:
@@ -33,27 +38,68 @@ def render_preview_html(render_id: str, *, standalone: bool = False) -> str:
     )
 
 
-@lru_cache(maxsize=1)
-def _poll_modal_render(render_id: str, interval: int) -> tuple[dict, bytes | None]:
-    # Share one short-lived result between the UI poll and the player's byte requests.
-    client = ModalComfyUIClient()
-    prediction = client.get_prediction(render_id, prefer_saved=True)
-    if prediction["status"] == "succeeded":
-        data = client.read_output(prediction)
-        if data.startswith(b"\x89PNG\r\n\x1a\n") or data[4:8] == b"ftyp":
-            return prediction, data
-        return {"status": "failed", "error": "Modal returned an unreadable media file."}, None
-    return prediction, None
+def _retrieve_render(render_id: str) -> tuple[dict, bytes | None]:
+    try:
+        client = ModalComfyUIClient()
+        prediction = client.get_prediction(render_id, prefer_saved=True)
+        if prediction["status"] == "succeeded":
+            data = client.read_output(prediction)
+            if data.startswith(b"\x89PNG\r\n\x1a\n") or data[4:8] == b"ftyp":
+                return prediction, data
+            return {"status": "failed", "error": "Modal returned an unreadable media file."}, None
+        return prediction, None
+    except PredictionPending as exc:
+        return {"status": "processing", "notice": str(exc)}, None
+    except (OSError, VideoGenerationError):
+        return {"status": "processing", "notice": "Modal could not respond. The same render will be checked again."}, None
 
 
-def poll_modal_render(render_id: str) -> tuple[dict, bytes | None]:
+def _store_check(render_id: str, check: Future) -> None:
     with _LOCK:
-        return _poll_modal_render(render_id, int(monotonic() / 5))
+        if _CHECKS.get(render_id) is not check:
+            return
+        del _CHECKS[render_id]
+        if check.cancelled() or check.exception() is not None:
+            return
+        result = check.result()
+        ttl = 60 if result[1] is not None else 3
+        _CACHE[render_id] = (monotonic() + ttl, result)
+        _CACHE.move_to_end(render_id)
+        if len(_CACHE) > _MAX_CHECKS:
+            _CACHE.popitem(last=False)
+
+
+def poll_modal_render(render_id: str, *, refresh: bool = False) -> tuple[dict, bytes | None]:
+    started = False
+    with _LOCK:
+        cached = _CACHE.get(render_id)
+        if cached and monotonic() < cached[0] and (not refresh or cached[1][1] is not None):
+            _CACHE.move_to_end(render_id)
+            return cached[1]
+        check = _CHECKS.get(render_id)
+        if check is None and len(_CHECKS) < _MAX_CHECKS:
+            check = _EXECUTOR.submit(_retrieve_render, render_id)
+            _CHECKS[render_id] = check
+            started = True
+    if check is not None:
+        if started:
+            check.add_done_callback(lambda complete: _store_check(render_id, complete))
+        try:
+            result = check.result(timeout=1.5)
+        except TimeoutError:
+            pass
+        else:
+            _store_check(render_id, check)
+            return result
+    if cached and cached[1][0].get("progress"):
+        return cached[1]
+    return {"status": "processing", "notice": "Checking with Modal. You can leave this page open."}, None
 
 
 def clear_render_preview() -> None:
     with _LOCK:
-        _poll_modal_render.cache_clear()
+        _CACHE.clear()
+        _CHECKS.clear()
 
 
 def _render_page(request: Request) -> Response:
@@ -67,18 +113,13 @@ def _read_render(request: Request) -> tuple[dict, bytes | None]:
     render_id = request.path_params["render_id"]
     if not MODAL_RENDER_ID.fullmatch(render_id):
         return {"status": "missing", "error": "This render link is invalid."}, None
-    try:
-        return poll_modal_render(render_id)
-    except PredictionPending as exc:
-        return {"status": "processing", "notice": str(exc)}, None
-    except (OSError, VideoGenerationError):
-        return {"status": "processing", "notice": "Could not check Modal. Retrying shortly."}, None
+    return poll_modal_render(render_id, refresh=request.query_params.get("refresh") == "1")
 
 
 def _render_status(request: Request) -> Response:
     prediction, data = _read_render(request)
     result = {
-        key: prediction[key] for key in ("status", "error", "warning", "notice")
+        key: prediction[key] for key in ("status", "error", "warning", "notice", "progress", "render_stats")
         if key in prediction
     }
     if data is not None:

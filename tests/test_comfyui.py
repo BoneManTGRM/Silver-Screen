@@ -545,7 +545,7 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
     models = next(box for box in app.selectbox if box.label == "Render model")
     assert models.value == "Wan 2.2 14B · 16 fps"
-    assert app.number_input[0].max == 5
+    assert app.number_input[0].max == 20
     assert any(image.proto.imgs[0].caption == "Starting frame · 720 × 1280" for image in app.image)
     assert app.slider[0].value == 28
     assert app.slider[0].max == 40
@@ -588,7 +588,8 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert "wan_14b" not in settings
 
 
-def test_direct_create_14b_text_render_uses_the_requested_length_and_framing(comfy_server, monkeypatch):
+@pytest.mark.parametrize(("seconds", "function_name"), [(4, "render_wan14_text"), (8, "render_wan14_extended")])
+def test_direct_create_14b_text_render_uses_the_requested_length_and_framing(comfy_server, monkeypatch, seconds, function_name):
     root = Path(__file__).resolve().parents[1]
     workflow = root / "deploy/runpod/workflows/wan-video.json"
     monkeypatch.setenv(WORKFLOW_ENV["video"], str(workflow))
@@ -619,18 +620,18 @@ def test_direct_create_14b_text_render_uses_the_requested_length_and_framing(com
     app = AppTest.from_file(root / "pages/0_Direct_Create.py").run()
     app.radio[0].set_value("Video clip").run()
     next(box for box in app.selectbox if box.label == "Render model").select("Wan 2.2 14B · 16 fps").run()
-    prompt = "  A 4-second vertical clip.\nMove the red disk left to right.  "
+    prompt = f"  A {seconds}-second vertical clip.\nMove the red disk left to right.  "
     app.text_area[0].set_value(prompt)
     generate_button(app).click().run()
     assert not app.exception
     assert not app.error
     app_name, function, kind, submitted, settings = submissions[0]
-    assert (app_name, function, kind, submitted) == ("test-renderer", "render_wan14_text", "video", prompt)
-    assert settings["duration"] == 4
+    assert (app_name, function, kind, submitted) == ("test-renderer", function_name, "video", prompt)
+    assert settings["duration"] == seconds
     assert settings["video_size"] == (720, 1280)
     assert settings["negative_prompt"] == ""
     assert settings["image"] is None
-    assert app.query_params == {"render": call_id, "render_seconds": "4"}
+    assert app.query_params == {"render": call_id, "render_seconds": str(seconds)}
 
 
 def test_wan_14b_text_workflow_uses_the_native_model_boundary(comfy_server, monkeypatch):

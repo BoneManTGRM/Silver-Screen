@@ -1,5 +1,7 @@
 from unittest.mock import Mock
 import json
+from threading import Event
+from time import monotonic
 
 import pytest
 
@@ -15,12 +17,12 @@ RENDER_ID = "fc-" + "1" * 26
 MP4 = b"\x00\x00\x00\x20ftypisom" + b"frame data"
 
 
-def request(method="GET", *, byte_range=None, query=b""):
+def request(method="GET", *, byte_range=None, query=b"", render_id=RENDER_ID):
     headers = [(b"range", byte_range.encode())] if byte_range else []
     return Request({
         "type": "http",
         "method": method,
-        "path_params": {"render_id": RENDER_ID},
+        "path_params": {"render_id": render_id},
         "headers": headers,
         "query_string": query,
     })
@@ -31,13 +33,14 @@ def test_render_can_finish_over_http_without_a_studio_session(monkeypatch):
     client.get_prediction.return_value = {"status": "processing"}
     client.read_output.return_value = MP4
     monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
-    clock = iter((0, 0, 5, 5, 5, 5))
-    monkeypatch.setattr(render_preview, "monotonic", lambda: next(clock))
+    clock = [0]
+    monkeypatch.setattr(render_preview, "monotonic", lambda: clock[0])
     render_preview.clear_render_preview()
     try:
         assert render_preview._render_status(request()).body == b'{"status":"processing"}'
         assert render_preview._render_media(request()).status_code == 409
 
+        clock[0] = 5
         client.get_prediction.return_value = {"status": "succeeded", "face_review": {"status": "possible_drift"}}
         ready = json.loads(render_preview._render_status(request()).body)
         assert ready["status"] == "succeeded" and not ready["image"]
@@ -54,6 +57,51 @@ def test_render_can_finish_over_http_without_a_studio_session(monkeypatch):
         assert head.headers["content-length"] == str(len(MP4))
         assert client.get_prediction.call_count == 2
     finally:
+        render_preview.clear_render_preview()
+
+
+def test_manual_status_rechecks_cached_progress(monkeypatch):
+    client = Mock()
+    client.get_prediction.side_effect = [
+        {"status": "processing", "progress": {"complete": 0, "total": 2}},
+        {"status": "processing", "progress": {"complete": 1, "total": 2}},
+    ]
+    monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
+    render_preview.clear_render_preview()
+    try:
+        first = json.loads(render_preview._render_status(request()).body)
+        assert first["progress"]["complete"] == 0
+        assert json.loads(render_preview._render_status(request()).body) == first
+        updated = json.loads(render_preview._render_status(request(query=b"refresh=1")).body)
+        assert updated["progress"] == {"complete": 1, "total": 2}
+        assert client.get_prediction.call_count == 2
+    finally:
+        render_preview.clear_render_preview()
+
+
+def test_slow_status_check_does_not_block_another_render(monkeypatch):
+    other = "fc-" + "2" * 26
+    release = Event()
+    client = Mock()
+
+    def lookup(render_id, **kwargs):
+        if render_id == RENDER_ID:
+            assert release.wait(6)
+            return {"status": "processing"}
+        return {"status": "failed", "error": "Render canceled by the operator."}
+
+    client.get_prediction.side_effect = lookup
+    monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
+    render_preview.clear_render_preview()
+    try:
+        start = monotonic()
+        stalled = json.loads(render_preview._render_status(request()).body)
+        assert stalled["status"] == "processing" and "Checking with Modal" in stalled["notice"]
+        fresh = json.loads(render_preview._render_status(request(render_id=other)).body)
+        assert fresh["status"] == "failed" and "canceled" in fresh["error"]
+        assert monotonic() - start < 4
+    finally:
+        release.set()
         render_preview.clear_render_preview()
 
 

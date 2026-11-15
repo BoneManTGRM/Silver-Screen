@@ -6,12 +6,12 @@ import os
 from typing import Any
 
 from .ai_video import PredictionPending, VideoGenerationError
-from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient, image_size_ready
+from .comfyui import MAX_OUTPUT, WAN_14B_EXTENDED_MAX_SECONDS, WAN_14B_MAX_SECONDS, ComfyUIClient, image_size_ready
 from .face_review import FACE_REVIEW_UNAVAILABLE
 from .hand_review import BODY_REVIEW_UNAVAILABLE, HAND_REVIEW_UNAVAILABLE
 from .modal_clip_archive import (
     CLIPS_VOLUME, MODAL_RENDER_ID, RecentRender, delete_saved_media, latest_renders, media_was_deleted,
-    read_saved_media, read_saved_reviews, remember_submitted_render,
+    read_render_progress, read_saved_media, read_saved_reviews, remember_submitted_render,
 )
 
 
@@ -99,9 +99,12 @@ class ModalComfyUIClient(ComfyUIClient):
                 raise VideoGenerationError('Choose a video render for Wan 2.2 14B.')
             if settings.get('end_image') and not settings.get('image'):
                 raise VideoGenerationError('An ending image requires a starting photo.')
-            if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
-                raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
+            duration = settings.get('duration', 0)
+            if type(duration) is not int or not 2 <= duration <= WAN_14B_EXTENDED_MAX_SECONDS:
+                raise VideoGenerationError(f'Choose a 2- to {WAN_14B_EXTENDED_MAX_SECONDS}-second clip for Wan 2.2 14B.')
             function = 'render_wan14' if settings.get('image') else 'render_wan14_text'
+            if duration > WAN_14B_MAX_SECONDS:
+                function = 'render_wan14_extended'
         try:
             call = self.modal.Function.from_name(self.app, function).spawn(self.kind, prompt, settings)
         except self.modal.exception.Error as exc:
@@ -127,6 +130,12 @@ class ModalComfyUIClient(ComfyUIClient):
             # A zero-time poll raises the base SDK timeout while work is pending.
             # FunctionTimeoutError and OutputExpiredError are terminal subclasses.
             if type(exc) is errors.TimeoutError:
+                if MODAL_RENDER_ID.fullmatch(prediction_id):
+                    try:
+                        if progress := read_render_progress(self.modal.Volume.from_name(CLIPS_VOLUME), prediction_id):
+                            result['progress'] = progress
+                    except (errors.Error, OSError):
+                        pass
                 return result
             if isinstance(exc, (errors.OutputExpiredError, errors.NotFoundError)):
                 return self.get_saved_prediction(prediction_id)
@@ -161,7 +170,7 @@ class ModalComfyUIClient(ComfyUIClient):
                 result['warning'] = 'The render finished, but Modal could not confirm the save. Download your copy now.'
             elif data.get('archived') is True:
                 result['archived'] = True
-            for key in ('hand_review', 'face_review', 'body_review'):
+            for key in ('hand_review', 'face_review', 'body_review', 'render_stats'):
                 if isinstance(data.get(key), dict):
                     result[key] = data[key]
             data = data.get('data')

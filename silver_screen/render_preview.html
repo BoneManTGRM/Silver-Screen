@@ -20,6 +20,7 @@
   <h1 class="standalone-only">Silver Screen render</h1>
   <p id="status" role="status">Checking the render…</p>
   <p id="warning" role="status" hidden></p>
+  <p id="checked" hidden></p>
   <video id="clip" controls playsinline preload="metadata" hidden></video>
   <img id="image" alt="Generated image" hidden>
   <nav aria-label="Render actions">
@@ -32,26 +33,33 @@
     const path = "/renders/${render_id}";
     const status = document.querySelector("#status");
     const warning = document.querySelector("#warning");
+    const checked = document.querySelector("#checked");
     const check = document.querySelector("#check");
     const download = document.querySelector("#download");
     const clip = document.querySelector("#clip");
     const image = document.querySelector("#image");
     let timer, checking = false, finished = false;
 
-    async function refresh() {
+    async function refresh(manual = false) {
       if (checking || finished) return;
       clearTimeout(timer);
       checking = true;
       check.disabled = true;
+      if (manual) status.textContent = "Checking the render…";
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 12000);
       try {
-        const response = await fetch(path + "/status", {
-          cache: "no-store", signal: AbortSignal.timeout(12000)
+        const response = await fetch(path + "/status" + (manual ? "?refresh=1" : ""), {
+          cache: "no-store", credentials: "same-origin", signal: controller.signal
         });
         if (response.status === 401) {
           status.textContent = "Reopen the render page to sign back into Silver Screen.";
           return;
         }
+        if (!response.ok && response.status !== 404) throw new Error("Status request could not complete");
         const result = await response.json();
+        checked.textContent = "Last checked at " + new Date().toLocaleTimeString();
+        checked.hidden = false;
         if (result.status === "succeeded") {
           const media = result.image ? image : clip;
           status.textContent = result.image ? "Your image is ready." :
@@ -66,12 +74,17 @@
         } else if (["failed", "canceled", "missing"].includes(result.status)) {
           status.textContent = result.error || "Modal did not finish this render.";
           finished = true;
+        } else if (result.progress) {
+          const {complete, total} = result.progress;
+          status.textContent = complete >= total ? "Joining the finished segments into one clip." :
+            "Rendering segment " + (complete + 1) + " of " + total + ".";
         } else {
           status.textContent = result.notice || "Rendering on Modal. This page will update when it’s ready.";
         }
       } catch {
         status.textContent = "Waiting for a connection to Silver Screen. Retrying shortly.";
       } finally {
+        clearTimeout(deadline);
         checking = false;
         check.hidden = finished;
         check.disabled = false;
@@ -87,8 +100,8 @@
     }
     clip.addEventListener("error", reportMediaError);
     image.addEventListener("error", reportMediaError);
-    check.addEventListener("click", refresh);
-    window.addEventListener("pageshow", refresh);
+    check.addEventListener("click", () => refresh(true));
+    window.addEventListener("pageshow", () => refresh());
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refresh();
     });

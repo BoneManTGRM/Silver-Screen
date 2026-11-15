@@ -13,10 +13,13 @@ import urllib.request
 import modal
 
 from silver_screen.ai_video import PredictionPending, VideoGenerationError
-from silver_screen.comfyui import WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
+from silver_screen.comfyui import WAN_14B_EXTENDED_MAX_SECONDS, WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
+from silver_screen.extended_clip import REVIEW_FIELDS, render_extended_clip
 from silver_screen.face_review import COMPARATOR_FILE, DETECTOR_FILE, FACE_REVIEW_UNAVAILABLE, FaceReviewer
 from silver_screen.hand_review import BODY_REVIEW_UNAVAILABLE, HAND_REVIEW_UNAVAILABLE, MODEL_DIR, HandReviewer
-from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip, save_completed_image
+from silver_screen.modal_clip_archive import (
+    CLIPS_MOUNT, CLIPS_VOLUME, render_progress_filename, save_completed_clip, save_completed_image, write_render_progress,
+)
 
 COMFY = Path('/opt/ComfyUI')
 COMMIT = '0228a9d73cd7c2daf8f61fe13d56b12efe307171'
@@ -42,6 +45,7 @@ WAN_14B_TEXT_MODELS = (
 )
 STANDARD_TIMEOUT = 1500
 WAN_14B_TIMEOUT = 2700
+EXTENDED_TIMEOUT = (WAN_14B_EXTENDED_MAX_SECONDS // WAN_14B_MAX_SECONDS) * (WAN_14B_TIMEOUT + 180) + 300
 WAN_14B_GPUS = ['H100', 'L40S']
 MOTION_CHECK_TIMEOUT = 1800
 RETAKE_RESERVE = 240
@@ -110,6 +114,7 @@ image_editor = image.run_commands(*[
 ])
 image = _with_reference_review(image)
 wan_14b_image = _with_reference_review(wan_14b_image)
+extended_image = modal.Image.debian_slim(python_version='3.12').apt_install('ffmpeg').pip_install('pillow', 'numpy<3')
 if modal.is_local():
     workflows = Path(__file__).resolve().parents[2] / 'deploy/runpod/workflows'
     image = image.add_local_python_source('silver_screen').add_local_dir(
@@ -124,6 +129,7 @@ if modal.is_local():
     image_editor = image_editor.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
+    extended_image = extended_image.add_local_python_source('silver_screen')
 app = modal.App('silver-screen-renderer')
 clips_volume = modal.Volume.from_name(CLIPS_VOLUME, create_if_missing=True)
 
@@ -170,6 +176,38 @@ def render_wan14_text(kind: str, prompt: str, settings: dict) -> bytes | dict:
     if not 2 <= settings.get('duration', 0) <= WAN_14B_MAX_SECONDS:
         raise VideoGenerationError(f'Choose a 2- to {WAN_14B_MAX_SECONDS}-second clip for Wan 2.2 14B.')
     return _render(kind, prompt, settings, wan_14b=True)
+
+
+@app.function(
+    image=extended_image, cpu=2, memory=2048, timeout=EXTENDED_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def render_wan14_extended(kind: str, prompt: str, settings: dict) -> dict:
+    if kind != 'video' or settings.get('end_image') and not settings.get('image'):
+        raise VideoGenerationError('Choose an extended video with a starting photo to set an ending photo.')
+    render_id = modal.current_function_call_id() or ''
+    progress_file = CLIPS_MOUNT / render_progress_filename(render_id)
+
+    def render_segment(direction: str, segment: dict) -> bytes | dict:
+        renderer = render_wan14 if segment.get('image') else render_wan14_text
+        return renderer.remote(kind, direction, segment)
+
+    def progress(complete: int, total: int) -> None:
+        try:
+            write_render_progress(clips_volume, CLIPS_MOUNT, render_id, complete, total)
+        except (modal.exception.Error, OSError, RuntimeError):
+            logging.warning('Could not save the extended clip progress.', exc_info=True)
+
+    try:
+        result = render_extended_clip(prompt, settings, render_segment, progress)
+    finally:
+        try:
+            if progress_file.exists():
+                progress_file.unlink(missing_ok=True)
+                clips_volume.commit()
+        except (modal.exception.Error, OSError, RuntimeError):
+            logging.warning('Could not remove the completed progress record.', exc_info=True)
+    return _archive_result(result, image=False) if settings.get('save_clip') else result
 
 
 @app.function(
@@ -281,6 +319,32 @@ def _render_take(client, prompt: str, settings: dict, *, verify_fps: int | None)
     return data
 
 
+def _archive_result(result: dict, *, image: bool) -> dict:
+    try:
+        render_id = modal.current_function_call_id() or ''
+        if image:
+            from silver_screen.direct_generation import verify_direct_output
+
+            verify_direct_output(result['data'], image=True)
+            save_completed_image(clips_volume, CLIPS_MOUNT, render_id, result['data'])
+        else:
+            metadata = {name: result[name] for name in (*REVIEW_FIELDS, 'render_stats') if name in result}
+            save_completed_clip(clips_volume, CLIPS_MOUNT, render_id, result['data'], **metadata)
+    except (modal.exception.Error, OSError, RuntimeError, ValueError):
+        logging.exception('Could not store a completed Silver Screen render.')
+        return dict(result, archive_failed=True)
+    return dict(result, archived=True)
+
+
+def _gpu_names() -> list[str]:
+    try:
+        result = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                                capture_output=True, text=True, timeout=3, check=True)
+        return sorted({line.strip()[:120] for line in result.stdout.splitlines() if line.strip()})
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+
 def _render(
     kind: str, prompt: str, settings: dict, *, wan_14b: bool = False,
     timeout: int | None = None, allow_retake: bool = True, image_workflow: str = 'flux-schnell.json',
@@ -292,6 +356,7 @@ def _render(
     settings = dict(settings)
     save_clip = settings.pop('save_clip', False) and kind == 'video'
     save_image = settings.pop('save_image', False) and kind in {'image', 'image_edit'}
+    record_stats = settings.pop('record_stats', False) and kind == 'video'
     check_hands = settings.pop('check_hands', False) and kind == 'video'
     check_face = settings.pop('check_face', False) and kind == 'video'
     check_body = settings.pop('check_body', False) and kind == 'video'
@@ -299,7 +364,7 @@ def _render(
     allow_retake = settings.pop('allow_retake', True) and allow_retake
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
-    reference = settings.get('image') if save_clip or check_hands else None
+    reference = face_reference if save_clip or check_hands else None
     face_reference = face_reference if check_face else None
     reviews = {}
 
@@ -348,7 +413,7 @@ def _render(
             if wan_14b:
                 client.video_sizes = WAN_14B_VIDEO_SIZES
                 client.timeout_seconds = min(2400, timeout - 150)
-            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands or check_face else None)
+            data = _render_take(client, prompt, settings, verify_fps=fps if save_clip or check_hands or check_face or record_stats else None)
             reviews = review(data)
             elapsed = time.monotonic() - started
             remaining = timeout - elapsed - RETAKE_RESERVE
@@ -377,19 +442,16 @@ def _render(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+    result = {'data': data, **reviews}
+    if record_stats:
+        gpu_names = _gpu_names()
+        execution = round(time.monotonic() - started, 2)
+        width, height = settings.get('video_size') or (832, 480)
+        result['render_stats'] = {
+            'model': 'Wan 2.2 14B' if wan_14b else 'Wan 2.2 5B', 'segments': 1, 'fps': fps,
+            'width': width, 'height': height, 'requested_seconds': settings.get('duration', 8),
+            'gpu_worker_seconds': execution, 'gpus': gpu_names, 'execution_seconds': execution,
+        }
     if save_clip or save_image:
-        result = {'data': data, **reviews}
-        try:
-            render_id = modal.current_function_call_id() or ''
-            if save_image:
-                from silver_screen.direct_generation import verify_direct_output
-
-                verify_direct_output(data, image=True)
-                save_completed_image(clips_volume, CLIPS_MOUNT, render_id, data)
-            else:
-                save_completed_clip(clips_volume, CLIPS_MOUNT, render_id, data, **reviews)
-        except (modal.exception.Error, OSError, RuntimeError, ValueError):
-            logging.exception('Could not store a completed Silver Screen render.')
-            return dict(result, archive_failed=True)
-        return dict(result, archived=True)
-    return {'data': data, **reviews} if reviews else data
+        return _archive_result(result, image=save_image)
+    return result if reviews or record_stats else data
