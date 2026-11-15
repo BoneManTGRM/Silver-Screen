@@ -1,0 +1,73 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {"unet_name": "flux-2-klein-4b-fp8.safetensors", "weight_dtype": "default"}
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {"clip_name": "qwen_3_4b.safetensors", "type": "flux2", "device": "default"}
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {"vae_name": "flux2-vae.safetensors"}
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {"image": "__IMAGE__"}
+  },
+  "5": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {"image": ["4", 0], "megapixels": 1, "upscale_method": "lanczos", "resolution_steps": 16}
+  },
+  "6": {
+    "class_type": "VAEEncode",
+    "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {"clip": ["2", 0], "text": "__PROMPT__"}
+  },
+  "8": {
+    "class_type": "ReferenceLatent",
+    "inputs": {"conditioning": ["7", 0], "latent": ["6", 0]}
+  },
+  "9": {
+    "class_type": "GetImageSize",
+    "inputs": {"image": ["5", 0]}
+  },
+  "10": {
+    "class_type": "Flux2Scheduler",
+    "inputs": {"width": ["9", 0], "height": ["9", 1], "steps": 4}
+  },
+  "11": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": {"width": ["9", 0], "height": ["9", 1], "batch_size": 1}
+  },
+  "12": {
+    "class_type": "BasicGuider",
+    "inputs": {"model": ["1", 0], "conditioning": ["8", 0]}
+  },
+  "13": {
+    "class_type": "RandomNoise",
+    "inputs": {"noise_seed": "__SEED__"}
+  },
+  "14": {
+    "class_type": "KSamplerSelect",
+    "inputs": {"sampler_name": "euler"}
+  },
+  "15": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["13", 0], "guider": ["12", 0], "sampler": ["14", 0],
+      "sigmas": ["10", 0], "latent_image": ["11", 0]
+    }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {"samples": ["15", 0], "vae": ["3", 0]}
+  },
+  "17": {
+    "class_type": "SaveImage",
+    "inputs": {"images": ["16", 0], "filename_prefix": "SilverScreen/Edited"}
+  }
+}

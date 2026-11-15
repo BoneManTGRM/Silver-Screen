@@ -8,7 +8,10 @@ from typing import Any
 from .ai_video import PredictionPending, VideoGenerationError
 from .comfyui import MAX_OUTPUT, WAN_14B_MAX_SECONDS, ComfyUIClient
 from .hand_review import HAND_REVIEW_UNAVAILABLE
-from .modal_clip_archive import CLIPS_VOLUME, MODAL_RENDER_ID, latest_saved_clips, read_saved_clip, read_saved_hand_review
+from .modal_clip_archive import (
+    CLIPS_VOLUME, MODAL_RENDER_ID, RecentRender, delete_saved_media, latest_renders, media_was_deleted,
+    read_saved_hand_review, read_saved_media, remember_submitted_render,
+)
 
 
 def _configured(app_setting: str) -> bool:
@@ -43,14 +46,30 @@ def modal_function(name: str, *, app_setting: str):
         raise VideoGenerationError(f'Modal could not load {name} ({type(exc).__name__}).') from exc
 
 
-def saved_clips() -> list[tuple[str, int]]:
+def recent_modal_renders() -> list[RecentRender]:
     modal = _modal_client()
     try:
-        return latest_saved_clips(modal.Volume.from_name(CLIPS_VOLUME))
+        return latest_renders(modal.Volume.from_name(CLIPS_VOLUME))
     except modal.exception.NotFoundError:
         return []
     except (modal.exception.Error, OSError) as exc:
-        raise VideoGenerationError('Could not load saved clips from Modal. Check again shortly.') from exc
+        raise VideoGenerationError('Could not load recent renders from Modal. Check again shortly.') from exc
+
+
+def remember_modal_render(render_id: str, seconds: int | None) -> None:
+    modal = _modal_client()
+    try:
+        remember_submitted_render(modal.Volume.from_name(CLIPS_VOLUME), render_id, seconds)
+    except (modal.exception.Error, OSError, ValueError) as exc:
+        raise VideoGenerationError('Recent renders could not save this entry. Keep the render link to recover it.') from exc
+
+
+def delete_modal_render(render_id: str, *, image: bool) -> None:
+    modal = _modal_client()
+    try:
+        delete_saved_media(modal.Volume.from_name(CLIPS_VOLUME), render_id, image=image)
+    except (modal.exception.Error, OSError, ValueError) as exc:
+        raise VideoGenerationError('Could not confirm deletion from Silver Screen. Try deleting it again.') from exc
 
 
 class ModalComfyUIClient(ComfyUIClient):
@@ -68,6 +87,10 @@ class ModalComfyUIClient(ComfyUIClient):
         if settings.get('end_image') and not wan_14b:
             raise VideoGenerationError('An ending image requires Wan 2.2 14B.')
         function = 'render'
+        if self.kind == 'image_edit':
+            if not settings.get('image'):
+                raise VideoGenerationError('Upload the image you want to edit.')
+            function = 'edit_image'
         if wan_14b:
             if self.kind != 'video' or not settings.get('image'):
                 raise VideoGenerationError('Wan 2.2 14B requires a starting photo.')
@@ -112,9 +135,17 @@ class ModalComfyUIClient(ComfyUIClient):
             if detail == 'comfyui did not start on the gpu worker.':
                 return dict(result, status='failed', error='ComfyUI could not start on the Modal GPU worker.')
             return dict(result, status='failed', error=f'GPU render failed ({type(exc).__name__}).')
+        if isinstance(data, (bytes, dict)) and MODAL_RENDER_ID.fullmatch(prediction_id):
+            try:
+                if media_was_deleted(self.modal.Volume.from_name(CLIPS_VOLUME), prediction_id):
+                    return dict(result, status='failed', error='This render was deleted from Silver Screen.')
+            except self.modal.exception.NotFoundError:
+                pass
+            except (self.modal.exception.Error, OSError) as exc:
+                raise PredictionPending('Could not verify the saved render. Check it again shortly.') from exc
         if isinstance(data, dict):
             if data.get('archive_failed') is True:
-                result['warning'] = 'The clip rendered, but Modal could not confirm the save. Download your copy now.'
+                result['warning'] = 'The render finished, but Modal could not confirm the save. Download your copy now.'
             elif data.get('archived') is True:
                 result['archived'] = True
             if isinstance(data.get('hand_review'), dict):
@@ -132,16 +163,19 @@ class ModalComfyUIClient(ComfyUIClient):
             return unavailable
         try:
             volume = self.modal.Volume.from_name(CLIPS_VOLUME)
-            data = read_saved_clip(volume, prediction_id)
+            if media_was_deleted(volume, prediction_id):
+                return dict(result, status='failed', error='This render was deleted from Silver Screen.')
+            data = read_saved_media(volume, prediction_id)
         except (FileNotFoundError, self.modal.exception.NotFoundError):
             return unavailable
         except VideoGenerationError as exc:
             return dict(result, status='failed', error=str(exc))
         except (self.modal.exception.Error, OSError) as exc:
-            raise PredictionPending('Could not read the saved clip from Modal. Check this render again.') from exc
+            raise PredictionPending('Could not read the saved render from Modal. Check it again.') from exc
         try:
-            if review := read_saved_hand_review(volume, prediction_id):
-                result['hand_review'] = review
+            if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+                if review := read_saved_hand_review(volume, prediction_id):
+                    result['hand_review'] = review
         except self.modal.exception.NotFoundError:
             pass  # Clips made before hand review have no sidecar.
         except (self.modal.exception.Error, OSError):

@@ -15,7 +15,7 @@ import modal
 from silver_screen.ai_video import PredictionPending, VideoGenerationError
 from silver_screen.comfyui import WAN_14B_FPS, WAN_14B_MAX_SECONDS, WAN_14B_VIDEO_SIZES
 from silver_screen.hand_review import HAND_REVIEW_UNAVAILABLE, MODEL_DIR, HandReviewer
-from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip
+from silver_screen.modal_clip_archive import CLIPS_MOUNT, CLIPS_VOLUME, save_completed_clip, save_completed_image
 
 COMFY = Path('/opt/ComfyUI')
 COMMIT = '0228a9d73cd7c2daf8f61fe13d56b12efe307171'
@@ -80,6 +80,18 @@ wan_14b_image = image.run_commands(*[
     f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {WAN_14B}/{path}'
     for path in WAN_14B_MODELS
 ])
+image_editor = image.run_commands(*[
+    f'mkdir -p {COMFY}/models/{Path(path).parent} && '
+    f'curl -fL --retry 3 --connect-timeout 20 -o {COMFY}/models/{path} {url}'
+    for path, url in (
+        ('diffusion_models/flux-2-klein-4b-fp8.safetensors',
+         'https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/c30fa39/flux-2-klein-4b-fp8.safetensors'),
+        ('text_encoders/qwen_3_4b.safetensors',
+         'https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors'),
+        ('vae/flux2-vae.safetensors',
+         'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors'),
+    )
+])
 image = _with_hand_review(image)
 wan_14b_image = _with_hand_review(wan_14b_image)
 if modal.is_local():
@@ -88,6 +100,9 @@ if modal.is_local():
         workflows, remote_path='/opt/workflows'
     )
     wan_14b_image = wan_14b_image.add_local_python_source('silver_screen').add_local_dir(
+        workflows, remote_path='/opt/workflows'
+    )
+    image_editor = image_editor.add_local_python_source('silver_screen').add_local_dir(
         workflows, remote_path='/opt/workflows'
     )
 app = modal.App('silver-screen-renderer')
@@ -99,6 +114,16 @@ clips_volume = modal.Volume.from_name(CLIPS_VOLUME, create_if_missing=True)
     retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
 )
 def render(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    return _render(kind, prompt, settings)
+
+
+@app.function(
+    image=image_editor, gpu='L40S', max_containers=1, scaledown_window=5, timeout=STANDARD_TIMEOUT,
+    retries=0, volumes={str(CLIPS_MOUNT): clips_volume},
+)
+def edit_image(kind: str, prompt: str, settings: dict) -> bytes | dict:
+    if kind != 'image_edit' or not settings.get('image'):
+        raise VideoGenerationError('Upload the image you want to edit.')
     return _render(kind, prompt, settings)
 
 
@@ -195,10 +220,11 @@ def _render(
 ) -> bytes | dict:
     from silver_screen.comfyui import ComfyUIClient
 
-    if kind not in {'image', 'video'}:
+    if kind not in {'image', 'image_edit', 'video'}:
         raise ValueError('Unsupported render type.')
     settings = dict(settings)
     save_clip = settings.pop('save_clip', False) and kind == 'video'
+    save_image = settings.pop('save_image', False) and kind in {'image', 'image_edit'}
     check_hands = settings.pop('check_hands', False) and kind == 'video'
     timeout = timeout or (WAN_14B_TIMEOUT if wan_14b else STANDARD_TIMEOUT)
     started = time.monotonic()
@@ -209,6 +235,7 @@ def _render(
     os.environ.update(
         SILVER_SCREEN_COMFYUI_URL='http://127.0.0.1:8188',
         SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW='/opt/workflows/flux-schnell.json',
+        SILVER_SCREEN_COMFYUI_IMAGE_EDIT_WORKFLOW='/opt/workflows/flux-klein-edit.json',
         SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW='/opt/workflows/wan-video.json',
         SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=f'/opt/workflows/{reference_workflow}',
         SILVER_SCREEN_COMFYUI_FPS=str(fps),
@@ -264,16 +291,21 @@ def _render(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
-    if save_clip:
+    if save_clip or save_image:
         result = {'data': data}
         if hand_review is not None:
             result['hand_review'] = hand_review
         try:
-            save_completed_clip(
-                clips_volume, CLIPS_MOUNT, modal.current_function_call_id() or '', data, hand_review=hand_review,
-            )
+            render_id = modal.current_function_call_id() or ''
+            if save_image:
+                from silver_screen.direct_generation import verify_direct_output
+
+                verify_direct_output(data, image=True)
+                save_completed_image(clips_volume, CLIPS_MOUNT, render_id, data)
+            else:
+                save_completed_clip(clips_volume, CLIPS_MOUNT, render_id, data, hand_review=hand_review)
         except (modal.exception.Error, OSError, RuntimeError, ValueError):
-            logging.exception('Could not store a completed Silver Screen clip.')
+            logging.exception('Could not store a completed Silver Screen render.')
             return dict(result, archive_failed=True)
         return dict(result, archived=True)
     return {'data': data, 'hand_review': hand_review} if hand_review is not None else data

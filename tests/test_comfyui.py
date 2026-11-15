@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import imageio_ffmpeg
 import pytest
+import streamlit as st
 from modal import exception as modal_errors
 from PIL import Image
 from streamlit.testing.v1 import AppTest
@@ -24,6 +25,14 @@ from silver_screen.comfyui import ComfyUIClient, WAN_14B_VIDEO_SIZES, WORKFLOW_E
 from silver_screen.direct_generation import prepare_wan_reference
 from silver_screen.modal_clip_archive import CLIPS_VOLUME
 from test_long_video import _fake_assemble, _state
+
+
+def missing_archive_file(path):
+    raise FileNotFoundError(path)
+
+
+def empty_archive():
+    return SimpleNamespace(iterdir=lambda *args, **kwargs: [], read_file=missing_archive_file)
 
 
 @pytest.fixture
@@ -118,8 +127,12 @@ def comfy_server(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def empty_modal_clip_archive(request, monkeypatch):
     # Tests that need saved renders provide their own Modal volume.
-    if not request.node.name.startswith("test_direct_create_opens_saved_clip_without_video_bytes_from_call"):
-        monkeypatch.setattr("silver_screen.modal_renderer.saved_clips", lambda: [])
+    if not request.node.name.startswith((
+        "test_direct_create_opens_saved_clip_without_video_bytes_from_call",
+        "test_direct_create_can_submit_the_14b_photo_workflow",
+        "test_saved_modal_media_can_be_deleted",
+    )):
+        monkeypatch.setattr("silver_screen.modal_renderer.recent_modal_renders", lambda: [])
 
 
 def generate_button(app):
@@ -149,6 +162,35 @@ def test_direct_create_uses_comfyui_from_prompt_to_download(comfy_server):
     assert submissions["job-2"]["3"]["inputs"]["fps"] == 24
     assert app.session_state["direct_create_job"]["data"] == media["result.mp4"]
     assert "Download original clip" in [item.proto.label for item in app.get("download_button")]
+
+
+def test_direct_create_edits_an_uploaded_image_and_offers_a_download(comfy_server, monkeypatch):
+    submissions, uploads, media = comfy_server
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.setenv(WORKFLOW_ENV["image_edit"], str(root / "deploy/runpod/workflows/flux-klein-edit.json"))
+    original_uploader = st.file_uploader
+    source = io.BytesIO()
+    Image.new("RGB", (200, 300), "red").save(source, format="PNG")
+
+    def upload(label, *args, **kwargs):
+        if label == "Image to edit (optional)":
+            return io.BytesIO(source.getvalue())
+        return original_uploader(label, *args, **kwargs)
+
+    monkeypatch.setattr(st, "file_uploader", upload)
+    app = AppTest.from_file(root / "pages/0_Direct_Create.py").run()
+    app.text_area[0].set_value("Change the background to blue.")
+    generate_button(app).click().run()
+    assert not app.exception
+    assert not app.error
+    workflow = submissions["job-1"]
+    assert workflow["4"]["inputs"]["image"] == "silver/reference.jpg"
+    assert workflow["7"]["inputs"]["text"] == "Change the background to blue."
+    assert workflow["8"]["inputs"]["latent"] == ["6", 0]
+    assert workflow["10"]["inputs"]["steps"] == 4
+    assert len(uploads) == 1
+    assert app.session_state["direct_create_job"]["data"] == media["result.png"]
+    assert "Download image" in [element.proto.label for element in app.get("download_button")]
 
 
 def test_comfyui_uploads_reference_and_binds_image_to_video_workflow(comfy_server):
@@ -214,9 +256,16 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
             raise modal_errors.TimeoutError
         return media["result.mp4"]
 
+    def unavailable_upload(**kwargs):
+        raise modal_errors.ServiceError("test history write outage")
+
+    volume = empty_archive()
+    volume.batch_upload = unavailable_upload
+
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         Function=SimpleNamespace(from_name=lambda *args: SimpleNamespace(spawn=spawn)),
         FunctionCall=SimpleNamespace(from_id=lambda call_id: SimpleNamespace(get=get)),
+        Volume=SimpleNamespace(from_name=lambda _: volume),
         exception=modal_errors,
     ))
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
@@ -224,6 +273,7 @@ def test_direct_create_displays_modal_clip_without_a_second_click(comfy_server, 
     app.text_area[0].set_value("A paper pinwheel spins.")
     generate_button(app).click().run()
     assert app.info[0].value.startswith("Waiting for Modal.")
+    assert any("Keep the render link" in warning.value for warning in app.warning)
     assert generate_button(app).disabled
     assert app.query_params == {"render": call_id, "render_seconds": "8"}
 
@@ -260,6 +310,7 @@ def test_direct_create_reloads_modal_job_and_reports_a_manual_check(comfy_server
 
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         FunctionCall=SimpleNamespace(from_id=from_id), exception=modal_errors,
+        Volume=SimpleNamespace(from_name=lambda _: empty_archive()),
     ))
     page = Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py"
     app = AppTest.from_file(page)
@@ -299,6 +350,7 @@ def test_recover_modal_clip_with_image_selected(comfy_server, monkeypatch):
 
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         FunctionCall=SimpleNamespace(from_id=from_id), exception=modal_errors,
+        Volume=SimpleNamespace(from_name=lambda _: empty_archive()),
     ))
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
     assert app.radio[0].value == "Image"
@@ -424,6 +476,8 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     Image.new("RGB", (720, 1280), "blue").save(tmp_path / f"{PHOTO_SLOTS['Your photo']}.jpg")
     call_id = "fc-" + "5" * 26
     submissions = []
+    receipts = {}
+    completed = False
 
     def lookup(app_name, function):
         def spawn(kind, prompt, settings):
@@ -431,12 +485,29 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
             return SimpleNamespace(object_id=call_id)
         return SimpleNamespace(spawn=spawn)
 
+    def put_file(file, path):
+        assert file.read() == b"\n"
+        receipts[path] = SimpleNamespace(path=path, size=1, mtime=10)
+
+    def get(*, timeout):
+        assert timeout == 0
+        if not completed:
+            raise modal_errors.TimeoutError()
+        return media["result.mp4"]
+
+    volume = SimpleNamespace(
+        batch_upload=lambda *, force: nullcontext(SimpleNamespace(put_file=put_file)),
+        iterdir=lambda *args, **kwargs: iter(receipts.values()),
+        read_file=missing_archive_file,
+    )
     monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
         Function=SimpleNamespace(from_name=lookup),
-        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=lambda **_: media["result.mp4"])),
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=get)),
+        Volume=SimpleNamespace(from_name=lambda _: volume),
         exception=modal_errors,
     ))
-    app = AppTest.from_file(Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py").run()
+    page = Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py"
+    app = AppTest.from_file(page).run()
     app.radio[0].set_value("Video clip").run()
     assert not any(box.label == "Render model" for box in app.selectbox)
     next(box for box in app.selectbox if box.label == "Or use a saved cast photo").select("Your photo").run()
@@ -444,14 +515,27 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert models.value == "Wan 2.2 14B · 16 fps"
     assert app.number_input[0].max == 5
     assert any(image.proto.imgs[0].caption == "Starting frame · 720 × 1280" for image in app.image)
-    assert app.slider[0].value == 40
+    assert app.slider[0].value == 28
+    assert app.slider[0].max == 40
     assert not any(box.label == "Keep hands in frame" for box in app.checkbox)
     app.text_area[0].set_value("The runner lifts both hands.")
     app.text_area[1].set_value("camera shake")
     generate_button(app).click().run()
     assert not app.exception
     assert not app.error
-    assert app.get("video")
+    assert generate_button(app).disabled
+    assert list(receipts) == [f"/{call_id}.3.submitted"]
+
+    # Reopening the bare page has neither the old session nor the render URL.
+    reopened = AppTest.from_file(page).run()
+    next(box for box in reopened.selectbox if box.label == "Render").select(call_id).run()
+    completed = True
+    next(button for button in reopened.button if button.label == "Open render").click().run()
+    assert not reopened.exception
+    assert not reopened.error
+    assert reopened.get("video")
+    assert reopened.session_state["direct_create_job"]["data"] == media["result.mp4"]
+    assert reopened.session_state["direct_create_job"]["requested_seconds"] == 3
     app_name, function, kind, prompt, settings = submissions[0]
     assert len(submissions) == 1
     assert (app_name, function, kind) == ("test-renderer", "render_wan14", "video")
@@ -462,6 +546,7 @@ def test_direct_create_can_submit_the_14b_photo_workflow(comfy_server, monkeypat
     assert settings["video_size"] == (720, 1280)
     assert settings["save_clip"] is True
     assert settings["duration"] == 3
+    assert settings["steps"] == 28
     assert settings["image"].startswith("data:image/jpeg;base64,")
     assert "wan_14b" not in settings
 
@@ -557,6 +642,39 @@ def test_modal_worker_archives_completed_clip_without_a_viewer(
     assert list(tmp_path.glob(".render-*")) == []
 
 
+def test_modal_image_editor_saves_completed_png_without_a_viewer(comfy_server, monkeypatch, tmp_path):
+    from deploy.modal import worker
+
+    _, _, media = comfy_server
+    render_id = "fc-" + "6" * 26
+    data = media["result.png"]
+    image = "data:image/jpeg;base64,ZmFrZS1qcGVn"
+    destination = tmp_path / f"{render_id}.png"
+    committed = []
+
+    def create(prompt, **settings):
+        assert prompt == "Turn the wall blue."
+        assert settings == {"seed": 17, "image": image}
+        return {"id": "comfy-image", "status": "succeeded"}
+
+    def commit():
+        assert destination.read_bytes() == data
+        committed.append(destination)
+
+    client = SimpleNamespace(create_prediction=create, wait=lambda prediction: prediction, read_output=lambda _: data)
+    monkeypatch.setattr("silver_screen.comfyui.ComfyUIClient", lambda *, kind: client if kind == "image_edit" else None)
+    monkeypatch.setattr(worker, "CLIPS_MOUNT", tmp_path)
+    monkeypatch.setattr(worker, "clips_volume", SimpleNamespace(commit=commit))
+    monkeypatch.setattr(worker.modal, "current_function_call_id", lambda: render_id)
+    process = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda **_: None)
+    monkeypatch.setattr(worker, "subprocess", SimpleNamespace(Popen=lambda *args, **kwargs: process))
+    monkeypatch.setattr(worker.urllib.request, "urlopen", lambda *args, **kwargs: nullcontext())
+    with pytest.warns(UserWarning, match="executing locally"):
+        result = worker.edit_image.local("image_edit", "Turn the wall blue.", {"image": image, "seed": 17, "save_image": True})
+    assert result == {"data": data, "archived": True}
+    assert committed == [destination]
+
+
 @pytest.mark.parametrize("needs_review", [False, True])
 @pytest.mark.parametrize("open_by_id", [False, True])
 def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_server, monkeypatch, needs_review, open_by_id):
@@ -565,6 +683,7 @@ def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_serv
                        "SILVER_SCREEN_MODAL_APP": "test-renderer"}.items():
         monkeypatch.setenv(key, value)
     render_id = "fc-" + "4" * 26
+    pending_id = "fc-" + "9" * 26
 
     def read_file(path):
         if path == f"{render_id}.mp4":
@@ -582,6 +701,10 @@ def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_serv
         )
 
     def function_call_from_id(clip_id):
+        if clip_id == pending_id:
+            def pending(**kwargs):
+                raise modal_errors.TimeoutError()
+            return SimpleNamespace(get=pending)
         assert open_by_id and clip_id == render_id
         return SimpleNamespace(get=lambda **kwargs: f"{render_id}: {'possible_loss' if needs_review else 'tracked'}")
 
@@ -595,8 +718,15 @@ def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_serv
         next(field for field in reopened.text_input if field.label == "ComfyUI prediction ID").set_value(render_id)
         next(button for button in reopened.button if button.label == "Find render").click().run()
     else:
-        next(box for box in reopened.selectbox if box.label == "Recent clips").select(render_id).run()
-        next(button for button in reopened.button if button.label == "Open saved clip").click().run()
+        next(box for box in reopened.selectbox if box.label == "Render").select(render_id).run()
+        reopened.session_state["direct_create_job"] = {
+            "backend": "ComfyUI", "model": "test-video",
+            "prediction": {"id": pending_id, "status": "processing"},
+        }
+        reopened.run()
+        open_saved = next(button for button in reopened.button if button.label == "Open render")
+        assert not open_saved.disabled
+        open_saved.click().run()
     assert not reopened.exception
     assert not reopened.error
     assert reopened.get("video")
@@ -608,6 +738,70 @@ def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_serv
         assert any("wrist appeared visible" in warning.value for warning in reopened.warning)
         next(button for button in reopened.button if button.label == "Use this take").click().run()
         assert not next(button for button in reopened.button if button.label == "Add clip to custom film").disabled
+
+
+@pytest.mark.parametrize("image, archived", [(True, True), (False, True), (True, False)])
+def test_saved_modal_media_can_be_deleted(comfy_server, monkeypatch, image, archived):
+    _, _, media = comfy_server
+    monkeypatch.setenv("SILVER_SCREEN_MODAL_APP", "test-renderer")
+    monkeypatch.setenv("MODAL_TOKEN_ID", "test-id")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "test-secret")
+    render_id = "fc-" + "8" * 26
+    other_id = "fc-" + "7" * 26
+    extension = "png" if image else "mp4"
+    data = media[f"result.{extension}"]
+    files = {f"{other_id}.{extension}": data}
+    if archived:
+        files[f"{render_id}.{extension}"] = data
+
+    def iterdir(*args, **kwargs):
+        return [SimpleNamespace(path=f"/{name}", size=len(payload), mtime=10) for name, payload in files.items()]
+
+    def read_file(name):
+        if name not in files:
+            raise FileNotFoundError(name)
+        yield files[name]
+
+    def remove_file(name):
+        if files.pop(name.removeprefix("/"), None) is None:
+            raise FileNotFoundError(name)
+
+    def put_file(file, name):
+        files[name.removeprefix("/")] = file.read()
+
+    volume = SimpleNamespace(iterdir=iterdir, read_file=read_file, remove_file=remove_file,
+                             batch_upload=lambda **_: nullcontext(SimpleNamespace(put_file=put_file)))
+    original_result = {"data": data, "archived": True} if archived else data
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        Volume=SimpleNamespace(from_name=lambda _: volume), exception=modal_errors,
+        FunctionCall=SimpleNamespace(from_id=lambda _: SimpleNamespace(get=lambda **_: original_result)),
+    ))
+    page = Path(__file__).resolve().parents[1] / "pages/0_Direct_Create.py"
+    app = AppTest.from_file(page)
+    if archived:
+        app.run()
+        next(box for box in app.selectbox if box.label == "Render").select(render_id).run()
+        next(button for button in app.button if button.label == "Open render").click().run()
+    else:
+        app.query_params["render"] = render_id
+        app.run()
+    assert not app.exception
+    assert not app.error
+    assert app.session_state["direct_create_job"]["data"] == data
+    download_label = "Download image" if image else "Download original clip"
+    assert download_label in [element.proto.label for element in app.get("download_button")]
+    next(button for button in app.button if button.label == f"Delete this {'image' if image else 'clip'}").click().run()
+    assert not app.exception
+    assert not app.error
+    assert f"{render_id}.{extension}" not in files
+    assert f"{other_id}.{extension}" in files
+    assert render_id not in app.session_state["recent_modal_renders"]
+
+    old_link = AppTest.from_file(page)
+    old_link.query_params["render"] = render_id
+    old_link.run()
+    assert any("was deleted" in error.value for error in old_link.error)
+    assert download_label not in [element.proto.label for element in old_link.get("download_button")]
 
 
 def test_hand_review_treats_visible_wrists_and_out_of_frame_hands_differently():

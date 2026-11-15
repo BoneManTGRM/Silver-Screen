@@ -33,28 +33,41 @@ FILM_CANVASES = {
 }
 
 
-def prepare_wan_reference(
-    source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
-) -> tuple[bytes, tuple[int, int]]:
-    """Prepare the exact starting frame that will be shown in the preview."""
+def _open_reference(source: Path | BinaryIO) -> Image.Image:
     try:
         with Image.open(source) as uploaded:
-            photo = ImageOps.exif_transpose(uploaded).convert("RGB")
+            return ImageOps.exif_transpose(uploaded).convert("RGB")
     except (OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise VideoGenerationError("The starting photo could not be read.") from exc
+        raise VideoGenerationError("The uploaded image could not be read.") from exc
     finally:
         if not isinstance(source, Path):
             source.seek(0)
 
-    size = frame_size or wan_reference_size(photo.width, photo.height, wan_14b=wan_14b)
-    frame = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
 
+def _reference_jpeg(frame: Image.Image) -> bytes:
     for quality in (94, 85, 75):
         buffer = io.BytesIO()
         frame.save(buffer, format="JPEG", quality=quality, subsampling=0, optimize=True)
         if buffer.tell() <= REFERENCE_LIMIT:
-            return buffer.getvalue(), size
-    raise VideoGenerationError("The starting photo exceeds the render upload limit.")
+            return buffer.getvalue()
+    raise VideoGenerationError("The reference image exceeds the render upload limit.")
+
+
+def prepare_wan_reference(
+    source: Path | BinaryIO, frame_size: tuple[int, int] | None, *, wan_14b: bool = False,
+) -> tuple[bytes, tuple[int, int]]:
+    """Prepare the exact starting frame that will be shown in the preview."""
+    photo = _open_reference(source)
+    size = frame_size or wan_reference_size(photo.width, photo.height, wan_14b=wan_14b)
+    frame = ImageOps.fit(photo, size, Image.Resampling.LANCZOS)
+    return _reference_jpeg(frame), size
+
+
+def prepare_edit_reference(source: Path | BinaryIO) -> bytes:
+    """Normalize orientation and limit upload size without cropping the image."""
+    photo = _open_reference(source)
+    photo.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
+    return _reference_jpeg(photo)
 
 
 def submit_direct_generation(

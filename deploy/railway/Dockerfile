@@ -22,6 +22,7 @@ ENV SILVER_SCREEN_VIDEO_BACKEND=comfyui \
     SILVER_SCREEN_SCREENPLAY_APP=silver-screen-writer \
     SILVER_SCREEN_CAST_LIBRARY_DIR=/app/runs/cast \
     SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW=/app/deploy/runpod/workflows/flux-schnell.json \
+    SILVER_SCREEN_COMFYUI_IMAGE_EDIT_WORKFLOW=/app/deploy/runpod/workflows/flux-klein-edit.json \
     SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW=/app/deploy/runpod/workflows/wan-video.json \
     SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW=/app/deploy/runpod/workflows/wan-reference.json \
     SILVER_SCREEN_COMFYUI_FPS=24

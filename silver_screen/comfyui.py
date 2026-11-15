@@ -19,6 +19,7 @@ from .ai_video import ReplicateVideoClient, VideoGenerationError
 COMFYUI_MODEL = "comfyui/workflow"
 WORKFLOW_ENV = {
     "image": "SILVER_SCREEN_COMFYUI_IMAGE_WORKFLOW",
+    "image_edit": "SILVER_SCREEN_COMFYUI_IMAGE_EDIT_WORKFLOW",
     "video": "SILVER_SCREEN_COMFYUI_VIDEO_WORKFLOW",
     "reference": "SILVER_SCREEN_COMFYUI_REFERENCE_WORKFLOW",
 }
@@ -242,7 +243,9 @@ class ComfyUIClient:
     ) -> dict[str, Any]:
         if not prompt.strip():
             raise VideoGenerationError("Enter a prompt before generating.")
-        kind = "reference" if image else self.kind
+        if self.kind == "image_edit" and not image:
+            raise VideoGenerationError("Upload the image you want to edit.")
+        kind = "reference" if image and self.kind != "image_edit" else self.kind
         workflow = _workflow(kind)
         markers = _markers(workflow)
         wan_14b = WAN_14B_SPLIT_MARKER in markers
@@ -257,7 +260,7 @@ class ComfyUIClient:
             workflow[end_node] = {"class_type": "LoadImage", "inputs": {"image": "__END_IMAGE__"}}
         replacements: dict[str, Any] = {"__PROMPT__": prompt, "__SEED__": seed}
         required = {"__PROMPT__"}
-        if kind != "image":
+        if kind not in {"image", "image_edit"}:
             if video_size is not None and not (
                 video_size in self.video_sizes.values()
                 or image and _valid_wan_reference_size(video_size, wan_14b=wan_14b)
@@ -321,7 +324,7 @@ class ComfyUIClient:
         if not status.get("completed"):
             return result
 
-        extension = ".png" if self.kind == "image" else ".mp4"
+        extension = ".png" if self.kind in {"image", "image_edit"} else ".mp4"
         for output in (entry.get("outputs") or {}).values():
             for key in ("images", "videos", "gifs"):
                 for artifact in output.get(key) or []:
