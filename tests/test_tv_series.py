@@ -104,6 +104,62 @@ def test_season_writer_reuses_cast_and_prior_story_at_two_minute_length(creator)
     assert plan["approvedBrief"]["screenplayWriter"] == EPISODE_KIND
 
 
+def test_sequel_inherits_edited_bible_photo_and_scripted_finale(creator):
+    store, requests = creator
+    season = tv_series.create_series(store, PREMISE, 2, 30)
+    series_id = season["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    season = store.read(series_id)
+    season.pop("seasonNumber")
+    store.write(season)
+    cast = season["cast"]
+    cast["lead"]["appearance"] = "Same red raincoat and brass watch in every dock scene."
+    look = "Amber lamps, restrained camera movement, blue morning fog."
+    tv_series.save_season_bible(store, series_id, world=season["world"], arc=season["arc"],
+                              genre=season["genre"], tone=season["tone"], cast=cast, visual_direction=look)
+    photo = BytesIO()
+    Image.new("RGB", (96, 128), "red").save(photo, "JPEG")
+    photo.seek(0)
+    tv_series.set_series_photo(store, series_id, photo)
+
+    outline = {**season["episodes"][1], "outcome": "The broadcast reveals a child on the island."}
+    tv_series.save_episode_outline(store, series_id, 2, outline)
+    tv_series.start_episode_script(store, series_id, 2)
+    tv_series.save_season_bible(store, series_id, world=season["world"], arc=season["arc"],
+                              genre=season["genre"], tone=season["tone"], cast=cast, visual_direction="Teal interiors.")
+    assert tv_series.check_series_script(store, series_id, 2)
+    draft = store.read(series_id)["episodes"][1]["draft"]
+    assert draft["creativeDirection"]["globalVisualDirection"] == look
+    shots = tv_series.episode_shots(draft)
+    changed = {**shots[-1], "action": "Ada opens the cabinet and lifts Sol's wet photograph from the shelf.",
+               "speaker": "lead", "line": "The island is next."}
+    revision = str(draft["seed"])
+    tv_series.save_episode_shot(store, series_id, 2, 5, changed, expected_revision=revision)
+    with pytest.raises(tv_series.SeriesError, match="script was updated"):
+        tv_series.save_episode_shot(store, series_id, 2, 5, changed, expected_revision=revision)
+    edited = store.read(series_id)["episodes"][1]["draft"]
+    assert "lifts Sol's wet photograph" in edited["shotDirection"]["shotPromptOverrides"]["5"]
+    assert "ADA QUINN: The island is next." in tv_series.episode_subtitles(edited)
+
+    premise = "Ada takes a boat to the island and searches for the missing child."
+    sequel = tv_series.start_next_season(store, series_id, premise, 2, 60)
+    assert sequel["seasonNumber"] == 2
+    assert sequel["leadReference"] == store.read(series_id)["leadReference"]
+    assert sequel["previousSeasonId"] == series_id
+    assert tv_series.start_next_season(store, series_id, premise, 2, 60)["writerJob"] == sequel["writerJob"]
+    payload = json.loads(requests[-1]["messages"][1]["content"])
+    assert len(requests) == 3
+    assert payload["previous finale"]["outcome"] == outline["outcome"]
+    assert "The island is next." in payload["previous finale"]["scripted ending"]
+    assert payload["cast"] == cast
+    assert tv_series.check_series_script(store, sequel["seriesId"])
+    assert store.read(sequel["seriesId"])["cast"] == cast
+    tv_series.start_episode_script(store, sequel["seriesId"], 1)
+    sequel_episode = json.loads(requests[-1]["messages"][1]["content"])
+    assert sequel_episode["previous season finale"] == payload["previous finale"]
+    assert sequel_episode["visual direction"] == "Teal interiors."
+
+
 class MemoryVolume:
     def __init__(self):
         self.files: dict[str, bytes] = {}
@@ -132,6 +188,57 @@ def _fixture_clip(path: Path):
         "-t", "6", "-threads", "2", "-c:v", "libx264", str(path),
     ], check=True, timeout=30)
     return path
+
+
+def test_trailer_uses_multiple_episodes_omits_their_final_shots_and_reopens(creator, monkeypatch, tmp_path):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("Trailer export requires FFmpeg and FFprobe.")
+    store = tv_series.SeriesStore(volume=MemoryVolume())
+    season = tv_series.create_series(store, PREMISE, 2, 30)
+    series_id = season["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    for number, color in enumerate(("red", "blue"), 1):
+        tv_series.start_episode_script(store, series_id, number)
+        assert tv_series.check_series_script(store, series_id, number)
+        source = tmp_path / f"source-{number}.mp4"
+        audio = ["-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000"] if number == 2 else []
+        subprocess.run([
+            "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color={color}:s=320x180:r=24", *audio,
+            "-vf", "drawbox=color=lime:t=fill:enable='gte(t,24)'", "-t", "30",
+            "-threads", "2", "-c:v", "libx264", str(source),
+        ], check=True, timeout=30)
+        store.archive_episode(series_id, number, source, 30)
+        season = store.read(series_id)
+        season["episodes"][number - 1]["render"] = {"runId": f"episode-source-{number}", "archived": True}
+        store.write(season)
+
+    with pytest.raises(tv_series.SeriesError, match="more finished episodes"):
+        tv_series.cut_season_trailer(store, series_id, [1], seconds=30, frame_format="Widescreen")
+    options = {"seconds": 30, "frame_format": "Widescreen", "tagline": "Tomorrow is calling."}
+    trailer = tv_series.cut_season_trailer(store, series_id, [2, 1], **options)
+    assert tv_series.cut_season_trailer(store, series_id, [1, 2], **options) == trailer
+    new_root = tmp_path / "reopened"
+    new_root.mkdir()
+    monkeypatch.chdir(new_root)
+    reopened = tv_series.SeriesStore(volume=store.volume)
+    assert reopened.read(series_id)["trailers"][trailer["id"]] == trailer
+    path = reopened.trailer_path(series_id, trailer["id"])
+    video = verify_mp4(path)
+    assert (video["durationSeconds"], video["width"], video["height"]) == (30, 1280, 720)
+
+    def frame(seconds: int) -> list[tuple[int, int, int]]:
+        data = subprocess.check_output([
+            "ffmpeg", "-v", "error", "-ss", str(seconds), "-i", str(path), "-frames:v", "1",
+            "-vf", "scale=320:180", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
+        ], timeout=15)
+        assert len(data) == 320 * 180 * 3
+        return list(zip(data[::3], data[1::3], data[2::3]))
+
+    center = 90 * 320 + 160
+    assert frame(1)[center][0] > 200
+    assert frame(5)[center][2] > 200
+    assert max(pixel[1] for pixel in frame(25)) < 100
+    assert any(min(pixel) > 220 for pixel in frame(28))
 
 
 class Renderer:
@@ -236,8 +343,19 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     next(item for item in app.button if item.label == "Write season").click().run()
     assert store.read(app.query_params["series"])["episodes"]
 
+    look = "Deep indigo shadows and amber lighthouse windows."
+    next(item for item in app.radio if item.label == "Season workspace").set_value("Series bible").run()
+    next(item for item in app.text_area if item.label == "Visual direction").set_value(look)
+    next(item for item in app.button if item.label == "Save series bible").click().run()
+    assert store.read(app.query_params["series"])["visualDirection"] == look
+    next(item for item in app.radio if item.label == "Season workspace").set_value("Episodes").run()
+
     next(item for item in app.button if item.label == "Write episode script").click().run()
     assert "LIGHTHOUSE" in next(item for item in app.text_area if item.label == "Script").value
+    action = "Ada slides the brass receiver across the floor toward the broken doorway."
+    next(item for item in app.text_area if item.label == "Visible action").set_value(action)
+    next(item for item in app.button if item.label == "Save shot").click().run()
+    assert action in next(item for item in app.text_area if item.label == "Script").value
     next(item for item in app.button if item.label == "Render this episode").click().run()
     series_id = app.query_params["series"]
     run_id = store.read(series_id)["episodes"][0]["render"]["runId"]
@@ -249,9 +367,32 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     assert app.get("video")
     assert "Download episode" in {item.proto.label for item in app.get("download_button")}
     assert len(renderer.calls) == 5
+    assert action in renderer.calls[0][0]
+    assert look in renderer.calls[0][0]
 
     reopened = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/0_TV_Series.py")
     reopened.query_params["series"] = series_id
     reopened.run()
     assert not reopened.exception and reopened.get("video")
     assert len(renderer.calls) == 5
+
+    next(item for item in reopened.radio if item.label == "Season workspace").set_value("Trailers").run()
+    next(item for item in reopened.selectbox if item.label == "Trailer format").select("Vertical")
+    next(item for item in reopened.button if item.label == "Cut trailer").click().run(timeout=90)
+    assert not reopened.error and not reopened.exception
+    assert reopened.get("video")
+    assert "Download trailer" in {item.proto.label for item in reopened.get("download_button")}
+    trailer = next(iter(store.read(series_id)["trailers"].values()))
+    video = verify_mp4(store.trailer_path(series_id, trailer["id"]))
+    assert (video["durationSeconds"], video["width"], video["height"]) == (15, 720, 1280)
+    assert len(renderer.calls) == 5
+
+    next(item for item in reopened.radio if item.label == "Season workspace").set_value("Next season").run()
+    next(item for item in reopened.text_area if item.label == "Next season premise").set_value(
+        "The siblings find a hidden island station and return to the lighthouse."
+    )
+    next(item for item in reopened.button if item.label == "Write next season").click().run()
+    successor = store.read(reopened.query_params["series"])
+    assert not reopened.error and not reopened.exception
+    assert successor["previousSeasonId"] == series_id and successor["seasonNumber"] == 2
+    assert successor["episodes"]

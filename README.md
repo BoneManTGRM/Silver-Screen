@@ -173,12 +173,19 @@ eight episodes, and choose 30 seconds, one minute, or two minutes per episode.
 The writer creates a series bible and episode outlines. Review the bible, write
 an episode, and review its script before approving its GPU request budget.
 
-A season can share one lead reference photo. Episodes reuse the recurring cast
-and story context. Each episode has its own render checkpoint, player, MP4, and
-dialogue subtitles. Spoken dialogue is available when OpenAI speech is
-configured.
+The series bible lets you edit the setting, season arc, recurring cast, and
+visual direction for new drafts. Save an optional lead reference photo. In the
+episode workspace, edit the outline and adjust individual shots and dialogue
+before rendering. The player includes the finished MP4 and dialogue subtitles.
+Spoken dialogue is available when OpenAI speech is configured.
 
-On the Modal deployment, season files and completed episode MP4s use the private
+The trailer editor cuts completed episodes into a 15- or 30-second widescreen
+or vertical video. It samples footage before each episode's closing shot and
+adds a season title card. Trailer editing uses FFmpeg and the saved footage.
+The next season carries forward the cast, lead photo, visual direction, and
+the previous finale into a new episode guide.
+
+On the Modal deployment, season files and completed episode and trailer MP4s use the private
 clip volume. Local installations save them under `runs/tv-series`. In-progress
 video checkpoints use the existing `runs` storage, so keeping those checkpoints
 through deployment replacement requires persistent run storage.
