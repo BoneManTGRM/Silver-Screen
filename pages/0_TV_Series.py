@@ -2,6 +2,7 @@
 
 import base64
 from io import BytesIO
+from pathlib import Path
 
 import streamlit as st
 
@@ -14,8 +15,8 @@ from silver_screen.screenplay_writer import EPISODE_LENGTHS, IDEA_LIMIT, SCREENP
 from silver_screen.tv_series import (
     CAST_LIMITS, GPU_BUDGET_STOP, OUTLINE_LIMITS, RENDER_ASPECTS, RENDER_MODELS, SEASON_COUNTS, STOPPED_RENDERS,
     VISUAL_DIRECTION_LIMIT, SeriesError, check_series_script, create_series, cut_season_trailer,
-    episode_framing_available, episode_shots, episode_status, episode_subtitles, keep_previous_opening,
-    next_season_id, reopen_episode_checkpoint, retry_season_writer, save_episode_outline, save_episode_shot,
+    episode_framing_available, episode_shot_reference, episode_shots, episode_status, episode_subtitles, keep_previous_opening,
+    next_season_id, reopen_episode_checkpoint, retry_season_writer, save_episode_outline, save_episode_shot, save_episode_shot_reference,
     save_season_bible, set_series_photo, start_episode_render, start_episode_script, start_next_season,
     studio_series_store,
 )
@@ -181,6 +182,8 @@ def show_opening_review(series_id: str, episode: dict, status: dict, ready: bool
                     st.rerun()
         if current := takes.get("current"):
             st.video(current)
+            st.download_button("Download opening shot", Path(current).read_bytes(),
+                               file_name=f"episode-{number:02d}-opening.mp4", mime="video/mp4", on_click="ignore")
             if st.button("Approve opening and render episode", type="primary", disabled=not ready):
                 start_episode_render(store, series_id, number, max_calls=render["maxCalls"], approve_opening=True)
                 st.rerun()
@@ -275,6 +278,8 @@ def edit_outline(series_id: str, episode: dict) -> None:
                 outline[field] = st.text_area(label, episode[field], max_chars=OUTLINE_LIMITS[field])
             if episode.get("draft"):
                 st.caption("Write another draft to apply these outline changes to the screenplay.")
+            if episode.get("shotReferences"):
+                st.caption("A new screenplay clears the starting frames assigned to this draft.")
             save = st.form_submit_button("Save episode outline")
         if save:
             try:
@@ -305,6 +310,35 @@ def edit_shots(series_id: str, episode: dict) -> None:
         if save:
             try:
                 save_episode_shot(store, series_id, number, shot_number, updated, expected_revision=revision)
+            except SeriesError as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
+
+
+        st.markdown("**Starting frame**")
+        try:
+            frame = episode_shot_reference(store, series_id, episode, shot_number)
+        except (SeriesError, OSError):
+            frame = None
+            st.warning("The saved starting frame could not be opened. Upload a replacement to preview it.")
+        if frame:
+            st.image(str(frame), width=320)
+        else:
+            st.caption("Uses the season lead photo for shot 1 when available, or the previous shot’s last frame for later shots.")
+        key = f"{series_id}-starting-frame-{number}-{shot_number}-{revision}"
+        with st.form(key, clear_on_submit=True):
+            photo = st.file_uploader("Upload a starting image for this shot", type=["png", "jpg", "jpeg", "webp"])
+            save_frame = st.form_submit_button("Save starting frame")
+        remove_frame = bool((episode.get("shotReferences") or {}).get(str(shot_number))) and st.button(
+            "Remove starting frame", key=f"{key}-remove",
+        )
+        if save_frame and photo is None:
+            st.warning("Choose an image first.")
+        elif save_frame or remove_frame:
+            try:
+                save_episode_shot_reference(store, series_id, number, shot_number, photo if save_frame else None,
+                                            expected_revision=revision)
             except SeriesError as exc:
                 st.error(str(exc))
             else:

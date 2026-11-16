@@ -764,8 +764,13 @@ def _continuity_input(
     shot: dict[str, Any],
     config: VideoProductionConfig,
     initial_image: str | None,
+    *,
+    starting_frame: tuple[str, str] | None = None,
 ) -> tuple[str | None, str | None]:
     shot["continuityUsed"] = False
+    if starting_frame:
+        shot["continuityUsed"] = True
+        return starting_frame
     if initial_image and (
         int(shot.get("order", 0) or 0) == 1
         or queue.get("referenceMode") == "product"
@@ -822,7 +827,9 @@ def _update_prediction_in_queue(
     save_video_queue(root, queue)
 
 
-def _episode_video_settings(options: dict, image: str | None) -> dict[str, Any]:
+def _episode_video_settings(
+    options: dict, image: str | None, opening_size: tuple[int, int] | None = None,
+) -> dict[str, Any]:
     from .comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, wan_aspect_size
     from .direct_generation import prepare_wan_reference
 
@@ -833,13 +840,13 @@ def _episode_video_settings(options: dict, image: str | None) -> dict[str, Any]:
         size = size[::-1] if premium else wan_aspect_size(aspect, wan_14b=False)
     elif aspect == "16:9" and not premium:
         size = wan_aspect_size(aspect, wan_14b=False)
-    settings: dict[str, Any] = {"video_size": size, "negative_prompt": WAN_MOTION_NEGATIVE_PROMPT}
+    settings: dict[str, Any] = {"video_size": opening_size or size, "negative_prompt": WAN_MOTION_NEGATIVE_PROMPT}
     if premium:
         settings.update(wan_14b=True, steps=28)
     if image:
         photo = io.BytesIO(base64.b64decode(image.split(",", 1)[1], validate=True))
-        prepared, size = prepare_wan_reference(photo, size if aspect != "auto" else None,
-                                               wan_14b=premium, preserve_framing=True)
+        reference_size = opening_size if aspect == "auto" else size
+        prepared, size = prepare_wan_reference(photo, reference_size, wan_14b=premium, preserve_framing=True)
         settings.update(image="data:image/jpeg;base64," + base64.b64encode(prepared).decode("ascii"), video_size=size)
     return settings
 
@@ -853,6 +860,7 @@ def _process_prediction(
     shot: dict[str, Any],
     config: VideoProductionConfig,
     initial_image: str | None,
+    starting_frame: tuple[str, str] | None = None,
 ) -> None:
     repair = (
         choose_tgrm_repair(
@@ -862,22 +870,25 @@ def _process_prediction(
         if int(shot.get("attempts", 0) or 0) > 0
         else None
     )
+    series_episode = state.get("screenplayWriter") == "series_episode"
+    direction = state.get("shotDirection") or {}
     image, continuity_frame = _continuity_input(
-        queue, root, shot, config, initial_image
+        queue, root, shot, config, initial_image, starting_frame=starting_frame,
     )
     if continuity_frame:
         shot["inputContinuityFrame"] = continuity_frame
+    explicit_reference = starting_frame is not None
     source_scene = _scene_by_number(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
-    if state.get("screenplayWriter") == "series_episode" and (notes := shot.get("openingRetakeNotes")):
+    if series_episode and (notes := shot.get("openingRetakeNotes")):
         prompt = f"Opening shot retake direction: {notes}. {prompt}"[:3500]
     if repair and queue.get("referenceMode") == "product":
         directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
         if directive:
             prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
-    if queue.get("referenceMode") == "cast" and image:
+    if image and (explicit_reference or queue.get("referenceMode") == "cast"):
         from .direct_generation import preserve_reference_appearance
 
         prompt = preserve_reference_appearance(prompt)
@@ -908,7 +919,7 @@ def _process_prediction(
             settings["check_hands"] = True
             settings["check_face"] = True
             settings["check_body"] = True
-            if initial_image and initial_image != image:
+            if initial_image and initial_image != image and not explicit_reference:
                 settings["face_reference"] = initial_image
     if queue.get("referenceMode") == "product":
         from .modal_renderer import ModalComfyUIClient
@@ -927,9 +938,11 @@ def _process_prediction(
                     "duplicate products, jump cuts, unrelated objects, camera shake, "
                     "unreadable lettering, subtitles, watermarks, on-screen captions"
                 )
-    episode_video = (state.get("shotDirection") or {}).get("episodeVideo")
-    if episode_video and state.get("screenplayWriter") == "series_episode":
-        settings.update(_episode_video_settings(episode_video, image))
+    episode_video = direction.get("episodeVideo")
+    if episode_video and series_episode:
+        opening = queue["shots"][0]
+        opening_size = opening.get("requestedFrameSize") if opening is not shot and opening.get("status") == "verified" else None
+        settings.update(_episode_video_settings(episode_video, image, tuple(opening_size) if opening_size else None))
         shot["requestedFrameSize"] = list(settings["video_size"])
     elif queue.get("writtenProduction") and queue.get("backend") == "comfyui":
         from .comfyui import ComfyUIClient, video_controls_ready
@@ -1002,14 +1015,16 @@ def _verify_prediction_output(
         ("body_review", "bodyReview", "possible_distortion", body_review_message),
         ("hand_review", "handReview", "possible_loss", hand_review_message),
     )
+    explicit_reference = str(shot.get("inputContinuityFrame") or "").startswith("shot-references/")
     for key, field, flagged, message in reviews:
         shot.pop(field, None)
         review = prediction.get(key)
         if isinstance(review, dict):
             shot[field] = review
-            inconclusive = queue.get("referenceMode") == "cast" and key == "face_review" and review.get("status") in {
-                "inconclusive", "no_reference_face", "unavailable",
-            }
+            inconclusive = key == "face_review" and (explicit_reference or queue.get("referenceMode") == "cast") and (
+                review.get("status") in {"inconclusive", "unavailable"}
+                or (review.get("status") == "no_reference_face" and not explicit_reference)
+            )
             if review.get("status") == flagged or inconclusive:
                 rejected = clip_path.parent / "review" / f"{clip_path.stem}-attempt-{int(shot.get('attempts') or 1):02d}.mp4"
                 rejected.parent.mkdir(exist_ok=True)
@@ -1154,9 +1169,16 @@ def generate_ai_video(
                 raise VideoGenerationError("Start a new production to use a different lead photo.")
         elif reference.is_file():
             initial_image_data = reference.read_text(encoding="ascii")
+    starting_frames = {}
+    if state.get("screenplayWriter") == "series_episode":
+        for order in (state.get("shotDirection") or {}).get("episodeStartingFrames", ()):
+            path = root / "shot-references" / f"{order:04d}.jpg"
+            if not (data_url := image_to_data_url(path)):
+                raise VideoGenerationError(f"The starting frame for shot {order} could not be prepared.")
+            starting_frames[order] = (data_url, _store_relative(root, path))
     if backend == "comfyui":
         client = make_comfyui_client()
-        if initial_image_data and not client.supports_reference:
+        if (initial_image_data or starting_frames) and not client.supports_reference:
             raise VideoGenerationError("Configure a ComfyUI reference workflow to use the supplied image.")
         if not client.supports_reference:
             config = replace(config, use_continuity_frames=False)
@@ -1276,6 +1298,7 @@ def generate_ai_video(
                     shot=shot,
                     config=config,
                     initial_image=initial_image_data,
+                    starting_frame=starting_frames.get(int(shot.get("order") or 0)),
                 )
             calls_this_run += 1
         except PredictionPending as exc:

@@ -139,7 +139,7 @@ def test_sequel_inherits_edited_bible_photo_and_scripted_finale(creator):
         "harbor photographer and sets it beneath the receiver where Sol can see it from the doorway."
     ),
                "speaker": "lead", "line": "The island is next."}
-    revision = str(draft["seed"])
+    revision = draft["revision"]
     tv_series.save_episode_shot(store, series_id, 2, 5, changed, expected_revision=revision)
     with pytest.raises(tv_series.SeriesError, match="script was updated"):
         tv_series.save_episode_shot(store, series_id, 2, 5, changed, expected_revision=revision)
@@ -399,6 +399,45 @@ def test_cinema_opening_uses_the_14b_worker_and_keeps_vertical_reference_framing
     assert verify_mp4(opening)["durationSeconds"] == 6
 
 
+def _jpeg(color):
+    photo = BytesIO()
+    Image.new("RGB", (96, 128), color).save(photo, "JPEG")
+    photo.seek(0)
+    return photo
+
+
+def test_starting_frame_can_be_replaced_removed_and_is_tied_to_the_draft(creator):
+    store, _ = creator
+    series_id = tv_series.create_series(store, PREMISE, 2, 30)["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    tv_series.start_episode_script(store, series_id, 1)
+    assert tv_series.check_series_script(store, series_id, 1)
+    episode = store.read(series_id)["episodes"][0]
+    revision = episode["draft"]["revision"]
+    with pytest.raises(tv_series.SeriesError, match="could not be read"):
+        tv_series.save_episode_shot_reference(store, series_id, 1, 2, BytesIO(b"bad image"), expected_revision=revision)
+    tv_series.save_episode_shot_reference(store, series_id, 1, 2, _jpeg("red"), expected_revision=revision)
+    episode = store.read(series_id)["episodes"][0]
+    original = tv_series.episode_shot_reference(store, series_id, episode, 2)
+    tv_series.save_episode_shot_reference(store, series_id, 1, 2, _jpeg("blue"), expected_revision=revision)
+    episode = store.read(series_id)["episodes"][0]
+    replacement = tv_series.episode_shot_reference(store, series_id, episode, 2)
+    assert original != replacement
+    with Image.open(replacement) as photo:
+        assert photo.size == (96, 128)
+        assert photo.getpixel((48, 64))[2] > 240
+    tv_series.save_episode_shot_reference(store, series_id, 1, 2, None, expected_revision=revision)
+    episode = store.read(series_id)["episodes"][0]
+    assert tv_series.episode_shot_reference(store, series_id, episode, 2) is None
+    tv_series.save_episode_shot_reference(store, series_id, 1, 2, _jpeg("red"), expected_revision=revision)
+    tv_series.start_episode_script(store, series_id, 1, rewrite=True)
+    assert tv_series.check_series_script(store, series_id, 1)
+    episode = store.read(series_id)["episodes"][0]
+    assert tv_series.episode_shot_reference(store, series_id, episode, 2) is None
+    with pytest.raises(tv_series.SeriesError, match="script was updated"):
+        tv_series.save_episode_shot_reference(store, series_id, 1, 2, _jpeg("red"), expected_revision=revision)
+
+
 def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, monkeypatch, tmp_path):
     _, _ = creator
     store = tv_series.SeriesStore(volume=MemoryVolume())
@@ -416,6 +455,9 @@ def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, mo
     for number in (1, 2):
         tv_series.start_episode_script(store, series_id, number)
         assert tv_series.check_series_script(store, series_id, number)
+        if number == 1:
+            draft = store.read(series_id)["episodes"][0]["draft"]
+            tv_series.save_episode_shot_reference(store, series_id, 1, 3, _jpeg("red"), expected_revision=draft["revision"])
         if number == 2:
             store.volume.fail_suffix = "/episode-2.mp4"
         run_id = tv_series.start_episode_render(store, series_id, number, max_calls=5)
@@ -445,6 +487,14 @@ def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, mo
         assert "00:00:00.120 --> 00:00:05.780" in tv_series.episode_subtitles(episode["draft"])
 
     assert len(renderer.calls) == 10
+    third_prompt, third_settings = renderer.calls[2]
+    assert "Start with the supplied shot image" in third_prompt
+    assert "previous-frame image" not in third_prompt
+    assert "Keep the appearance" in third_prompt
+    with Image.open(BytesIO(base64.b64decode(third_settings["image"].split(",")[1]))) as starting_image:
+        red, green, blue = starting_image.getpixel((48, 64))
+        assert red > 240 and green < 10 and blue < 10
+    assert third_settings["image"] != renderer.calls[7][1]["image"]
     assert renderer.calls[0][1]["image"] == renderer.calls[5][1]["image"]
     assert renderer.calls[0][1]["image"].startswith("data:image/jpeg;base64,")
     fresh_workspace = tmp_path / "new-workspace"
@@ -503,6 +553,7 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     app.run()
     assert not app.exception
     assert app.get("video")
+    assert "Download opening shot" in {item.proto.label for item in app.get("download_button")}
     assert len(renderer.calls) == 1
     assert action in renderer.calls[0][0]
     assert look in renderer.calls[0][0]

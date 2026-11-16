@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -382,6 +383,7 @@ def run_pipeline(
     video_use_continuity: bool | None = None,
     progress: ProgressCallback | None = None,
     run_id: str | None = None,
+    shot_references: dict[int, Path] | None = None,
 ) -> dict[str, Any]:
     """Run validation, story generation, TGRM, video, and persistence."""
 
@@ -433,6 +435,13 @@ def run_pipeline(
         )
 
     try:
+        if shot_references:
+            if workspace is None or normalized.get("screenplayWriter") != "series_episode":
+                raise ValueError("Shot references require a saved series episode.")
+            references_dir = workspace.media_dir / "shot-references"
+            references_dir.mkdir()
+            for shot_number, source in shot_references.items():
+                shutil.copyfile(source, references_dir / f"{shot_number:04d}.jpg")
         _notify(
             progress, "validate", 5, "Brief validated and normalized"
         )

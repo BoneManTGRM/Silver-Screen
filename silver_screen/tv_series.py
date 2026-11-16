@@ -20,7 +20,7 @@ from .autonomous_studio import (
     active_production, continue_autonomous_production, enqueue_production,
     prepare_autonomous_plan, start_autonomous_production,
 )
-from .comfyui import video_backend, video_controls_ready
+from .comfyui import comfyui_ready, video_backend, video_controls_ready
 from .modal_clip_archive import CLIPS_VOLUME
 from .modal_renderer import modal_configured
 from .runtime import (
@@ -171,7 +171,7 @@ class SeriesStore:
         if not path.is_file() and self.volume is not None:
             self._cache(path, self.volume.read_file(f"/{relative}"))
         if not path.is_file():
-            raise SeriesError("The saved MP4 could not be found.")
+            raise SeriesError("The saved media could not be found.")
         return path
 
     @staticmethod
@@ -484,6 +484,8 @@ def check_series_script(store: SeriesStore, series_id: str, number: int | None =
                 series.update(_bible(raw, series))
             else:
                 item["draft"] = _compile_episode_draft(item.get("writerContext") or series, item, raw)
+                item["draft"]["revision"] = secrets.token_hex(8)
+                item.pop("shotReferences", None)
         except ScreenplayStatusUnavailable:
             raise
         except (ScreenplayError, SeriesError, TypeError, ValueError, KeyError):
@@ -545,6 +547,58 @@ def save_episode_shot(store: SeriesStore, series_id: str, number: int, shot_numb
         draft.update(authoredScript=updated["authoredScript"], revision=secrets.token_hex(8))
         draft["shotDirection"]["shotPromptOverrides"] = updated["shotDirection"]["shotPromptOverrides"]
         store.write(series)
+
+
+def episode_shot_reference(store: SeriesStore, series_id: str, episode: dict, shot_number: int) -> Path | None:
+    token = (episode.get("shotReferences") or {}).get(str(shot_number))
+    if token is None:
+        return None
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise SeriesError("This starting frame could not be read.")
+    try:
+        return store._media_path(series_id, _shot_reference_filename(episode["number"], shot_number, token))
+    except (OSError, SeriesError) as exc:
+        raise SeriesError(f"The saved starting frame for shot {shot_number} could not be opened.") from exc
+
+
+def _shot_reference_filename(number: int, shot_number: int, token: str) -> str:
+    return f"episode-{int(number)}-shot-{int(shot_number)}-{token}.jpg"
+
+
+def save_episode_shot_reference(
+    store: SeriesStore, series_id: str, number: int, shot_number: int, photo: Any, *, expected_revision: str,
+) -> None:
+    data = _reference(image_to_data_url(photo) or "")
+    if photo is not None and data is None:
+        raise SeriesError("The starting image could not be read or fit within the render upload limit.")
+    with _LOCK:
+        series = store.read(series_id)
+        episode = _episode(series, number)
+        draft = episode.get("draft")
+        if not draft or episode.get("writerJob") or episode.get("render"):
+            raise SeriesError("Set starting frames after writing the script and before rendering.")
+        if str(draft.get("revision", draft["seed"])) != expected_revision:
+            raise SeriesError("This script was updated. Reopen the shot to edit the current version.")
+        if not 1 <= shot_number <= len(episode_shots(draft)):
+            raise SeriesError("Choose a shot from the episode.")
+        frames = episode.setdefault("shotReferences", {})
+        if data is None:
+            frames.pop(str(shot_number), None)
+            store.write(series)
+            return
+        payload = data.getvalue()
+        token = blake2s(payload, digest_size=16).hexdigest()
+        frames[str(shot_number)] = token
+        with TemporaryDirectory(prefix="series-shot-") as directory:
+            path = Path(directory) / "reference.jpg"
+            path.write_bytes(payload)
+            store.write(series, attachment=(_shot_reference_filename(number, shot_number, token), path))
+
+
+def _episode_shot_references_available() -> bool:
+    return video_backend() == "replicate" or (
+        video_backend() == "comfyui" and (modal_configured() or comfyui_ready("reference"))
+    )
 
 
 def set_series_photo(store: SeriesStore, series_id: str, photo: Any) -> None:
@@ -749,7 +803,14 @@ def start_episode_render(
                 store.write(series)
         run_id = existing or create_run_id()
         # Preserve the episode's original photo and approved render budget on resume.
+        shot_references = {}
         if not existing:
+            if episode.get("shotReferences"):
+                if not _episode_shot_references_available():
+                    raise SeriesError("Configure image-to-video rendering to use the saved starting frames.")
+                for shot_number in range(1, required + 1):
+                    if frame := episode_shot_reference(store, series_id, episode, shot_number):
+                        shot_references[shot_number] = frame
             if render_model not in RENDER_MODELS or aspect not in RENDER_ASPECTS:
                 raise SeriesError("Choose a supported episode model and frame format.")
             if render_model == "wan14" and not (video_backend() == "comfyui" and modal_configured()):
@@ -782,6 +843,8 @@ def start_episode_render(
                     outcome = continue_autonomous_production(run_id, output_root="runs", saved_config=config)
                 else:
                     brief = deepcopy(draft)
+                    if shot_references:
+                        brief["shotDirection"]["episodeStartingFrames"] = sorted(shot_references)
                     if render_model != "standard" or aspect != "auto":
                         brief["shotDirection"]["episodeVideo"] = {"model": render_model, "aspect": aspect}
                     plan = prepare_autonomous_plan(
@@ -792,6 +855,7 @@ def start_episode_render(
                     photo = _reference(current["leadReference"])
                     outcome = start_autonomous_production(
                         plan, images=[photo] if photo else [], output_root="runs", run_id=run_id,
+                        shot_references=shot_references,
                     )
                 job = outcome.get("job") or {}
                 with _LOCK:
