@@ -12,13 +12,13 @@ from silver_screen.runtime import slugify
 from silver_screen.science import GENRES, TONES
 from silver_screen.screenplay_writer import EPISODE_LENGTHS, IDEA_LIMIT, SCREENPLAY_LENGTHS, ScreenplayStatusUnavailable
 from silver_screen.tv_series import (
-    CAST_LIMITS, OUTLINE_LIMITS, SEASON_COUNTS, STOPPED_RENDERS, VISUAL_DIRECTION_LIMIT,
+    CAST_LIMITS, GPU_BUDGET_STOP, OUTLINE_LIMITS, SEASON_COUNTS, STOPPED_RENDERS, VISUAL_DIRECTION_LIMIT,
     SeriesError, check_series_script, create_series, cut_season_trailer, episode_shots, episode_status,
     episode_subtitles, next_season_id, retry_season_writer, save_episode_outline, save_episode_shot,
     save_season_bible, set_series_photo, start_episode_render, start_episode_script, start_next_season,
     studio_series_store,
 )
-from silver_screen.tv_series_trailer import TRAILER_FORMATS, TRAILER_LENGTHS
+from silver_screen.tv_series_trailer import TRAILER_FORMATS, available_trailer_lengths
 from silver_screen.voice_providers import provider_capabilities
 
 
@@ -149,6 +149,21 @@ def finished_episode(series_id: str, episode: dict) -> None:
             st.caption("Dialogue is available as subtitles.")
 
 
+def resume_with_budget(series_id: str, episode: dict, *, used: int, remaining: int, required: int, ready: bool) -> None:
+    number = episode["number"]
+    upper = 3 * required
+    lower = max(required, used + 1)
+    approved = episode["render"]["maxCalls"]
+    recommended = min(upper, max(lower, approved, used + remaining))
+    st.info("The GPU request limit paused this render. Increase the total limit to continue from the saved shots.")
+    with st.form(f"{series_id}-episode-budget-{number}"):
+        calls = st.number_input("Total GPU request limit", min_value=lower, max_value=upper, value=recommended)
+        resume = st.form_submit_button("Resume saved render", type="primary", disabled=not ready)
+    if resume:
+        start_episode_render(store, series_id, number, max_calls=int(calls))
+        st.rerun()
+
+
 def render_controls(series_id: str, episode: dict, season: dict, status: dict) -> None:
     number, draft = episode["number"], episode["draft"]
     stage = status["status"]
@@ -166,8 +181,14 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
     restart = stage == "checkpoint_missing"
     if stage == "checkpoint":
         metrics = status.get("metrics") or {}
-        st.caption(f"Saved checkpoint · {metrics.get('verifiedShots', 0)}/{required} shots · {metrics.get('providerCalls', 0)}/{render['maxCalls']} requests used")
-        restart = status.get("stopReason") in STOPPED_RENDERS
+        done = metrics.get("verifiedShots", 0)
+        used = metrics.get("providerCalls", 0)
+        st.caption(f"Saved checkpoint · {done}/{required} shots · {used}/{render['maxCalls']} requests used")
+        reason = status.get("stopReason")
+        if reason == GPU_BUDGET_STOP and used < 3 * required:
+            resume_with_budget(series_id, episode, used=used, remaining=required - done, required=required, ready=ready)
+            return
+        restart = reason in STOPPED_RENDERS
         if not restart:
             if st.button("Resume episode", type="primary", disabled=not ready and status.get("runStatus") != "complete"):
                 start_episode_render(store, series_id, number, max_calls=render["maxCalls"])
@@ -210,8 +231,12 @@ def edit_outline(series_id: str, episode: dict) -> None:
                 st.caption("Write another draft to apply these outline changes to the screenplay.")
             save = st.form_submit_button("Save episode outline")
         if save:
-            save_episode_outline(store, series_id, number, outline)
-            st.rerun()
+            try:
+                save_episode_outline(store, series_id, number, outline)
+            except SeriesError as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
 
 
 def edit_shots(series_id: str, episode: dict) -> None:
@@ -232,8 +257,12 @@ def edit_shots(series_id: str, episode: dict) -> None:
             }
             save = st.form_submit_button("Save shot")
         if save:
-            save_episode_shot(store, series_id, number, shot_number, updated, expected_revision=revision)
-            st.rerun()
+            try:
+                save_episode_shot(store, series_id, number, shot_number, updated, expected_revision=revision)
+            except SeriesError as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
 
 
 def show_episodes(series: dict, status_by_episode: dict[int, dict]) -> None:
@@ -291,22 +320,30 @@ def show_trailers(season: dict) -> None:
     if not completed:
         st.info("Finish an episode to start cutting your trailer.")
         return
+    sources = st.multiselect("Finished episodes", list(completed), default=list(completed),
+                             format_func=lambda number: f"Episode {number} · {completed[number]}",
+                             key=f"{series_id}-trailer-episodes")
+    shot_seconds = SCREENPLAY_LENGTHS[season["seconds"]]
+    lengths = available_trailer_lengths([season["episodes"][number - 1]["draft"]["seconds"] for number in sources],
+                                        shot_seconds)
     with st.form(f"{series_id}-trailer"):
-        sources = st.multiselect("Finished episodes", list(completed), default=list(completed),
-                                 format_func=lambda number: f"Episode {number} · {completed[number]}")
         left, right = st.columns(2)
-        seconds = left.selectbox("Trailer length", TRAILER_LENGTHS, index=int(len(completed) > 1 or season["seconds"] > 30),
-                                 format_func=length_label)
+        seconds = left.selectbox("Trailer length", lengths, index=len(lengths) - 1 if lengths else None,
+                                 format_func=length_label, disabled=not lengths)
         frame_format = right.selectbox("Trailer format", list(TRAILER_FORMATS))
         tagline = st.text_input("End card tagline (optional)", max_chars=80)
-        cut = st.form_submit_button("Cut trailer", type="primary")
+        cut = st.form_submit_button("Cut trailer", type="primary", disabled=not lengths)
     selected = st.session_state.get(f"{series_id}-latest-trailer")
     if cut:
-        with st.spinner("Cutting your trailer from finished episodes…"):
-            trailer = cut_season_trailer(store, series_id, sources, seconds=seconds, frame_format=frame_format, tagline=tagline)
-        selected = trailer["id"]
-        st.session_state[f"{series_id}-latest-trailer"] = selected
-        season = store.read(series_id)
+        try:
+            with st.spinner("Cutting your trailer from finished episodes…"):
+                trailer = cut_season_trailer(store, series_id, sources, seconds=seconds, frame_format=frame_format, tagline=tagline)
+        except SeriesError as exc:
+            st.error(str(exc))
+        else:
+            selected = trailer["id"]
+            st.session_state[f"{series_id}-latest-trailer"] = selected
+            season = store.read(series_id)
     trailers = season.get("trailers") or {}
     if trailers:
         ids = sorted(trailers, key=lambda key: trailers[key]["createdAt"], reverse=True)

@@ -478,9 +478,7 @@ def continue_autonomous_production(
             "transitionMode": "off" if brief.get("screenplayWriter") == "ad" else "auto",
             "semanticQa": False,
         }}
-        if saved_config is not None:
-            job = {"projectId": saved_config["projectId"], "config": saved_config}
-    cfg = normalize_autonomous_config(job.get("config"))
+    cfg = normalize_autonomous_config({**(job.get("config") or {}), **(saved_config or {})})
     queue = load_video_queue(workspace.media_dir) or {}
     qcfg = queue.get("config") or {}
     is_ad = brief.get("screenplayWriter") == "ad"
@@ -499,7 +497,8 @@ def continue_autonomous_production(
             use_continuity=not is_ad,
             progress=progress,
         )
-    return finish_autonomous_run(run_id, project_id=str(job.get("projectId") or cfg.get("projectId") or ""), config=cfg, output_root=output_root)
+    project_id = (saved_config or {}).get("projectId") or job.get("projectId") or cfg.get("projectId") or ""
+    return finish_autonomous_run(run_id, project_id=str(project_id), config=cfg, output_root=output_root)
 
 
 __all__ = ["AutonomousStudioError", "QUALITY_PROFILES", "QualityProfile", "build_edit_decision_list", "continue_autonomous_production", "finish_autonomous_run", "normalize_autonomous_config", "prepare_autonomous_plan", "quality_profile", "recommended_creative_profile", "start_autonomous_production"]

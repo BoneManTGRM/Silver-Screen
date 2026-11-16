@@ -17,6 +17,11 @@ TRAILER_FORMATS = {
 FPS = 24
 
 
+def available_trailer_lengths(episode_lengths: list[int], shot_seconds: int) -> tuple[int, ...]:
+    footage = sum(max(0, length // shot_seconds - 1) * shot_seconds for length in episode_lengths)
+    return tuple(seconds for seconds in TRAILER_LENGTHS if seconds <= footage)
+
+
 def _montage(sources: list[tuple[Path, int]], seconds: int, shot_seconds: int) -> list[tuple[Path, float, float]]:
     """Spread distinct cuts across episodes and leave out each closing shot."""
     available = [round(_clip_timing(path)[0] / shot_seconds) - 1 for path, _ in sources]

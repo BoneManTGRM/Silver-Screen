@@ -13,7 +13,7 @@ from PIL import Image
 from streamlit.testing.v1 import AppTest
 
 from silver_screen import comfyui, tv_series
-from silver_screen.ai_video import PredictionPending, verify_mp4
+from silver_screen.ai_video import PredictionPending, VideoGenerationError, verify_mp4
 from silver_screen.autonomous_studio import active_production, prepare_autonomous_plan
 from silver_screen.screenplay_writer import EPISODE_KIND, screenplay_lengths
 
@@ -131,7 +131,11 @@ def test_sequel_inherits_edited_bible_photo_and_scripted_finale(creator):
     draft = store.read(series_id)["episodes"][1]["draft"]
     assert draft["creativeDirection"]["globalVisualDirection"] == look
     shots = tv_series.episode_shots(draft)
-    changed = {**shots[-1], "action": "Ada opens the cabinet and lifts Sol's wet photograph from the shelf.",
+    changed = {**shots[-1], "action": (
+        "Ada opens the cabinet and lifts Sol's wet photograph from the shelf. For a moment the signal lamp "
+        "lights her face and the wall behind her. She turns over the picture to study the date stamped by the "
+        "harbor photographer and sets it beneath the receiver where Sol can see it from the doorway."
+    ),
                "speaker": "lead", "line": "The island is next."}
     revision = str(draft["seed"])
     tv_series.save_episode_shot(store, series_id, 2, 5, changed, expected_revision=revision)
@@ -283,6 +287,45 @@ def _configure_video(monkeypatch, renderer):
     monkeypatch.setattr(comfyui, "make_comfyui_client", lambda: renderer)
 
 
+def test_budget_exhausted_episode_resumes_the_same_shots(creator, monkeypatch, tmp_path):
+    class OneFailedShot(Renderer):
+        def wait(self, prediction, *, on_update=None):
+            if prediction["id"] == "shot-2":
+                raise VideoGenerationError("The test renderer lost this shot.")
+            return super().wait(prediction, on_update=on_update)
+
+    store, _ = creator
+    renderer = OneFailedShot(_fixture_clip(tmp_path / "source.mp4"))
+    _configure_video(monkeypatch, renderer)
+    season = tv_series.create_series(store, PREMISE, 2, 30)
+    series_id = season["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    tv_series.start_episode_script(store, series_id, 1)
+    assert tv_series.check_series_script(store, series_id, 1)
+
+    run_id = tv_series.start_episode_render(store, series_id, 1, max_calls=5)
+    active_production(run_id).result(timeout=120)
+    episode = store.read(series_id)["episodes"][0]
+    status = tv_series.episode_status(store, episode)
+    assert status["stopReason"] == "provider_call_budget_exhausted"
+    assert status["metrics"]["verifiedShots"] == 4
+    assert len(renderer.calls) == 5
+
+    app = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/0_TV_Series.py")
+    app.query_params["series"] = series_id
+    app.run()
+    limit = next(item for item in app.number_input if item.label == "Total GPU request limit")
+    assert limit.value == 6
+    next(item for item in app.button if item.label == "Resume saved render").click().run()
+    active_production(run_id).result(timeout=120)
+    episode = store.read(series_id)["episodes"][0]
+    assert tv_series.episode_status(store, episode)["status"] == "ready"
+    assert episode["render"]["runId"] == run_id
+    assert episode["render"]["maxCalls"] == 6
+    assert len(renderer.calls) == 6
+    assert verify_mp4(store.episode_path(series_id, 1))["durationSeconds"] == 30
+
+
 def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, monkeypatch, tmp_path):
     _, _ = creator
     store = tv_series.SeriesStore(volume=MemoryVolume())
@@ -352,6 +395,11 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
 
     next(item for item in app.button if item.label == "Write episode script").click().run()
     assert "LIGHTHOUSE" in next(item for item in app.text_area if item.label == "Script").value
+    next(item for item in app.text_input if item.label == "Scene heading").set_value("Wrong heading")
+    next(item for item in app.button if item.label == "Save shot").click().run()
+    assert "INT. or EXT." in app.error[0].value
+    assert any(item.label == "Render this episode" for item in app.button)
+    next(item for item in app.text_input if item.label == "Scene heading").set_value("INT. LIGHTHOUSE - NIGHT")
     action = "Ada slides the brass receiver across the floor toward the broken doorway."
     next(item for item in app.text_area if item.label == "Visible action").set_value(action)
     next(item for item in app.button if item.label == "Save shot").click().run()
@@ -386,6 +434,10 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     video = verify_mp4(store.trailer_path(series_id, trailer["id"]))
     assert (video["durationSeconds"], video["width"], video["height"]) == (15, 720, 1280)
     assert len(renderer.calls) == 5
+
+    next(item for item in reopened.multiselect if item.label == "Finished episodes").set_value([]).run()
+    assert next(item for item in reopened.button if item.label == "Cut trailer").disabled
+    assert reopened.get("video") and not reopened.error
 
     next(item for item in reopened.radio if item.label == "Season workspace").set_value("Next season").run()
     next(item for item in reopened.text_area if item.label == "Next season premise").set_value(

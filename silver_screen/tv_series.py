@@ -42,7 +42,8 @@ CAST_LIMITS = {"name": 60, "role": 100, "appearance": 220}
 ARCHIVE_DIR = "tv-series"
 MAX_SERIES_BYTES = 4 * 1024 * 1024
 MAX_EPISODE_BYTES = 128 * 1024 * 1024
-STOPPED_RENDERS = {"shot_retry_budget_exhausted", "provider_call_budget_exhausted", "provider_prompt_rejected"}
+GPU_BUDGET_STOP = "provider_call_budget_exhausted"
+STOPPED_RENDERS = {"shot_retry_budget_exhausted", GPU_BUDGET_STOP, "provider_prompt_rejected"}
 _LOCK = RLock()
 
 
@@ -253,7 +254,10 @@ def next_season_id(series_id: str) -> str:
 
 def _scripted_ending(episode: dict) -> str:
     script = (episode.get("draft") or {}).get("authoredScript", "")
-    return _text(script.split("\n\n\n")[-1], 240)
+    closing = script.rsplit("\n\n\n", 1)[-1].split("\n\n", 2)
+    action = _text(" ".join(closing[:2]), 240)
+    dialogue = _text(closing[2], 242) if len(closing) > 2 else ""
+    return " ".join(part for part in (action, dialogue) if part)
 
 
 def start_next_season(store: SeriesStore, previous_id: str, idea: str, count: int, seconds: int) -> dict:
@@ -575,6 +579,13 @@ def start_episode_render(
                 existing = None
             elif unavailable:
                 raise SeriesError("The render checkpoint is unavailable. A fresh render uses a new GPU request budget.")
+            elif status.get("stopReason") == GPU_BUDGET_STOP:
+                used = int((status.get("metrics") or {}).get("providerCalls", current["maxCalls"]))
+                if max_calls <= used:
+                    raise SeriesError(f"Set a total limit above the {used} GPU requests already used.")
+                if max_calls != current["maxCalls"]:
+                    current["maxCalls"] = max_calls
+                    store.write(series)
         run_id = existing or create_run_id()
         # Preserve the episode's original photo and approved render budget on resume.
         if not existing:
