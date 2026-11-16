@@ -788,7 +788,7 @@ if job:
                         st.error(str(exc))
                     else:
                         if HTTP_RENDER_PREVIEW:
-                            clear_render_preview()
+                            clear_render_preview(prediction_id)
                         st.session_state.pop("direct_create_job", None)
                         st.session_state.pop("recent_modal_renders", None)
                         st.query_params.pop("render", None)

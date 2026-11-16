@@ -47,12 +47,16 @@ def _retrieve_render(render_id: str) -> tuple[dict, bytes | None]:
             data = client.read_output(prediction)
             if data.startswith(b"\x89PNG\r\n\x1a\n") or data[4:8] == b"ftyp":
                 return prediction, data
-            return {"status": "failed", "error": "Modal returned an unreadable media file."}, None
+            return {"id": render_id, "status": "failed", "error": "Modal returned an unreadable media file."}, None
         return prediction, None
     except PredictionPending as exc:
-        return {"status": "processing", "notice": str(exc)}, None
+        return {"id": render_id, "status": "processing", "notice": str(exc)}, None
     except (OSError, VideoGenerationError):
-        return {"status": "processing", "notice": "Modal could not respond. The same render will be checked again."}, None
+        return {
+            "id": render_id,
+            "status": "processing",
+            "notice": "Modal could not respond. The same render will be checked again.",
+        }, None
 
 
 def _store_check(render_id: str, check: Future) -> None:
@@ -94,13 +98,17 @@ def poll_modal_render(render_id: str, *, refresh: bool = False) -> tuple[dict, b
             return result
     if cached and cached[1][0].get("progress"):
         return cached[1]
-    return {"status": "processing", "notice": "Checking with Modal. You can leave this page open."}, None
+    return {"id": render_id, "status": "processing", "notice": "Checking with Modal. You can leave this page open."}, None
 
 
-def clear_render_preview() -> None:
+def clear_render_preview(render_id: str | None = None) -> None:
     with _LOCK:
-        _CACHE.clear()
-        _CHECKS.clear()
+        if render_id is None:
+            _CACHE.clear()
+            _CHECKS.clear()
+        else:
+            _CACHE.pop(render_id, None)
+            _CHECKS.pop(render_id, None)
 
 
 def _render_page(request: Request) -> Response:

@@ -12,7 +12,8 @@ from streamlit.testing.v1 import AppTest
 pytest.importorskip("starlette")
 from starlette.requests import Request
 
-from silver_screen import render_preview
+from silver_screen import modal_renderer, render_preview
+from silver_screen.ai_video import PredictionPending
 from silver_screen.direct_generation import CLIP_MODEL, IMAGE_MODEL
 from silver_screen.face_review import summarize_face_review
 from silver_screen.modal_clip_archive import read_saved_reviews, save_completed_clip
@@ -79,6 +80,47 @@ def test_direct_create_shows_failed_modal_render_outside_progress_frame(monkeypa
     assert not app.get("iframe")
 
 
+def test_deleting_one_render_keeps_another_preview_available(monkeypatch):
+    other = "fc-" + "2" * 26
+    client = Mock()
+    client.get_prediction.side_effect = lambda render_id, **kwargs: {"id": render_id, "status": "succeeded"}
+    client.read_output.return_value = MP4
+    monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
+    monkeypatch.setenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW", "1")
+    monkeypatch.delenv("SILVER_SCREEN_MODAL_APP", raising=False)
+    delete = Mock()
+    monkeypatch.setattr(modal_renderer, "delete_modal_render", delete)
+    render_preview.clear_render_preview()
+    try:
+        assert render_preview._render_media(request(render_id=other)).body == MP4
+        assert render_preview._render_media(request()).body == MP4
+        app = AppTest.from_file(DIRECT_CREATE)
+        app.query_params["render"] = RENDER_ID
+        app.session_state["direct_create_job"] = {
+            "backend": "ComfyUI",
+            "model": CLIP_MODEL,
+            "prediction": {"id": RENDER_ID, "status": "succeeded", "archived": True},
+            "data": MP4,
+        }
+        app.run()
+
+        def after_delete(render_id, **kwargs):
+            if render_id == RENDER_ID:
+                return {"id": render_id, "status": "failed", "error": "This render was deleted from Silver Screen."}
+            raise OSError("Archive temporarily unavailable.")
+
+        client.get_prediction.side_effect = after_delete
+        next(button for button in app.button if button.label == "Delete this clip").click().run()
+
+        assert not app.exception
+        delete.assert_called_once_with(RENDER_ID, image=False)
+        assert render_preview._render_media(request()).status_code == 404
+        response = render_preview._render_media(request(render_id=other, byte_range="bytes=0-1"))
+        assert response.status_code == 206 and response.body == MP4[:2]
+    finally:
+        render_preview.clear_render_preview()
+
+
 def test_render_can_finish_over_http_without_a_studio_session(monkeypatch):
     client = Mock()
     client.get_prediction.return_value = {"status": "processing"}
@@ -130,6 +172,36 @@ def test_manual_status_rechecks_cached_progress(monkeypatch):
         render_preview.clear_render_preview()
 
 
+@pytest.mark.parametrize("error", [PredictionPending("Connection interrupted."), OSError("Archive unavailable.")])
+def test_transient_render_lookup_retains_the_job_id(monkeypatch, error):
+    client = Mock()
+    client.get_prediction.side_effect = error
+    monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
+    render_preview.clear_render_preview()
+    try:
+        prediction, data = render_preview.poll_modal_render(RENDER_ID)
+        assert prediction["id"] == RENDER_ID
+        assert prediction["status"] == "processing"
+        assert prediction["notice"] and data is None
+    finally:
+        render_preview.clear_render_preview()
+
+
+def test_unreadable_render_keeps_its_id_when_reporting_failure(monkeypatch):
+    client = Mock()
+    client.get_prediction.return_value = {"id": RENDER_ID, "status": "succeeded"}
+    client.read_output.return_value = b"Not a clip or an image."
+    monkeypatch.setattr(render_preview, "ModalComfyUIClient", lambda: client)
+    render_preview.clear_render_preview()
+    try:
+        prediction, data = render_preview.poll_modal_render(RENDER_ID)
+        assert prediction["id"] == RENDER_ID
+        assert prediction["status"] == "failed" and "unreadable media" in prediction["error"]
+        assert data is None
+    finally:
+        render_preview.clear_render_preview()
+
+
 def test_slow_status_check_does_not_block_another_render(monkeypatch):
     other = "fc-" + "2" * 26
     release = Event()
@@ -146,7 +218,8 @@ def test_slow_status_check_does_not_block_another_render(monkeypatch):
     render_preview.clear_render_preview()
     try:
         start = monotonic()
-        stalled = json.loads(render_preview._render_status(request()).body)
+        stalled, data = render_preview.poll_modal_render(RENDER_ID)
+        assert stalled["id"] == RENDER_ID and data is None
         assert stalled["status"] == "processing" and "Checking with Modal" in stalled["notice"]
         fresh = json.loads(render_preview._render_status(request(render_id=other)).body)
         assert fresh["status"] == "failed" and "canceled" in fresh["error"]
