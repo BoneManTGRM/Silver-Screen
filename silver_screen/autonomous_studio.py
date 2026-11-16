@@ -14,6 +14,7 @@ import math
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from subprocess import SubprocessError
 from threading import Lock
 from typing import Any, Callable
 
@@ -450,6 +451,45 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     return finish_autonomous_run(run_id, project_id=project_id, config=cfg, output_root=output_root)
 
 
+def _read_production_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_finished_production(run_id: str, *, output_root: str = "runs") -> dict[str, Any] | None:
+    """Read an existing export and its evidence without queueing production work."""
+    from .ai_video import VideoGenerationError
+    from .direct_generation import _verified_clip
+
+    workspace = RunWorkspace.open_existing(output_root, run_id)
+    result = load_run(run_id, output_root)
+    if result.get("status") != "complete":
+        return None
+    job = _read_production_snapshot(workspace.path / "autonomous_job.json")
+    export = (workspace.manifest.get("artifacts") or {}).get("shortVideo")
+    if job.get("status") != "complete" or not isinstance(export, str) or not export:
+        return None
+    path = workspace.path / export
+    try:
+        workspace.relative(path)
+        _verified_clip(path)
+    except (OSError, ValueError, SubprocessError, VideoGenerationError):
+        return None
+
+    job["artifacts"] = {**(job.get("artifacts") or {}), "shortVideo": str(path)}
+    semantic = _read_production_snapshot(workspace.media_dir / "semantic_quality_report.json")
+    return {
+        "runId": run_id, "projectId": job.get("projectId"), "result": result,
+        "quality": job.get("quality") or {}, "job": job, "errors": job.get("errors") or [],
+        "memory": _read_production_snapshot(workspace.path / "memory/production_memory.json"),
+        "edl": _read_production_snapshot(workspace.path / "edit/edit_decision_list.json"),
+        "semantic": {"report": semantic} if semantic else None,
+    }
+
+
 def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool | None = None, progress: ProgressCallback | None = None) -> dict[str, Any]:
     from .pipeline import resume_video_run
 
@@ -457,10 +497,8 @@ def continue_autonomous_production(run_id: str, *, output_root: str = "runs", ba
     result = load_run(run_id, output_root)
     brief = result.get("brief") or workspace.manifest.get("brief") or {}
     options = result.get("options") or {}
-    job_path = workspace.path / "autonomous_job.json"
-    if job_path.exists():
-        job = json.loads(job_path.read_text(encoding="utf-8"))
-    else:
+    job = _read_production_snapshot(workspace.path / "autonomous_job.json")
+    if not job:
         job = {"projectId": project_id_for(brief), "config": {
             "continuous": options.get("videoContinuous", True),
             "batchSize": options.get("videoBatchSize"),
@@ -493,4 +531,4 @@ def continue_autonomous_production(run_id: str, *, output_root: str = "runs", ba
     return finish_autonomous_run(run_id, project_id=str(job.get("projectId") or cfg.get("projectId") or ""), config=cfg, output_root=output_root)
 
 
-__all__ = ["AutonomousStudioError", "QUALITY_PROFILES", "QualityProfile", "build_edit_decision_list", "continue_autonomous_production", "finish_autonomous_run", "normalize_autonomous_config", "prepare_autonomous_plan", "quality_profile", "recommended_creative_profile", "start_autonomous_production"]
+__all__ = ["AutonomousStudioError", "QUALITY_PROFILES", "QualityProfile", "build_edit_decision_list", "continue_autonomous_production", "finish_autonomous_run", "load_finished_production", "normalize_autonomous_config", "prepare_autonomous_plan", "quality_profile", "recommended_creative_profile", "start_autonomous_production"]

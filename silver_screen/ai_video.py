@@ -1154,18 +1154,18 @@ def generate_ai_video(
     calls_at_start = int(
         (queue.get("metrics") or {}).get("providerCalls", 0) or 0
     )
-    calls_this_run = 0
     queue["status"] = "running"
     queue["stopReason"] = None
     save_video_queue(root, queue)
 
     while True:
         update_video_metrics(queue)
+        metrics = queue["metrics"]
         verified = int(
-            (queue.get("metrics") or {}).get("verifiedShots", 0) or 0
+            metrics.get("verifiedShots", 0) or 0
         )
         planned = int(
-            (queue.get("metrics") or {}).get("plannedShots", 0) or 0
+            metrics.get("plannedShots", 0) or 0
         )
         if progress:
             progress(
@@ -1195,7 +1195,8 @@ def generate_ai_video(
             queue["stopReason"] = reason
             record_video_event(queue, "budget_gate", detail=reason)
             break
-        if calls_this_run >= call_limit:
+        new_calls = int(metrics.get("providerCalls", 0) or 0) - calls_at_start
+        if not submitted and new_calls >= call_limit:
             queue["status"] = "partial"
             queue["stopReason"] = "batch_checkpoint"
             break
@@ -1233,7 +1234,6 @@ def generate_ai_video(
                     config=config,
                     initial_image=initial_image_data,
                 )
-            calls_this_run += 1
         except PredictionPending as exc:
             shot["lastError"] = str(exc)
             queue["status"] = "partial"
@@ -1241,13 +1241,6 @@ def generate_ai_video(
             save_video_queue(root, queue)
             break
         except Exception as exc:
-            update_video_metrics(queue)
-            current_calls = int(
-                (queue.get("metrics") or {}).get("providerCalls", 0) or 0
-            )
-            calls_this_run = max(
-                calls_this_run, current_calls - calls_at_start
-            )
             error = str(exc)
             shot["lastError"] = error
             shot["providerStatus"] = "failed"

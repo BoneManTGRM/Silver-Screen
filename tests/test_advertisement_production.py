@@ -3,15 +3,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from PIL import Image
 from streamlit.testing.v1 import AppTest
 
-from silver_screen import comfyui
+from silver_screen import comfyui, direct_generation
 from silver_screen.ai_video import PredictionPending, VideoGenerationError, verify_mp4
 from silver_screen.autonomous_studio import (
     continue_autonomous_production,
+    load_finished_production,
     prepare_autonomous_plan,
     start_autonomous_production,
 )
@@ -139,6 +141,8 @@ def _assert_finished(result: dict, seconds: int, renderer: MockRenderer, calls: 
 def test_render_button_finishes_all_five_advertisement_shots(tmp_path, configure_studio):
     renderer = MockRenderer(_fixture_clip(tmp_path / "shot.mp4", 4))
     configure_studio.setattr(comfyui, "make_comfyui_client", lambda **kwargs: renderer)
+    export = Mock(wraps=direct_generation.finish_short_video)
+    configure_studio.setattr(direct_generation, "finish_short_video", export)
     app = AppTest.from_file(ROOT / "pages/9_Autonomous_Studio.py")
     app.session_state["screenplay-production"] = _draft(20)
     app.run()
@@ -152,15 +156,31 @@ def test_render_button_finishes_all_five_advertisement_shots(tmp_path, configure
     _assert_finished(result, 20, renderer, 5)
     assert all(settings["duration"] == 4 and not settings["image"] for _, settings in renderer.calls)
     before = len(renderer.calls)
+    previous_exports = export.call_count
     reopened = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/9_Autonomous_Studio.py")
     reopened.query_params["production"] = result["runId"]
     reopened.run(timeout=15)
-    _, saved = reopened.session_state["screenplay-render-task"]
-    saved.result(timeout=90)
-    reopened.run(timeout=15)
     assert not reopened.exception
+    assert "screenplay-render-task" not in reopened.session_state
     assert [button.proto.label for button in reopened.get("download_button")] == ["Download advertisement"]
+    assert export.call_count == previous_exports
     assert len(renderer.calls) == before
+    saved_result = reopened.session_state["autonomous_result"]
+    assert saved_result["quality"] == result["quality"]
+    assert saved_result["edl"] == result["edl"]
+
+    saved_productions = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/9_Autonomous_Studio.py").run()
+    next(button for button in saved_productions.button if button.label == "Open finished production").click().run()
+    assert not saved_productions.exception
+    assert "screenplay-render-task" not in saved_productions.session_state
+    assert [button.proto.label for button in saved_productions.get("download_button")] == ["Download advertisement"]
+    assert export.call_count == previous_exports
+
+    Path(result["job"]["artifacts"]["shortVideo"]).unlink()
+    assert load_finished_production(result["runId"]) is None
+    repaired = continue_autonomous_production(result["runId"])
+    _assert_finished(repaired, 20, renderer, before)
+    assert export.call_count > previous_exports
 
 
 def test_resumed_advertisement_rejects_cut_and_keeps_same_product_photo(tmp_path, configure_studio):
