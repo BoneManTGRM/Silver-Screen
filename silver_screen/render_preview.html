@@ -38,7 +38,7 @@
     const download = document.querySelector("#download");
     const clip = document.querySelector("#clip");
     const image = document.querySelector("#image");
-    let timer, checking = false, finished = false;
+    let timer, checking = false, finished = false, mediaRetries = 0;
 
     async function refresh(manual = false) {
       if (checking || finished) return;
@@ -92,15 +92,31 @@
       }
     }
     function reportMediaError() {
-      warning.textContent = "The preview couldn’t load. Use Download or try the preview again.";
+      const retry = mediaRetries < 2 && !document.hidden;
+      warning.textContent = retry ? "Retrying the preview…" :
+        "The preview couldn’t load. Use Download or try the preview again.";
       warning.hidden = false;
       finished = false;
       check.textContent = "Retry preview";
       check.hidden = false;
+      if (retry) {
+        mediaRetries += 1;
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 5000);
+      }
+    }
+    function mediaLoaded() {
+      mediaRetries = 0;
+      check.textContent = "Check status";
     }
     clip.addEventListener("error", reportMediaError);
+    clip.addEventListener("loadeddata", mediaLoaded);
     image.addEventListener("error", reportMediaError);
-    check.addEventListener("click", () => refresh(true));
+    image.addEventListener("load", mediaLoaded);
+    check.addEventListener("click", () => {
+      mediaRetries = 0;
+      refresh(true);
+    });
     window.addEventListener("pageshow", () => refresh());
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) refresh();

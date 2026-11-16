@@ -180,7 +180,6 @@ def refresh_render(job, film_shots, *, wait=False, manual=False):
                         data, expected_seconds=expected, expected_size=job.get("requested_size"),
                     )
             except (VideoGenerationError, OSError, Image.DecompressionBombError) as exc:
-                job["invalid_media"] = True
                 save_prediction(dict(prediction, status="failed", error=str(exc)))
                 return
         else:
@@ -621,7 +620,7 @@ if job:
     job_backend = job.get("backend", "Replicate")
     modal_job = job_backend == "ComfyUI" and str(prediction_id).startswith("fc-")
     valid_render_id = modal_job and MODAL_RENDER_ID.fullmatch(prediction_id) is not None
-    http_preview = valid_render_id and HTTP_RENDER_PREVIEW and not job.get("invalid_media")
+    http_preview = valid_render_id and HTTP_RENDER_PREVIEW and active
     if http_preview:
         st.iframe(render_preview_html(prediction_id), height="content", alt="Current render")
     if prediction_id:
@@ -649,7 +648,7 @@ if job:
                 refresh_render(job, film_shots, wait=generate)
             if check and active and job["prediction"].get("status") in TERMINAL_STATUSES:
                 st.rerun()
-    if not http_preview and job["prediction"].get("status") in {"failed", "canceled"}:
+    if job["prediction"].get("status") in {"failed", "canceled"}:
         st.error(job["prediction"].get("error") or f"{job_backend} did not complete the prediction.")
     elif not auto_check and (error := job.get("check_error")):
         st.error(error)
@@ -661,24 +660,22 @@ if job:
         if warning := job.get("film_warning"):
             st.warning(warning)
         if job["model"] == IMAGE_MODEL:
-            if not http_preview:
-                st.image(job["data"])
-                st.download_button("Download image", job["data"], "silver-screen.png", "image/png")
+            st.image(job["data"])
+            st.download_button("Download image", job["data"], "silver-screen.png", "image/png", on_click="ignore")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
         else:
             filename = job.get("filename", "silver-screen.mp4")
-            if not http_preview:
-                st.success("Your clip is ready.")
-                st.video(job["data"], format="video/mp4")
+            st.success("Your clip is ready.")
+            st.video(job["data"], format="video/mp4")
             if review := job["prediction"].get("hand_review"):
                 if message := hand_review_message(review):
                     (st.warning if review.get("status") == "possible_loss" else st.caption)(message)
             if review := job["prediction"].get("face_review"):
-                if not http_preview and (message := face_review_message(review)):
+                if message := face_review_message(review):
                     (st.warning if review.get("status") != "matched" else st.caption)(message)
             if review := job["prediction"].get("body_review"):
-                if not http_preview and (message := body_review_message(review)):
+                if message := body_review_message(review):
                     (st.warning if review.get("status") != "tracked" else st.caption)(message)
             if needs_reference_review(job) and st.button("Use this take", key=f"reference-review-{prediction_id}"):
                 job["reference_reviewed"] = True
@@ -703,8 +700,7 @@ if job:
                     st.caption(f"{len(job['data']) / 1024**2:.2f} MiB MP4")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
-            if not http_preview:
-                st.download_button("Download original clip", job["data"], filename, "video/mp4")
+            st.download_button("Download original clip", job["data"], filename, "video/mp4", on_click="ignore")
 
             with st.expander("Record dialogue and export this clip"):
                 samples = saved_clone_samples(library_root) if library_root and voice_clone_ready() else {}

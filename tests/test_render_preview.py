@@ -1,20 +1,26 @@
-from unittest.mock import Mock
+from io import BytesIO
 import json
+from pathlib import Path
 from threading import Event
 from time import monotonic
+from unittest.mock import Mock
 
 import pytest
+from PIL import Image
+from streamlit.testing.v1 import AppTest
 
 pytest.importorskip("starlette")
 from starlette.requests import Request
 
 from silver_screen import render_preview
+from silver_screen.direct_generation import CLIP_MODEL, IMAGE_MODEL
 from silver_screen.face_review import summarize_face_review
 from silver_screen.modal_clip_archive import read_saved_reviews, save_completed_clip
 
 
 RENDER_ID = "fc-" + "1" * 26
 MP4 = b"\x00\x00\x00\x20ftypisom" + b"frame data"
+DIRECT_CREATE = Path(__file__).resolve().parents[1] / "pages" / "0_Direct_Create.py"
 
 
 def request(method="GET", *, byte_range=None, query=b"", render_id=RENDER_ID):
@@ -26,6 +32,51 @@ def request(method="GET", *, byte_range=None, query=b"", render_id=RENDER_ID):
         "headers": headers,
         "query_string": query,
     })
+
+
+@pytest.mark.parametrize("image", (False, True))
+def test_direct_create_shows_completed_render_outside_progress_frame(monkeypatch, image):
+    monkeypatch.setenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW", "1")
+    monkeypatch.delenv("SILVER_SCREEN_MODAL_APP", raising=False)
+    data = MP4
+    if image:
+        with BytesIO() as png:
+            Image.new("RGB", (16, 16), "orange").save(png, format="PNG")
+            data = png.getvalue()
+    app = AppTest.from_file(DIRECT_CREATE)
+    app.query_params["render"] = RENDER_ID
+    app.session_state["direct_create_job"] = {
+        "backend": "ComfyUI",
+        "model": IMAGE_MODEL if image else CLIP_MODEL,
+        "prediction": {"id": RENDER_ID, "status": "succeeded", "archived": True},
+        "data": data,
+    }
+
+    app.run()
+
+    assert not app.exception
+    assert len(app.get("image" if image else "video")) == 1
+    downloads = {button.proto.label for button in app.get("download_button")}
+    assert ("Download image" if image else "Download original clip") in downloads
+    assert not app.get("iframe")
+
+
+def test_direct_create_shows_failed_modal_render_outside_progress_frame(monkeypatch):
+    monkeypatch.setenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW", "1")
+    monkeypatch.delenv("SILVER_SCREEN_MODAL_APP", raising=False)
+    app = AppTest.from_file(DIRECT_CREATE)
+    app.query_params["render"] = RENDER_ID
+    app.session_state["direct_create_job"] = {
+        "backend": "ComfyUI",
+        "model": CLIP_MODEL,
+        "prediction": {"id": RENDER_ID, "status": "failed", "error": "The GPU worker reached its time limit."},
+    }
+
+    app.run()
+
+    assert not app.exception
+    assert [error.value for error in app.error] == ["The GPU worker reached its time limit."]
+    assert not app.get("iframe")
 
 
 def test_render_can_finish_over_http_without_a_studio_session(monkeypatch):
