@@ -5,7 +5,7 @@ import pytest
 from modal import exception as modal_errors
 
 from silver_screen.comfyui import make_comfyui_client
-from silver_screen.screenplay_writer import ScreenplayError, check_screenplay
+from silver_screen.screenplay_writer import ScreenplayError, ScreenplayStatusUnavailable, check_screenplay
 
 
 def test_modal_submission_can_resume_from_call_id(monkeypatch):
@@ -78,3 +78,15 @@ def test_modal_writer_waits_for_a_pending_script(monkeypatch):
         exception=modal_errors,
     ))
     assert check_screenplay({"id": "fc-test"}) is None
+
+
+def test_writer_keeps_the_same_job_when_modal_authentication_fails(monkeypatch):
+    def get(**kwargs):
+        raise modal_errors.AuthError("fixture")
+
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(
+        FunctionCall=SimpleNamespace(from_id=lambda call_id: SimpleNamespace(get=get)),
+        exception=modal_errors,
+    ))
+    with pytest.raises(ScreenplayStatusUnavailable, match="authenticate"):
+        check_screenplay({"id": "fc-test"})
