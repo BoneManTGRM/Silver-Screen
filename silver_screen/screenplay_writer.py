@@ -13,7 +13,9 @@ from .science import GENRES, TONES
 from .script_sync import estimate_speech_seconds
 
 
-SCREENPLAY_LENGTHS = {20: 4, 30: 6, 60: 6}
+SCREENPLAY_LENGTHS = {20: 4, 30: 6, 60: 6, 120: 6}
+EPISODE_KIND = "series_episode"
+EPISODE_LENGTHS = (30, 60, 120)
 PRODUCTION_LABELS = {
     "film": "Movie",
     "ad": "Advertisement",
@@ -21,6 +23,7 @@ PRODUCTION_LABELS = {
     "series_trailer": "Series trailer",
 }
 TRAILER_KINDS = {"movie_trailer", "series_trailer"}
+WRITTEN_KINDS = {*PRODUCTION_LABELS, EPISODE_KIND}
 IDEA_LIMIT = 1600
 LEAD_LIMIT = 60
 
@@ -48,7 +51,9 @@ def screenplay_lengths(kind: str) -> tuple[int, ...]:
     if kind == "film":
         return (20, 30)
     if kind == "ad":
-        return tuple(SCREENPLAY_LENGTHS)
+        return (20, 30, 60)
+    if kind == EPISODE_KIND:
+        return EPISODE_LENGTHS
     if kind in TRAILER_KINDS:
         return (30, 60)
     raise ScreenplayError("Choose a movie, advertisement, movie trailer, or series trailer.")
@@ -280,6 +285,11 @@ def submit_screenplay(
     idea, lead = idea.strip(), " ".join(lead.split())
     seed = secrets.randbelow(2**31)
     request = screenplay_request(idea, lead, seconds, seed, kind=kind, end_card=end_card)
+    call_id = submit_writer_request(request)
+    return {"id": call_id, "idea": idea, "lead": lead, "seconds": seconds, "seed": seed, "kind": kind, "end_card": end_card}
+
+
+def submit_writer_request(request: dict[str, Any]) -> str:
     if not screenplay_writer_configured():
         raise ScreenplayError("Connect the Modal screenplay writer to generate a draft.")
     try:
@@ -287,17 +297,16 @@ def submit_screenplay(
     except VideoGenerationError as exc:
         raise ScreenplayError(str(exc)) from exc
     try:
-        call_id = writer.spawn(request).object_id
+        return writer.spawn(request).object_id
     except modal.exception.Error as exc:
         raise ScreenplayError(f"Modal could not start the writer ({type(exc).__name__}).") from exc
-    return {"id": call_id, "idea": idea, "lead": lead, "seconds": seconds, "seed": seed, "kind": kind, "end_card": end_card}
 
 
-def check_screenplay(job: dict[str, Any]) -> dict[str, Any] | None:
+def poll_writer_result(call_id: str) -> dict[str, Any] | None:
     import modal
 
     try:
-        result = modal.FunctionCall.from_id(job["id"]).get(timeout=0)
+        result = modal.FunctionCall.from_id(call_id).get(timeout=0)
     except TimeoutError:
         return None
     except (modal.exception.ConnectionError, modal.exception.ServiceError) as exc:
@@ -312,4 +321,11 @@ def check_screenplay(job: dict[str, Any]) -> dict[str, Any] | None:
         raise ScreenplayError(f"Modal could not write the screenplay ({type(exc).__name__}).") from exc
     except (RuntimeError, OSError, ValueError) as exc:
         raise ScreenplayError("The screenplay model could not complete this draft. Try another draft.") from exc
+    return result
+
+
+def check_screenplay(job: dict[str, Any]) -> dict[str, Any] | None:
+    result = poll_writer_result(job["id"])
+    if result is None:
+        return None
     return screenplay_draft(result, **{key: value for key, value in job.items() if key != "id"})

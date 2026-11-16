@@ -166,6 +166,24 @@ python -m pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+### TV Series
+
+Open **TV Series** from the writer or studio menu. Enter a premise, pick two to
+eight episodes, and choose 30 seconds, one minute, or two minutes per episode.
+The writer creates a series bible and episode outlines. Review the bible, write
+an episode, and review its script before approving its GPU request budget.
+
+A season can share one lead reference photo. Episodes reuse the recurring cast
+and story context. Each episode has its own render checkpoint, player, MP4, and
+dialogue subtitles. Spoken dialogue is available when OpenAI speech is
+configured.
+
+On the Modal deployment, season files and completed episode MP4s use the private
+clip volume. Local installations save them under `runs/tv-series`. In-progress
+video checkpoints use the existing `runs` storage, so keeping those checkpoints
+through deployment replacement requires persistent run storage.
+
+
 The studio provides:
 
 - target runtime up to 90 minutes

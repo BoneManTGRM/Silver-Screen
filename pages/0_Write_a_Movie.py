@@ -20,6 +20,7 @@ from silver_screen.screenplay_writer import (
 
 st.title("Silver Screen")
 st.caption("Review a script and shot list before rendering a movie, advertisement, or trailer.")
+st.page_link("pages/0_TV_Series.py", label="Create a TV series")
 
 draft = st.session_state.get("screenplay-draft")
 job = st.session_state.get("screenplay-writer-job")

@@ -42,7 +42,8 @@ class AutonomousStudioError(RuntimeError):
 
 def active_production(run_id: str) -> Future[dict[str, Any]] | None:
     with _PRODUCTION_LOCK:
-        return _ACTIVE_PRODUCTIONS.get(run_id)
+        current = _ACTIVE_PRODUCTIONS.get(run_id)
+        return current if current and not current.done() else None
 
 
 def enqueue_production(
@@ -55,7 +56,7 @@ def enqueue_production(
                 del _ACTIVE_PRODUCTIONS[run_id]
 
     with _PRODUCTION_LOCK:
-        if current := _ACTIVE_PRODUCTIONS.get(run_id):
+        if (current := _ACTIVE_PRODUCTIONS.get(run_id)) and not current.done():
             return current
         future = _PRODUCTION_WORKER.submit(operation)
         _ACTIVE_PRODUCTIONS[run_id] = future
@@ -369,11 +370,13 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     writer_kind = brief.get("screenplayWriter")
     if result.get("status") == "complete" and writer_kind:
         from .direct_generation import finish_short_video
-        from .screenplay_writer import TRAILER_KINDS
+        from .screenplay_writer import EPISODE_KIND, TRAILER_KINDS
 
         card = brief.get("adEndCard") or {}
         runtime = (result.get("options") or {}).get("targetRuntimeSeconds")
         filename = "advertisement.mp4" if writer_kind == "ad" else "movie.mp4"
+        if writer_kind == EPISODE_KIND:
+            filename = "episode.mp4"
         if writer_kind in TRAILER_KINDS:
             filename = "trailer.mp4"
             card = {"brand": brief.get("title") or ""}
@@ -450,7 +453,11 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
     return finish_autonomous_run(run_id, project_id=project_id, config=cfg, output_root=output_root)
 
 
-def continue_autonomous_production(run_id: str, *, output_root: str = "runs", batch_size: int | None = None, continuous: bool | None = None, progress: ProgressCallback | None = None) -> dict[str, Any]:
+def continue_autonomous_production(
+    run_id: str, *, output_root: str = "runs", batch_size: int | None = None,
+    continuous: bool | None = None, progress: ProgressCallback | None = None,
+    saved_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from .pipeline import resume_video_run
 
     workspace = RunWorkspace.open_existing(output_root, run_id)
@@ -471,6 +478,8 @@ def continue_autonomous_production(run_id: str, *, output_root: str = "runs", ba
             "transitionMode": "off" if brief.get("screenplayWriter") == "ad" else "auto",
             "semanticQa": False,
         }}
+        if saved_config is not None:
+            job = {"projectId": saved_config["projectId"], "config": saved_config}
     cfg = normalize_autonomous_config(job.get("config"))
     queue = load_video_queue(workspace.media_dir) or {}
     qcfg = queue.get("config") or {}
