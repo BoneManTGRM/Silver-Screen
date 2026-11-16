@@ -464,6 +464,7 @@ def install_autonomous_closed_loop() -> None:
         output_root: str = "runs",
         progress=None,
         run_id: str | None = None,
+        shot_references: dict[int, Path] | None = None,
     ) -> dict[str, Any]:
         token = _PLAN_CONTEXT.set(deepcopy(plan))
         try:
@@ -474,6 +475,7 @@ def install_autonomous_closed_loop() -> None:
                 output_root=output_root,
                 progress=progress,
                 run_id=run_id,
+                shot_references=shot_references,
             )
         finally:
             _PLAN_CONTEXT.reset(token)

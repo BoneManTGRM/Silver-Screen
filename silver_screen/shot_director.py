@@ -223,8 +223,13 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
     episode_video = raw.get("episodeVideo")
     if not isinstance(episode_video, dict):
         episode_video = {}
+    starts = raw.get("episodeStartingFrames")
+    reference_orders = []
+    if isinstance(starts, list):
+        reference_orders = sorted({order for order in starts if type(order) is int and 1 <= order <= MAX_SHOT_OVERRIDES})
     return {
         "schemaVersion": 1,
+        **({"episodeStartingFrames": reference_orders} if reference_orders else {}),
         "audioStrategy": audio,
         "audioLabel": AUDIO_STRATEGIES[audio]["label"],
         "shotPromptOverrides": normalize_shot_overrides(
@@ -493,7 +498,13 @@ def render_directed_prompt(
 
     cast = _cast_details(state, scene)
     creative = _creative_summary(state)
-    continuity = prompt_directive(runtime_shot)
+    if blueprint["order"] in ((state.get("shotDirection") or {}).get("episodeStartingFrames") or []):
+        continuity = (
+            "Start with the supplied shot image. Match its framing, setting, subject positions, "
+            "and lighting. Animate the scripted action from that composition."
+        )
+    else:
+        continuity = prompt_directive(runtime_shot)
     retake = _retake_directive(runtime_shot)
     repair_suffix = _clean_text((repair or {}).get("promptSuffix"), 700)
     scene_context = _clean_text(

@@ -176,7 +176,9 @@ an episode, and review its script before approving its GPU request budget.
 The series bible lets you edit the setting, season arc, recurring cast, and
 visual direction for new drafts. Save an optional lead reference photo. In the
 episode workspace, edit the outline and adjust individual shots and dialogue
-before rendering. The player includes the finished MP4 and dialogue subtitles.
+before rendering. Under **Edit shots and dialogue**, upload a starting image for
+any shot that needs its own framing. The player includes the finished MP4 and
+dialogue subtitles.
 Spoken dialogue is available when OpenAI speech is configured.
 
 Choose widescreen or vertical framing where the renderer supports it. On

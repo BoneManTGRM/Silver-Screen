@@ -137,6 +137,21 @@ def _fake_assemble(clips: list[Path], destination: Path) -> Path:
     return destination
 
 
+def test_preparation_error_pauses_without_spending_a_request(tmp_path, monkeypatch):
+    def fail_prompt(*args, **kwargs):
+        raise VideoGenerationError("Cannot prepare this shot.")
+
+    monkeypatch.setenv("SILVER_SCREEN_VIDEO_BACKEND", "replicate")
+    monkeypatch.setattr("silver_screen.ai_video.scene_prompt", fail_prompt)
+    generate_ai_video(
+        _state(), tmp_path, client_factory=FakeClient, target_runtime_seconds=8,
+        max_shots=1, continuous=True,
+    )
+    status = video_production_status(tmp_path)
+    assert status["stopReason"] == "shot_preparation_failed"
+    assert status["metrics"]["providerCalls"] == FakeClient.calls == 0
+
+
 def test_runtime_planner_expands_story_to_target_duration() -> None:
     config = normalize_video_config(
         target_runtime_seconds=60,

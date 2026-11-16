@@ -16,7 +16,7 @@ OPTIONAL_FILES = {
     "media/video_runtime.json", "media/episode.mp4", "media/final_ai_film.mp4",
 }
 MEDIA_FILES = re.compile(r"media/(?:clips/[\w-]+\.mp4|continuity/[\w-]+\.jpg|"
-                         r"visual_quality/retakes/[\w-]+/[\w-]+\.mp4)")
+                         r"shot-references/[0-9]{4}\.jpg|visual_quality/retakes/[\w-]+/[\w-]+\.mp4)")
 
 
 def _allowed(name: str) -> bool:
@@ -28,7 +28,7 @@ def build_checkpoint(workspace: Path, destination: Path) -> None:
     if not all((workspace / path).is_file() for path in REQUIRED_FILES):
         raise ValueError("The episode has no complete render checkpoint to save.")
     files = [(workspace / name) for name in sorted(REQUIRED_FILES | OPTIONAL_FILES)]
-    for directory in ("media/clips", "media/continuity", "media/visual_quality/retakes"):
+    for directory in ("media/clips", "media/continuity", "media/shot-references", "media/visual_quality/retakes"):
         files.extend((workspace / directory).rglob("*"))
     total = 0
     with ZipFile(destination, "w", compression=ZIP_STORED) as archive:

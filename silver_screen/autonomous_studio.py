@@ -422,7 +422,7 @@ def finish_autonomous_run(run_id: str, *, project_id: str, config: dict[str, Any
     return {"runId": run_id, "projectId": project_id, "result": result, "transition": transition, "visual": visual, "semantic": semantic, "audio": audio, "quality": quality, "memory": memory, "edl": edl["edl"], "job": job, "errors": errors}
 
 
-def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | None = None, voices: list[Any] | None = None, output_root: str = "runs", progress: ProgressCallback | None = None, run_id: str | None = None) -> dict[str, Any]:
+def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | None = None, voices: list[Any] | None = None, output_root: str = "runs", progress: ProgressCallback | None = None, run_id: str | None = None, shot_references: dict[int, Path] | None = None) -> dict[str, Any]:
     from .pipeline import run_pipeline
     approved = copy.deepcopy(plan.get("approvedBrief") or {})
     execution = plan.get("executionPlan") or {}
@@ -445,7 +445,7 @@ def start_autonomous_production(plan: dict[str, Any], *, images: list[Any] | Non
         video_max_spend_usd=float(cfg["maxSpendUsd"]) if cfg["maxSpendUsd"] > 0 else None,
         video_cost_per_second_usd=float(cfg["costPerSecondUsd"]) if cfg["costPerSecondUsd"] > 0 else None,
         video_continuous=bool(execution.get("continuous", True)),
-        video_use_continuity=not is_ad, progress=progress, run_id=run_id,
+        video_use_continuity=not is_ad, progress=progress, run_id=run_id, shot_references=shot_references,
     )
     run_id = _run_id(result)
     if not run_id:
