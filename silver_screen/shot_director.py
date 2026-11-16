@@ -220,6 +220,9 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
     ledger = raw.get("approvedPromptLedger")
     if not isinstance(ledger, dict):
         ledger = {}
+    episode_video = raw.get("episodeVideo")
+    if not isinstance(episode_video, dict):
+        episode_video = {}
     return {
         "schemaVersion": 1,
         "audioStrategy": audio,
@@ -243,6 +246,10 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
         ),
         "approvedPromptLedger": ledger,
         "approvedLedgerHash": _clean_text(raw.get("approvedLedgerHash"), 128),
+        **({"episodeVideo": {
+            "model": "wan14" if episode_video.get("model") == "wan14" else "standard",
+            "aspect": episode_video["aspect"] if episode_video.get("aspect") in ("16:9", "9:16") else "auto",
+        }} if episode_video else {}),
     }
 
 

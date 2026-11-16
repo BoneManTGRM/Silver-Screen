@@ -7,14 +7,15 @@ import streamlit as st
 
 from silver_screen.cast_library import cast_library_root, saved_cast_photos
 from silver_screen.comfyui import comfyui_ready, video_backend, video_backend_ready
-from silver_screen.modal_renderer import screenplay_writer_configured
+from silver_screen.modal_renderer import modal_configured, screenplay_writer_configured
 from silver_screen.runtime import slugify
 from silver_screen.science import GENRES, TONES
 from silver_screen.screenplay_writer import EPISODE_LENGTHS, IDEA_LIMIT, SCREENPLAY_LENGTHS, ScreenplayStatusUnavailable
 from silver_screen.tv_series import (
-    CAST_LIMITS, GPU_BUDGET_STOP, OUTLINE_LIMITS, SEASON_COUNTS, STOPPED_RENDERS, VISUAL_DIRECTION_LIMIT,
-    SeriesError, check_series_script, create_series, cut_season_trailer, episode_shots, episode_status,
-    episode_subtitles, next_season_id, retry_season_writer, save_episode_outline, save_episode_shot,
+    CAST_LIMITS, GPU_BUDGET_STOP, OUTLINE_LIMITS, RENDER_ASPECTS, RENDER_MODELS, SEASON_COUNTS, STOPPED_RENDERS,
+    VISUAL_DIRECTION_LIMIT, SeriesError, check_series_script, create_series, cut_season_trailer,
+    episode_framing_available, episode_shots, episode_status, episode_subtitles, keep_previous_opening,
+    next_season_id, reopen_episode_checkpoint, retry_season_writer, save_episode_outline, save_episode_shot,
     save_season_bible, set_series_photo, start_episode_render, start_episode_script, start_next_season,
     studio_series_store,
 )
@@ -164,6 +165,37 @@ def resume_with_budget(series_id: str, episode: dict, *, used: int, remaining: i
         st.rerun()
 
 
+def show_opening_review(series_id: str, episode: dict, status: dict, ready: bool) -> bool:
+    takes = status.get("opening") or {}
+    if not takes:
+        return False
+    number, render = episode["number"], episode["render"]
+    pending = status.get("stopReason") == "prediction_pending"
+    st.subheader("Review the opening shot")
+    try:
+        if previous := takes.get("previous"):
+            with st.expander("Previous opening take", expanded="current" not in takes):
+                st.video(previous)
+                if st.button("Use previous opening take", disabled=pending):
+                    keep_previous_opening(store, series_id, number)
+                    st.rerun()
+        if current := takes.get("current"):
+            st.video(current)
+            if st.button("Approve opening and render episode", type="primary", disabled=not ready):
+                start_episode_render(store, series_id, number, max_calls=render["maxCalls"], approve_opening=True)
+                st.rerun()
+            used = int((status.get("metrics") or {}).get("providerCalls", 0))
+            with st.form(f"{series_id}-retake-opening-{number}"):
+                notes = st.text_input("What should change in the retake?", max_chars=300)
+                retake = st.form_submit_button("Retake opening shot", disabled=not ready or used >= render["maxCalls"])
+            if retake:
+                start_episode_render(store, series_id, number, max_calls=render["maxCalls"], retake=notes)
+                st.rerun()
+    except SeriesError as exc:
+        st.error(str(exc))
+    return bool(takes.get("current"))
+
+
 def render_controls(series_id: str, episode: dict, season: dict, status: dict) -> None:
     number, draft = episode["number"], episode["draft"]
     stage = status["status"]
@@ -185,6 +217,13 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
         used = metrics.get("providerCalls", 0)
         st.caption(f"Saved checkpoint · {done}/{required} shots · {used}/{render['maxCalls']} requests used")
         reason = status.get("stopReason")
+        if status.get("restorable") and status.get("hasOpening"):
+            if st.button("Open saved opening shot", type="primary"):
+                reopen_episode_checkpoint(store, series_id, number)
+                st.rerun()
+            return
+        if render.get("reviewOpening") and show_opening_review(series_id, episode, status, ready):
+            return
         if reason == GPU_BUDGET_STOP and used < 3 * required:
             resume_with_budget(series_id, episode, used=used, remaining=required - done, required=required, ready=ready)
             return
@@ -204,6 +243,12 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
         speak = st.checkbox("Add spoken dialogue", value=False) if speech_available else False
         if not speech_available:
             st.caption("Scripted dialogue will be available as subtitles.")
+        cinema_ready = video_backend() == "comfyui" and modal_configured()
+        model = st.selectbox("Episode render model", list(RENDER_MODELS), format_func=RENDER_MODELS.get) if cinema_ready else "standard"
+        if cinema_ready:
+            st.caption("Cinema uses two GPU segments for each six-second shot and takes longer.")
+        aspect = st.selectbox("Episode framing", list(RENDER_ASPECTS), format_func=RENDER_ASPECTS.get) if episode_framing_available() else "auto"
+        review = st.checkbox("Review opening shot before rendering the episode", value=True)
         if not ready:
             st.info(f"Configure the {video_backend()} video backend to render episodes.")
         reference_unavailable = (season.get("leadReference") and video_backend() == "comfyui"
@@ -216,7 +261,8 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
         )
     if start:
         start_episode_render(store, series_id, number, max_calls=int(calls),
-                             voice_provider="openai" if speak else "", restart=restart)
+                             voice_provider="openai" if speak else "", restart=restart,
+                             render_model=model, aspect=aspect, review_opening=review)
         st.rerun()
 
 

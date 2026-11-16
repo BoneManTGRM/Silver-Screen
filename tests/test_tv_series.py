@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from streamlit.testing.v1 import AppTest
 
 from silver_screen import comfyui, tv_series
 from silver_screen.ai_video import PredictionPending, VideoGenerationError, verify_mp4
+from silver_screen.modal_renderer import ModalComfyUIClient
 from silver_screen.autonomous_studio import active_production, prepare_autonomous_plan
 from silver_screen.screenplay_writer import EPISODE_KIND, screenplay_lengths
 
@@ -167,11 +169,21 @@ def test_sequel_inherits_edited_bible_photo_and_scripted_finale(creator):
 class MemoryVolume:
     def __init__(self):
         self.files: dict[str, bytes] = {}
+        self.fail_suffix = None
 
     @contextmanager
     def batch_upload(self, *, force):
         assert force
-        yield SimpleNamespace(put_file=lambda file, path: self.files.__setitem__(path, file.read()))
+        pending = {}
+
+        def put_file(file, path):
+            pending[path] = file.read_bytes() if isinstance(file, Path) else file.read()
+
+        yield SimpleNamespace(put_file=put_file)
+        if self.fail_suffix and any(path.endswith(self.fail_suffix) for path in pending):
+            self.fail_suffix = None
+            raise OSError("Injected archive outage")
+        self.files.update(pending)
 
     def read_file(self, path):
         if path not in self.files:
@@ -326,6 +338,67 @@ def test_budget_exhausted_episode_resumes_the_same_shots(creator, monkeypatch, t
     assert verify_mp4(store.episode_path(series_id, 1))["durationSeconds"] == 30
 
 
+def test_cinema_opening_uses_the_14b_worker_and_keeps_vertical_reference_framing(creator, monkeypatch, tmp_path):
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("Episode export requires FFmpeg and FFprobe.")
+    source = tmp_path / "vertical.mp4"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=720x1280:rate=16",
+        "-t", "6", "-threads", "2", "-c:v", "libx264", str(source),
+    ], check=True, timeout=45)
+    submitted = []
+
+    def function(app, name):
+        def spawn(kind, prompt, settings):
+            submitted.append((name, settings))
+            return SimpleNamespace(object_id="test-opening")
+        return SimpleNamespace(spawn=spawn)
+
+    class ModalRenderer(ModalComfyUIClient):
+        def __init__(self):
+            self.app = "test-renderer"
+            self.kind = "video"
+            self.supports_reference = True
+            self.modal = SimpleNamespace(Function=SimpleNamespace(from_name=function))
+
+        def wait(self, prediction, *, on_update=None):
+            return {**prediction, "status": "succeeded"}
+
+        def download_output(self, prediction, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            return destination
+
+    store, _ = creator
+    _configure_video(monkeypatch, ModalRenderer())
+    monkeypatch.setattr(tv_series, "modal_configured", lambda: True)
+    season = tv_series.create_series(store, PREMISE, 2, 30)
+    series_id = season["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    tv_series.start_episode_script(store, series_id, 1)
+    assert tv_series.check_series_script(store, series_id, 1)
+    reference = BytesIO()
+    Image.new("RGB", (128, 64), "white").save(reference, "JPEG")
+    reference.seek(0)
+    tv_series.set_series_photo(store, series_id, reference)
+
+    run_id = tv_series.start_episode_render(store, series_id, 1, max_calls=5, render_model="wan14",
+                                            aspect="9:16", review_opening=True)
+    active_production(run_id).result(timeout=120)
+    assert len(submitted) == 1
+    function_name, settings = submitted[0]
+    assert function_name == "render_wan14_extended"
+    assert settings["duration"] == 6 and settings["video_size"] == (720, 1280)
+    assert settings["check_face"] and settings["check_body"] and settings["check_hands"]
+    with Image.open(BytesIO(base64.b64decode(settings["image"].split(",", 1)[1]))) as frame:
+        assert frame.size == (720, 1280)
+        assert frame.getpixel((0, 0)) == (0, 0, 0)
+        assert min(frame.getpixel((0, 640))) > 230
+    episode = store.read(series_id)["episodes"][0]
+    opening = Path(tv_series.episode_status(store, episode)["opening"]["current"])
+    assert verify_mp4(opening)["durationSeconds"] == 6
+
+
 def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, monkeypatch, tmp_path):
     _, _ = creator
     store = tv_series.SeriesStore(volume=MemoryVolume())
@@ -343,18 +416,29 @@ def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, mo
     for number in (1, 2):
         tv_series.start_episode_script(store, series_id, number)
         assert tv_series.check_series_script(store, series_id, number)
+        if number == 2:
+            store.volume.fail_suffix = "/episode-2.mp4"
         run_id = tv_series.start_episode_render(store, series_id, number, max_calls=5)
         pending = active_production(run_id)
         assert pending is not None
         assert tv_series.start_episode_render(store, series_id, number, max_calls=5) == run_id
-        pending.result(timeout=120)
+        if number == 2:
+            with pytest.raises(OSError, match="archive outage"):
+                pending.result(timeout=120)
+        else:
+            pending.result(timeout=120)
+        episode = store.read(series_id)["episodes"][number - 1]
+        assert episode["render"]["savedCheckpoint"]
+        assert not episode["render"].get("archived")
+        assert f"/tv-series/{series_id}/episode-{number}.mp4" not in store.volume.files
+        shutil.rmtree(store.root / run_id)
+        assert tv_series.episode_status(store, episode)["restorable"]
+        if number == 1:
+            assert len(renderer.calls) == 2
+        assert tv_series.start_episode_render(store, series_id, number, max_calls=5) == run_id
+        active_production(run_id).result(timeout=120)
         episode = store.read(series_id)["episodes"][number - 1]
         if number == 1:
-            assert tv_series.episode_status(store, episode)["status"] == "checkpoint"
-            assert len(renderer.calls) == 2
-            assert tv_series.start_episode_render(store, series_id, number, max_calls=5) == run_id
-            active_production(run_id).result(timeout=120)
-            episode = store.read(series_id)["episodes"][0]
             assert renderer.recovered == ["shot-2"]
         assert tv_series.episode_status(store, episode)["status"] == "ready"
         assert verify_mp4(store.episode_path(series_id, number))["durationSeconds"] == 30
@@ -373,8 +457,14 @@ def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, mo
 
 
 def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypatch, tmp_path):
+    class FailedOpeningRetake(Renderer):
+        def wait(self, prediction, *, on_update=None):
+            if prediction["id"] == "shot-2":
+                raise VideoGenerationError("The alternate take failed.")
+            return super().wait(prediction, on_update=on_update)
+
     store, _ = creator
-    renderer = Renderer(_fixture_clip(tmp_path / "source.mp4"))
+    renderer = FailedOpeningRetake(_fixture_clip(tmp_path / "source.mp4"))
     _configure_video(monkeypatch, renderer)
     monkeypatch.setattr("silver_screen.modal_renderer.screenplay_writer_configured", lambda: True)
     app = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/0_TV_Series.py")
@@ -413,16 +503,30 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     app.run()
     assert not app.exception
     assert app.get("video")
-    assert "Download episode" in {item.proto.label for item in app.get("download_button")}
-    assert len(renderer.calls) == 5
+    assert len(renderer.calls) == 1
     assert action in renderer.calls[0][0]
     assert look in renderer.calls[0][0]
+    original = tv_series.episode_status(store, store.read(series_id)["episodes"][0])["opening"]["current"]
+    original_bytes = Path(original).read_bytes()
+    next(item for item in app.text_input if item.label == "What should change in the retake?").set_value("Slow down the camera push.")
+    next(item for item in app.button if item.label == "Retake opening shot").click().run()
+    active_production(run_id).result(timeout=120)
+    app.run()
+    assert len(renderer.calls) == 2
+    assert "Slow down the camera push." in renderer.calls[1][0]
+    next(item for item in app.button if item.label == "Use previous opening take").click().run()
+    assert Path(original).read_bytes() == original_bytes
+    next(item for item in app.button if item.label == "Approve opening and render episode").click().run()
+    active_production(run_id).result(timeout=120)
+    app.run()
+    assert "Download episode" in {item.proto.label for item in app.get("download_button")}
+    assert len(renderer.calls) == 6
 
     reopened = AppTest.from_file(ROOT / "streamlit_app.py").switch_page("pages/0_TV_Series.py")
     reopened.query_params["series"] = series_id
     reopened.run()
     assert not reopened.exception and reopened.get("video")
-    assert len(renderer.calls) == 5
+    assert len(renderer.calls) == 6
 
     next(item for item in reopened.radio if item.label == "Season workspace").set_value("Trailers").run()
     next(item for item in reopened.selectbox if item.label == "Trailer format").select("Vertical")
@@ -433,7 +537,7 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     trailer = next(iter(store.read(series_id)["trailers"].values()))
     video = verify_mp4(store.trailer_path(series_id, trailer["id"]))
     assert (video["durationSeconds"], video["width"], video["height"]) == (15, 720, 1280)
-    assert len(renderer.calls) == 5
+    assert len(renderer.calls) == 6
 
     next(item for item in reopened.multiselect if item.label == "Finished episodes").set_value([]).run()
     assert next(item for item in reopened.button if item.label == "Cut trailer").disabled

@@ -822,6 +822,28 @@ def _update_prediction_in_queue(
     save_video_queue(root, queue)
 
 
+def _episode_video_settings(options: dict, image: str | None) -> dict[str, Any]:
+    from .comfyui import WAN_14B_LANDSCAPE_HD, WAN_LANDSCAPE_HD, WAN_MOTION_NEGATIVE_PROMPT, wan_aspect_size
+    from .direct_generation import prepare_wan_reference
+
+    premium = options["model"] == "wan14"
+    aspect = options["aspect"]
+    size = WAN_14B_LANDSCAPE_HD if premium else WAN_LANDSCAPE_HD
+    if aspect == "9:16":
+        size = size[::-1] if premium else wan_aspect_size(aspect, wan_14b=False)
+    elif aspect == "16:9" and not premium:
+        size = wan_aspect_size(aspect, wan_14b=False)
+    settings: dict[str, Any] = {"video_size": size, "negative_prompt": WAN_MOTION_NEGATIVE_PROMPT}
+    if premium:
+        settings.update(wan_14b=True, steps=28)
+    if image:
+        photo = io.BytesIO(base64.b64decode(image.split(",", 1)[1], validate=True))
+        prepared, size = prepare_wan_reference(photo, size if aspect != "auto" else None,
+                                               wan_14b=premium, preserve_framing=True)
+        settings.update(image="data:image/jpeg;base64," + base64.b64encode(prepared).decode("ascii"), video_size=size)
+    return settings
+
+
 def _process_prediction(
     *,
     client: ReplicateVideoClient,
@@ -849,6 +871,8 @@ def _process_prediction(
         state, int((shot.get("sourceScene") or {}).get("number", 1) or 1)
     )
     prompt = scene_prompt(state, source_scene, shot, repair)
+    if state.get("screenplayWriter") == "series_episode" and (notes := shot.get("openingRetakeNotes")):
+        prompt = f"Opening shot retake direction: {notes}. {prompt}"[:3500]
     if repair and queue.get("referenceMode") == "product":
         directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
         if directive:
@@ -903,7 +927,11 @@ def _process_prediction(
                     "duplicate products, jump cuts, unrelated objects, camera shake, "
                     "unreadable lettering, subtitles, watermarks, on-screen captions"
                 )
-    if queue.get("writtenProduction") and queue.get("backend") == "comfyui":
+    episode_video = (state.get("shotDirection") or {}).get("episodeVideo")
+    if episode_video and state.get("screenplayWriter") == "series_episode":
+        settings.update(_episode_video_settings(episode_video, image))
+        shot["requestedFrameSize"] = list(settings["video_size"])
+    elif queue.get("writtenProduction") and queue.get("backend") == "comfyui":
         from .comfyui import ComfyUIClient, video_controls_ready
 
         if isinstance(client, ComfyUIClient) and video_controls_ready("reference" if image else "video"):
@@ -965,6 +993,10 @@ def _verify_prediction_output(
     clip_path = root / "clips" / f"{shot.get('id')}.mp4"
     client.download_output(prediction, clip_path)
     verification = verify_mp4(clip_path, expected_duration=config.clip_duration_seconds)
+    expected_size = shot.get("requestedFrameSize")
+    if expected_size and expected_size != [verification.get("width"), verification.get("height")]:
+        width, height = expected_size
+        raise VideoGenerationError(f"The shot did not match the requested {width} × {height} framing.")
     reviews = (
         ("face_review", "faceReview", "possible_drift", face_review_message),
         ("body_review", "bodyReview", "possible_distortion", body_review_message),
@@ -1132,6 +1164,18 @@ def generate_ai_video(
         client = client_factory(model=model)
     else:
         raise VideoGenerationError("SILVER_SCREEN_VIDEO_BACKEND must be replicate or comfyui.")
+    episode_video = (state.get("shotDirection") or {}).get("episodeVideo")
+    if episode_video and state.get("screenplayWriter") == "series_episode":
+        from .comfyui import video_controls_ready
+        from .modal_renderer import ModalComfyUIClient
+
+        if episode_video.get("model") == "wan14" and not isinstance(client, ModalComfyUIClient):
+            raise VideoGenerationError("Wan 2.2 14B episode rendering requires the Modal renderer.")
+        if backend != "comfyui" or not (
+            isinstance(client, ModalComfyUIClient) or
+            (video_controls_ready("video") and video_controls_ready("reference"))
+        ):
+            raise VideoGenerationError("Episode framing requires a ComfyUI workflow with video size controls.")
     queue = _ensure_queue(state, root, config, queue=saved_queue, backend=backend)
     if is_ad:
         queue["referenceMode"] = "product"

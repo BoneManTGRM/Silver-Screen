@@ -179,16 +179,22 @@ episode workspace, edit the outline and adjust individual shots and dialogue
 before rendering. The player includes the finished MP4 and dialogue subtitles.
 Spoken dialogue is available when OpenAI speech is configured.
 
+Choose widescreen or vertical framing where the renderer supports it. On
+Modal, Cinema uses Wan 2.2 14B and two GPU segments per six-second shot.
+Review the opening shot before continuing an episode. Opening retakes use the
+same request budget. You can keep the previous take after reviewing an alternate.
+
 The trailer editor cuts completed episodes into a 15- or 30-second widescreen
 or vertical video. It samples footage before each episode's closing shot and
 adds a season title card. Trailer editing uses FFmpeg and the saved footage.
 The next season carries forward the cast, lead photo, visual direction, and
 the previous finale into a new episode guide.
 
-On the Modal deployment, season files and completed episode and trailer MP4s use the private
-clip volume. Local installations save them under `runs/tv-series`. In-progress
-video checkpoints use the existing `runs` storage, so keeping those checkpoints
-through deployment replacement requires persistent run storage.
+On the Modal deployment, season files, completed MP4s, and paused episode
+checkpoints use the private clip volume. A paused episode can reopen after the
+app restarts. While an episode is actively rendering, its queue uses the current
+runtime's `runs` storage. Local installations save season files and finished
+videos under `runs/tv-series`.
 
 
 The studio provides:
