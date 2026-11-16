@@ -3,6 +3,7 @@
 import re
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from string import Template
 from threading import Lock
@@ -86,7 +87,7 @@ def poll_modal_render(render_id: str, *, refresh: bool = False) -> tuple[dict, b
             check.add_done_callback(lambda complete: _store_check(render_id, complete))
         try:
             result = check.result(timeout=1.5)
-        except TimeoutError:
+        except FutureTimeoutError:
             pass
         else:
             _store_check(render_id, check)
