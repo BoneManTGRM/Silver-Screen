@@ -12,11 +12,11 @@ from streamlit.testing.v1 import AppTest
 pytest.importorskip("starlette")
 from starlette.requests import Request
 
-from silver_screen import modal_renderer, render_preview
+from silver_screen import comfyui, modal_renderer, render_preview
 from silver_screen.ai_video import PredictionPending
 from silver_screen.direct_generation import CLIP_MODEL, IMAGE_MODEL
 from silver_screen.face_review import summarize_face_review
-from silver_screen.modal_clip_archive import read_saved_reviews, save_completed_clip
+from silver_screen.modal_clip_archive import RecentRender, read_saved_reviews, save_completed_clip
 
 
 RENDER_ID = "fc-" + "1" * 26
@@ -78,6 +78,32 @@ def test_direct_create_shows_failed_modal_render_outside_progress_frame(monkeypa
     assert not app.exception
     assert [error.value for error in app.error] == ["The GPU worker reached its time limit."]
     assert not app.get("iframe")
+
+
+def test_recent_render_can_be_opened_directly(monkeypatch):
+    other = "fc-" + "2" * 26
+    entries = [RecentRender(render_id, timestamp, None, True, True)
+               for timestamp, render_id in enumerate((RENDER_ID, other), start=1)]
+    with BytesIO() as png:
+        Image.new("RGB", (16, 16), "orange").save(png, format="PNG")
+        data = png.getvalue()
+    client = Mock(spec=modal_renderer.ModalComfyUIClient)
+    monkeypatch.setenv("SILVER_SCREEN_HTTP_RENDER_PREVIEW", "1")
+    monkeypatch.setattr(modal_renderer, "modal_configured", lambda: True)
+    monkeypatch.setattr(modal_renderer, "recent_modal_renders", lambda: entries)
+    monkeypatch.setattr(comfyui, "make_comfyui_client", lambda **kwargs: client)
+    monkeypatch.setattr(render_preview, "poll_modal_render", lambda render_id, **kwargs: (
+        {"id": render_id, "status": "succeeded", "archived": True}, data,
+    ))
+
+    app = AppTest.from_file(DIRECT_CREATE).run()
+    assert not app.exception
+    for entry in entries:
+        app.button(key=f"open-recent-render-{entry.render_id}").click().run()
+        assert not app.exception
+        assert app.session_state["direct_create_job"]["prediction"]["id"] == entry.render_id
+        assert len(app.get("image")) == 1
+    client.create_prediction.assert_not_called()
 
 
 def test_deleting_one_render_keeps_another_preview_available(monkeypatch):

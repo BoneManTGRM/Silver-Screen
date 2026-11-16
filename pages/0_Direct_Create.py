@@ -342,17 +342,14 @@ if modal_ready:
         if history_error := st.session_state.get("recent_render_error"):
             st.warning(history_error)
         if renders := st.session_state.get("recent_modal_renders"):
-            selected_id = st.selectbox(
-                "Render", renders, index=None, placeholder="Choose a render",
-                format_func=lambda value: (
-                    f"{'Saved' if renders[value].saved else 'Submitted'} "
-                    f"{'image' if renders[value].image else 'clip'} · "
-                    f"{datetime.fromtimestamp(renders[value].timestamp, timezone.utc):%b %d, %H:%M} UTC · {value[-6:]}"
-                ),
-            )
-            if st.button("Open render", disabled=selected_id is None):
-                open_recent_render(renders[selected_id])
-                st.rerun()
+            for entry in renders.values():
+                status = "Saved" if entry.saved else "Submitted"
+                media = "image" if entry.image else "clip"
+                timestamp = datetime.fromtimestamp(entry.timestamp, timezone.utc)
+                label = f"{status} {media} · {timestamp:%b %d, %H:%M} UTC · {entry.render_id[-6:]}"
+                if st.button(label, key=f"open-recent-render-{entry.render_id}"):
+                    open_recent_render(entry)
+                    st.rerun()
         else:
             st.caption("New images and clips appear here after submission.")
 
