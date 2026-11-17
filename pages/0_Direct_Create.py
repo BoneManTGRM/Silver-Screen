@@ -9,6 +9,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from subprocess import SubprocessError
+from tempfile import TemporaryDirectory
 from time import monotonic
 
 import streamlit as st
@@ -16,6 +17,7 @@ from PIL import Image
 
 from silver_screen.action_short import SHOTS
 from silver_screen.ai_video import (
+    PredictionPending,
     ReplicateVideoClient,
     TERMINAL_STATUSES,
     VideoGenerationError,
@@ -50,6 +52,11 @@ from silver_screen.modal_clip_archive import MODAL_RENDER_ID, RecentRender
 from silver_screen.modal_renderer import (
     ModalComfyUIClient, delete_modal_render, modal_configured, recent_modal_renders, remember_modal_render,
 )
+from silver_screen.seedance import (
+    SEEDANCE_LABEL, SEEDANCE_PORTRAIT_GUIDE, SEEDANCE_SIZES, SEEDANCE_TASK_ID, SeedanceRequestRejected, SeedanceVideoClient,
+    seedance_configured, seedance_cost_per_second, seedance_frame_size,
+)
+from silver_screen.seedance_clip_archive import read_seedance_clip, save_seedance_clip
 from silver_screen.voice_config import VoiceStudioError
 from silver_screen.voice_clone import LANGUAGES, render_cloned_line, voice_clone_ready
 
@@ -67,7 +74,10 @@ WAN_14B_DEFAULT_STEPS = 28
 def save_render_job(job: dict) -> None:
     st.session_state["direct_create_job"] = job
     render_id = job["prediction"].get("id") or ""
-    if job["backend"] == "ComfyUI" and MODAL_RENDER_ID.fullmatch(render_id):
+    if job["backend"] == SEEDANCE_LABEL and SEEDANCE_TASK_ID.fullmatch(render_id):
+        st.query_params.pop("render_seconds", None)
+        st.query_params["render"] = render_id
+    elif job["backend"] == "ComfyUI" and MODAL_RENDER_ID.fullmatch(render_id):
         seconds = job.get("requested_seconds") if job["model"] != IMAGE_MODEL else None
         if seconds is None:
             st.query_params.pop("render_seconds", None)
@@ -89,6 +99,64 @@ def recover_modal_job(render_id: str, seconds: str = "", *, image: bool = False)
     if re.fullmatch(r"[0-9]{1,2}", seconds) and 2 <= int(seconds) <= WAN_14B_EXTENDED_MAX_SECONDS:
         job["requested_seconds"] = int(seconds)
     return job
+
+
+def recover_seedance_job(task_id: str) -> dict:
+    return {
+        "backend": SEEDANCE_LABEL, "model": CLIP_MODEL, "render_model": SEEDANCE_LABEL,
+        "prediction": {"id": task_id, "status": "processing"},
+        "recovered": True,
+    }
+
+
+def refresh_seedance_render(job: dict) -> None:
+    task_id = job["prediction"]["id"]
+    data = None
+    if job.get("recovered") and not job.get("seedance_archive_checked"):
+        try:
+            data = read_seedance_clip(task_id)
+        except VideoGenerationError as exc:
+            job["history_warning"] = str(exc)
+        job["seedance_archive_checked"] = True
+    if data is not None:
+        prediction = dict(job["prediction"], status="succeeded", archived=True)
+    else:
+        client = SeedanceVideoClient()
+        try:
+            prediction = client.get_prediction(task_id)
+        except SeedanceRequestRejected as exc:
+            job["prediction"] = dict(job["prediction"], status="failed", error=str(exc))
+            return
+        if prediction["status"] != "succeeded":
+            job["prediction"] = prediction
+            return
+        try:
+            with TemporaryDirectory(prefix="seedance-clip-") as directory:
+                path = client.download_output(prediction, Path(directory) / "clip.mp4")
+                data = path.read_bytes()
+        except PredictionPending:
+            raise
+        except VideoGenerationError as exc:
+            job["prediction"] = dict(prediction, status="failed", error=str(exc))
+            return
+    try:
+        job["actual_seconds"] = verify_direct_clip(
+            data, expected_seconds=job.get("requested_seconds"), expected_size=job.get("requested_size"),
+            minimum_fps=16,
+        )
+    except (VideoGenerationError, OSError, SubprocessError) as exc:
+        job["prediction"] = dict(prediction, status="failed", error=str(exc))
+        return
+    if not prediction.get("archived"):
+        try:
+            save_seedance_clip(task_id, data)
+            prediction["archived"] = True
+            job.pop("history_warning", None)
+        except (VideoGenerationError, OSError):
+            prediction["warning"] = "The clip is ready. Save a copy while the archive is unavailable."
+    job.update(prediction=prediction, data=data)
+    if "started" in job:
+        job["elapsed_seconds"] = monotonic() - job["started"]
 
 
 def open_recent_render(entry: RecentRender) -> dict:
@@ -146,6 +214,11 @@ def refresh_render(job, film_shots, *, wait=False, manual=False):
     is_image = job["model"] == IMAGE_MODEL
     job.pop("check_error", None)
     try:
+        if job.get("backend") == SEEDANCE_LABEL:
+            refresh_seedance_render(job)
+            if "data" in job:
+                retain_film_shot(job, film_shots, job["data"])
+            return
         client = (
             make_comfyui_client(kind="image" if is_image else "video")
             if job.get("backend") == "ComfyUI"
@@ -196,13 +269,14 @@ def refresh_render(job, film_shots, *, wait=False, manual=False):
 
 
 @st.fragment(run_every=5)
-def show_modal_progress(job, film_shots, *, inline_preview=False):
+def show_render_progress(job, film_shots, *, inline_preview=False):
     status = st.empty()
+    provider = "BytePlus" if job["backend"] == SEEDANCE_LABEL else "Modal"
     if "started" in job:
         minutes, seconds = divmod(int(monotonic() - job["started"]), 60)
         st.caption(f"Time since submission · {minutes}:{seconds:02d}")
     if st.button("Check render status", key="direct-check-job"):
-        with st.spinner("Checking Modal…"):
+        with st.spinner(f"Checking {provider}…"):
             refresh_render(job, film_shots, manual=True)
         job["last_manual_check"] = monotonic()
     else:
@@ -218,7 +292,7 @@ def show_modal_progress(job, film_shots, *, inline_preview=False):
         else:
             recovery = ("You can return to this job from Recent renders." if job.get("history_saved")
                         else "Keep this page’s link to reopen the same render.")
-            status.info(f"Waiting for Modal. {recovery}")
+            status.info(f"Waiting for {provider}. {recovery}")
     if checked := job.get("last_manual_check"):
         seconds_ago = int(monotonic() - checked)
         st.caption(f"Last manual check · {seconds_ago}s ago")
@@ -254,7 +328,10 @@ modal_ready = modal_configured()
 if modal_ready and "recent_modal_renders" not in st.session_state:
     load_recent_renders()
 
-if MODAL_RENDER_ID.fullmatch(render_id) and (not job or job["prediction"].get("id") != render_id):
+if SEEDANCE_TASK_ID.fullmatch(render_id) and (not job or job["prediction"].get("id") != render_id):
+    job = recover_seedance_job(render_id)
+    st.session_state["direct_create_job"] = job
+elif MODAL_RENDER_ID.fullmatch(render_id) and (not job or job["prediction"].get("id") != render_id):
     entry = st.session_state.get("recent_modal_renders", {}).get(render_id)
     if entry is not None:
         job = open_recent_render(entry)
@@ -283,16 +360,17 @@ if job and HTTP_RENDER_PREVIEW:
     if job["backend"] == "ComfyUI" and MODAL_RENDER_ID.fullmatch(current_render_id):
         st.markdown(f"[Open current render](/renders/{current_render_id})")
 
-if job and job.get("requested_seconds") and job["model"] == CLIP_MODEL:
+if job and job["model"] == CLIP_MODEL and (job.get("requested_seconds") or job["backend"] == SEEDANCE_LABEL):
     st.session_state.setdefault("direct_create_output", "Video clip")
 kind = st.radio("Output", ("Image", "Video clip"), horizontal=True, key="direct_create_output")
 is_image = kind == "Image"
 workflow_kind = "image" if is_image else "video"
-backend = st.radio(
-    "Generation backend", ("ComfyUI", "Replicate"),
-    index=0 if comfyui_ready(workflow_kind) else 1,
-    horizontal=True,
+backends = ("ComfyUI", "Replicate") if is_image else ("ComfyUI", "Replicate", SEEDANCE_LABEL)
+default_backend = SEEDANCE_LABEL if SEEDANCE_LABEL in backends and job and job["backend"] == SEEDANCE_LABEL else (
+    "ComfyUI" if comfyui_ready(workflow_kind) else "Replicate"
 )
+backend = st.radio("Generation backend", backends, index=backends.index(default_backend), horizontal=True)
+use_seedance = backend == SEEDANCE_LABEL
 use_comfyui = backend == "ComfyUI"
 use_modal = use_comfyui and modal_ready
 reference_ready = use_comfyui and comfyui_ready("reference")
@@ -326,6 +404,8 @@ if not is_image:
                     )
                     if upload is not None:
                         cast_photos[label] = upload
+            elif use_seedance:
+                st.caption("Set the lead with a ModelArk portrait asset below.")
             else:
                 st.caption("Select ComfyUI with a reference workflow to cast from photos.")
     if any(label in cast_photos for label in ("Co-star photo", "Both of you in one photo")):
@@ -333,7 +413,7 @@ if not is_image:
         if shot and shot.intimate:
             intimacy_permission = st.checkbox("My co-star agreed to this intimate scene and who can see it.")
 
-if not use_comfyui:
+if backend == "Replicate":
     st.caption("Each generation submits a paid Replicate prediction.")
 
 if modal_ready:
@@ -454,6 +534,24 @@ if video_controls:
                         else:
                             st.image(prepared_end, caption="Ending frame", width=320)
 
+
+seedance_duration = 6
+seedance_ratio = "16:9"
+seedance_resolution = "720p"
+seedance_image = None
+seedance_ready = seedance_configured()
+if use_seedance:
+    if not seedance_ready:
+        st.info("Add ARK_API_KEY in Railway to enable Seedance 2.5.")
+    options = st.columns(3)
+    seedance_duration = options[0].number_input("Clip length in seconds", 4, 30, shot.seconds if shot else 6)
+    seedance_ratio = options[1].selectbox("Aspect ratio", ("16:9", "9:16"))
+    seedance_resolution = options[2].selectbox("Seedance resolution", list(SEEDANCE_SIZES))
+    estimate = seedance_duration * seedance_cost_per_second(seedance_resolution)
+    st.caption(f"Estimated ${estimate:.2f} USD per render. BytePlus bills for actual usage.")
+    seedance_image = st.file_uploader("Starting image (optional)", type=["png", "jpg", "jpeg", "webp"],
+                                    help="Upload a composition without real human faces. A portrait asset uses the image as a guide.")
+
 with st.form("direct_create"):
     prompt = st.text_area(
         "Prompt", value=shot.prompt if shot else "", height=180,
@@ -474,10 +572,19 @@ with st.form("direct_create"):
             "Frame format", (AUTO_FRAME, *IMAGE_SIZES),
             help="Auto uses the format in your prompt. Otherwise an edit follows the source photo and a new image is square.",
         )
-    if not use_comfyui:
+    if backend == "Replicate":
         ratios = ("1:1", "16:9", "9:16", "4:3", "3:4") if is_image else ("16:9", "9:16")
         ratio = st.selectbox("Aspect ratio", ratios)
-    if not is_image:
+    portrait_asset = ""
+    if use_seedance:
+        duration, ratio = int(seedance_duration), seedance_ratio
+        portrait_asset = st.text_input(
+            "ModelArk lead image asset ID (optional)", max_chars=100,
+            help="Use a verified image asset for a real-person lead.",
+        )
+        st.markdown(f"[ModelArk portrait setup]({SEEDANCE_PORTRAIT_GUIDE})")
+        seed_text = st.text_input("Seed (optional)", placeholder="Random each time")
+    if not is_image and not use_seedance:
         if video_controls:
             maximum = WAN_14B_EXTENDED_MAX_SECONDS if wan_14b else 12
             default_duration = 3 if wan_14b else (5 if use_modal else 8)
@@ -508,8 +615,12 @@ with st.form("direct_create"):
                 negative = st.text_area("Things to avoid (optional)")
                 default_size = WAN_14B_LANDSCAPE_HD if wan_14b else WAN_LANDSCAPE_HD
                 render_options = {"video_size": frame_size or default_size, "steps": steps, "negative_prompt": negative}
+    if use_seedance:
+        audio = st.checkbox("Generate audio", value=True)
     active = bool(job and job["prediction"].get("status") not in TERMINAL_STATUSES and "data" not in job)
-    generate = st.form_submit_button("Generate", type="primary", disabled=active or reference_error is not None)
+    generate = st.form_submit_button("Generate", type="primary", disabled=(
+        active or reference_error is not None or (use_seedance and not seedance_ready)
+    ))
 
 if generate and not active:
     model = IMAGE_MODEL if is_image else CLIP_MODEL
@@ -525,7 +636,24 @@ if generate and not active:
             if shot and shot.intimate and not intimacy_permission:
                 raise VideoGenerationError("Confirm your co-star agreed to this intimate scene and who can see it.")
         with st.spinner(f"Submitting to {backend}…"):
-            if use_comfyui:
+            if use_seedance:
+                seed = secrets.randbelow(2**31)
+                if seed_text.strip():
+                    try:
+                        seed = int(seed_text)
+                        if not 0 <= seed < 2**31:
+                            raise ValueError
+                    except ValueError as exc:
+                        raise VideoGenerationError("Use a whole-number seed from 0 to 2147483647.") from exc
+                image = image_to_data_url(seedance_image, max_bytes=1_500_000)
+                if seedance_image is not None and not image:
+                    raise VideoGenerationError("The starting image could not be prepared.")
+                requested_size = seedance_frame_size(seedance_resolution, ratio)
+                prediction = SeedanceVideoClient().create_prediction(
+                    prompt, seed=seed, duration=duration, image=image, generate_audio=audio, ratio=ratio,
+                    resolution=seedance_resolution, portrait_asset=portrait_asset,
+                )
+            elif use_comfyui:
                 seed = secrets.randbelow(2**31)
                 if seed_text.strip():
                     try:
@@ -597,8 +725,10 @@ if generate and not active:
         if shot:
             job["filename"] = f"last-train-out-{shot_number:02d}.mp4"
             job["shot_number"] = shot_number
-        if use_comfyui:
+        if use_comfyui or use_seedance:
             job["seed"] = seed
+        if use_seedance:
+            job["render_model"] = SEEDANCE_LABEL
         if use_modal and not is_image:
             job["render_model"] = WAN_14B_LABEL if wan_14b else WAN_5B_LABEL
         save_render_job(job)
@@ -610,6 +740,8 @@ if generate and not active:
                     st.session_state.pop("recent_modal_renders", None)
                 except VideoGenerationError as exc:
                     job["history_warning"] = str(exc)
+            st.rerun()
+        if use_seedance:
             st.rerun()
     except (VideoGenerationError, OSError) as exc:
         st.error(str(exc))
@@ -626,6 +758,10 @@ if job:
         st.iframe(render_preview_html(prediction_id), height="content", alt="Current render")
     if prediction_id:
         st.caption(f"{job_backend} prediction {prediction_id}")
+    if job_backend == SEEDANCE_LABEL and st.button("Close this render", key="close-seedance-render"):
+        st.session_state.pop("direct_create_job", None)
+        st.query_params.pop("render", None)
+        st.rerun()
     if submitted_prompt := job.get("submitted_prompt"):
         with st.expander("Prompt used"):
             st.code(submitted_prompt, language=None)
@@ -634,14 +770,14 @@ if job:
                 st.code(submitted_negative, language=None)
             if output_size := job.get("requested_size"):
                 st.caption(f"Frame size · {output_size[0]} × {output_size[1]}")
-            if job["model"] == CLIP_MODEL:
+            if job["model"] == CLIP_MODEL and job.get("requested_seconds"):
                 st.caption(f"Clip length · {job['requested_seconds']} seconds")
     if warning := job.get("history_warning"):
         st.warning(warning)
 
-    auto_check = modal_job and active
+    auto_check = active and (modal_job or job_backend == SEEDANCE_LABEL)
     if auto_check:
-        show_modal_progress(job, film_shots, inline_preview=http_preview)
+        show_render_progress(job, film_shots, inline_preview=http_preview)
     elif "data" not in job and prediction.get("status") not in {"failed", "canceled"}:
         check = not generate and st.button("Check render status", key="direct-check-job")
         if check or generate:
@@ -701,6 +837,11 @@ if job:
                     if gpus := stats.get("gpus"):
                         st.caption(", ".join(gpus))
                     st.caption(f"{len(job['data']) / 1024**2:.2f} MiB MP4")
+            if job_backend == SEEDANCE_LABEL and (metrics := job["prediction"].get("metrics")):
+                if "providerSeconds" in metrics:
+                    st.caption(f"BytePlus task time · {metrics['providerSeconds']}s")
+                if "estimatedCostUsd" in metrics:
+                    st.caption(f"Estimated usage from BytePlus tokens · ${metrics['estimatedCostUsd']:.2f} USD")
             if job["prediction"].get("archived"):
                 st.caption("Saved in your studio")
             if not http_preview:
@@ -810,6 +951,19 @@ with st.expander("Recover a Modal render"):
         else:
             save_render_job(recover_modal_job(previous_id))
             st.rerun()
+
+if use_seedance or (job and job["backend"] == SEEDANCE_LABEL):
+    with st.expander("Recover a Seedance render"):
+        with st.form("recover-seedance-render"):
+            task_id = st.text_input("BytePlus task ID", placeholder="cgt-…").strip()
+            recover_seedance = st.form_submit_button("Find Seedance render", disabled=active)
+        if recover_seedance:
+            if not SEEDANCE_TASK_ID.fullmatch(task_id):
+                st.error("Enter the full BytePlus task ID beginning with cgt-.")
+            else:
+                save_render_job(recover_seedance_job(task_id))
+                st.rerun()
+
 
 if not is_image and (shot or film_shots):
     with st.expander("Export Last Train Out", expanded=bool(film_shots)):

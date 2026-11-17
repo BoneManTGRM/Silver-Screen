@@ -888,7 +888,10 @@ def _process_prediction(
         directive = str((shot.get("visualQuality") or {}).get("repairDirective") or "")
         if directive:
             prompt = f"{prompt.rstrip()} Retake direction: {directive}"[:3500]
-    if image and (explicit_reference or queue.get("referenceMode") == "cast"):
+    episode_video = direction.get("episodeVideo")
+    seedance_episode = bool(episode_video and series_episode and queue.get("backend") == "seedance")
+    portrait_asset = episode_video["portraitAsset"] if seedance_episode else ""
+    if image and not portrait_asset and (explicit_reference or queue.get("referenceMode") == "cast"):
         from .direct_generation import preserve_reference_appearance
 
         prompt = preserve_reference_appearance(prompt)
@@ -938,8 +941,14 @@ def _process_prediction(
                     "duplicate products, jump cuts, unrelated objects, camera shake, "
                     "unreadable lettering, subtitles, watermarks, on-screen captions"
                 )
-    episode_video = direction.get("episodeVideo")
-    if episode_video and series_episode:
+    if seedance_episode:
+        from .seedance import seedance_frame_size
+
+        ratio = episode_video["aspect"] if episode_video["aspect"] != "auto" else "16:9"
+        resolution = episode_video["resolution"]
+        settings.update(ratio=ratio, resolution=resolution, portrait_asset=portrait_asset, generate_audio=False)
+        shot["requestedFrameSize"] = list(seedance_frame_size(resolution, ratio))
+    elif episode_video and series_episode:
         opening = queue["shots"][0]
         opening_size = opening.get("requestedFrameSize") if opening is not shot and opening.get("status") == "verified" else None
         settings.update(_episode_video_settings(episode_video, image, tuple(opening_size) if opening_size else None))
@@ -1140,9 +1149,19 @@ def generate_ai_video(
         use_continuity_frames=use_continuity_frames,
     )
     from .comfyui import make_comfyui_client, video_backend
+    from .seedance import SEEDANCE_BACKEND, SeedanceRequestRejected, SeedanceSubmissionUnknown, SeedanceVideoClient
 
     saved_queue = load_video_queue(root) if resume else None
-    backend = str(saved_queue.get("backend") or "replicate") if saved_queue else video_backend()
+    episode_video = (state.get("shotDirection") or {}).get("episodeVideo")
+    is_episode = state.get("screenplayWriter") == "series_episode"
+    use_seedance = is_episode and (episode_video or {}).get("model") == "seedance25"
+    backend = str(saved_queue.get("backend") or "replicate") if saved_queue else (
+        SEEDANCE_BACKEND if use_seedance else video_backend()
+    )
+    if backend == SEEDANCE_BACKEND:
+        if not use_seedance:
+            raise VideoGenerationError("The Seedance episode settings are unavailable.")
+        config = replace(config, use_continuity_frames=False)
     initial_image_data = image_to_data_url(initial_image)
     is_ad = state.get("screenplayWriter") == "ad"
     written = bool(state.get("screenplayWriter"))
@@ -1184,10 +1203,11 @@ def generate_ai_video(
             config = replace(config, use_continuity_frames=False)
     elif backend == "replicate":
         client = client_factory(model=model)
+    elif backend == SEEDANCE_BACKEND:
+        client = SeedanceVideoClient()
     else:
         raise VideoGenerationError("SILVER_SCREEN_VIDEO_BACKEND must be replicate or comfyui.")
-    episode_video = (state.get("shotDirection") or {}).get("episodeVideo")
-    if episode_video and state.get("screenplayWriter") == "series_episode":
+    if episode_video and is_episode and backend != SEEDANCE_BACKEND:
         from .comfyui import video_controls_ready
         from .modal_renderer import ModalComfyUIClient
 
@@ -1251,6 +1271,12 @@ def generate_ai_video(
             queue["completedAt"] = utc_now()
             break
         submitted = shot.get("status") == "submitted"
+        if backend == SEEDANCE_BACKEND and shot.get("status") == "submitting":
+            shot["lastError"] = shot.get("lastError") or (
+                "BytePlus submission was interrupted. Check ModelArk for a task before starting a fresh render."
+            )
+            queue.update(status="blocked", stopReason="provider_submission_unknown")
+            break
         if not submitted and is_provider_prompt_rejection(shot.get("lastError")):
             shot["status"] = "blocked"
             queue.update(status="blocked", stopReason="provider_prompt_rejected")
@@ -1302,6 +1328,16 @@ def generate_ai_video(
                     starting_frame=starting_frames.get(int(shot.get("order") or 0)),
                 )
             calls_this_run += 1
+        except SeedanceSubmissionUnknown as exc:
+            shot["lastError"] = str(exc)
+            queue.update(status="blocked", stopReason="provider_submission_unknown")
+            save_video_queue(root, queue)
+            break
+        except SeedanceRequestRejected as exc:
+            shot.update(status="blocked", lastError=str(exc))
+            queue.update(status="blocked", stopReason="provider_request_rejected")
+            save_video_queue(root, queue)
+            break
         except PredictionPending as exc:
             shot["lastError"] = str(exc)
             queue["status"] = "partial"

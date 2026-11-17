@@ -223,6 +223,16 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
     episode_video = raw.get("episodeVideo")
     if not isinstance(episode_video, dict):
         episode_video = {}
+    if episode_video:
+        model = episode_video.get("model")
+        episode_video = {
+            "model": model if model in ("wan14", "seedance25") else "standard",
+            "aspect": episode_video["aspect"] if episode_video.get("aspect") in ("16:9", "9:16") else "auto",
+            **({
+                "resolution": "1080p" if episode_video.get("resolution") == "1080p" else "720p",
+                "portraitAsset": _clean_text(episode_video.get("portraitAsset"), 100),
+            } if model == "seedance25" else {}),
+        }
     starts = raw.get("episodeStartingFrames")
     reference_orders = []
     if isinstance(starts, list):
@@ -251,10 +261,7 @@ def normalize_shot_direction(value: Any) -> dict[str, Any]:
         ),
         "approvedPromptLedger": ledger,
         "approvedLedgerHash": _clean_text(raw.get("approvedLedgerHash"), 128),
-        **({"episodeVideo": {
-            "model": "wan14" if episode_video.get("model") == "wan14" else "standard",
-            "aspect": episode_video["aspect"] if episode_video.get("aspect") in ("16:9", "9:16") else "auto",
-        }} if episode_video else {}),
+        **({"episodeVideo": episode_video} if episode_video else {}),
     }
 
 
@@ -498,11 +505,15 @@ def render_directed_prompt(
 
     cast = _cast_details(state, scene)
     creative = _creative_summary(state)
-    if blueprint["order"] in ((state.get("shotDirection") or {}).get("episodeStartingFrames") or []):
-        continuity = (
-            "Start with the supplied shot image. Match its framing, setting, subject positions, "
-            "and lighting. Animate the scripted action from that composition."
-        )
+    direction = state.get("shotDirection") or {}
+    if blueprint["order"] in (direction.get("episodeStartingFrames") or []):
+        if (direction.get("episodeVideo") or {}).get("portraitAsset"):
+            continuity = "Use the supplied composition image to guide framing, subject positions, and lighting."
+        else:
+            continuity = (
+                "Start with the supplied shot image. Match its framing, setting, subject positions, "
+                "and lighting. Animate the scripted action from that composition."
+            )
     else:
         continuity = prompt_directive(runtime_shot)
     retake = _retake_directive(runtime_shot)

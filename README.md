@@ -166,6 +166,27 @@ python -m pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
+### Seedance 2.5
+
+Activate Dreamina Seedance 2.5 in [BytePlus ModelArk](https://docs.byteplus.com/en/docs/ModelArk/seedance-2-5)
+and set `ARK_API_KEY` as a server-side secret on the Silver Screen service.
+Select **Video clip → Seedance 2.5** in Direct Create for a 4- to 30-second
+render, or choose **Seedance 2.5 · BytePlus** in the episode render settings.
+Both support 720p and 1080p in widescreen or vertical framing. Direct Create
+can generate synchronized audio. Episodes use the series dialogue workflow.
+
+For a real-person lead, use an authorized image asset ID from
+[ModelArk's portrait library](https://docs.byteplus.com/en/docs/modelark/upload-real-person-portrait-assets).
+Other starting frames can be uploaded as images. With a portrait asset
+selected, the uploaded frame guides the shot's composition.
+
+Direct Create keeps the task ID in the page link and saves the completed MP4
+in the studio archive. The official
+[BytePlus pricing page](https://docs.byteplus.com/en/docs/modelark/model-pricing)
+describes token rates and estimates. Silver Screen shows an estimate before
+you render. Choose the same prompt, duration, image, and framing in both
+renderers to compare takes.
+
 ### TV Series
 
 Open **TV Series** from the writer or studio menu. Enter a premise, pick two to

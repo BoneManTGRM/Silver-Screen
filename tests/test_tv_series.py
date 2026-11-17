@@ -603,3 +603,86 @@ def test_tv_series_page_renders_and_opens_the_selected_episode(creator, monkeypa
     assert not reopened.error and not reopened.exception
     assert successor["previousSeasonId"] == series_id and successor["seasonNumber"] == 2
     assert successor["episodes"]
+
+
+def test_seedance_episode_recovers_provider_task_and_keeps_its_model(creator, monkeypatch, tmp_path):
+    from silver_screen.seedance import SEEDANCE_MODEL, SeedanceVideoClient
+
+    fixture = tmp_path / "seedance-episode.mp4"
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        pytest.skip("Seedance episode export requires FFmpeg and FFprobe.")
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24",
+        "-t", "6", "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast", str(fixture),
+    ], check=True, timeout=30)
+    monkeypatch.setenv("ARK_API_KEY", "test-key")
+    monkeypatch.setenv("SILVER_SCREEN_VISUAL_MIN_SHARPNESS", "0.02")
+    monkeypatch.setenv("SILVER_SCREEN_VIDEO_BACKEND", "comfyui")
+    submissions = []
+    unavailable = True
+
+    def request(self, method, url, payload=None):
+        if method == "POST":
+            submissions.append(payload)
+            return {"id": f"cgt-test-{len(submissions)}"}
+        if unavailable:
+            raise PredictionPending("BytePlus status is temporarily unavailable.")
+        return {
+            "status": "succeeded", "model": SEEDANCE_MODEL,
+            "content": {"video_url": "https://result.tos-ap-southeast-1.volces.com/take.mp4"},
+        }
+
+    def download(self, prediction, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(fixture, destination)
+        return destination
+
+    original_init = SeedanceVideoClient.__init__
+
+    def init_without_wait(self):
+        original_init(self, poll_seconds=0)
+
+    monkeypatch.setattr(SeedanceVideoClient, "__init__", init_without_wait)
+    monkeypatch.setattr(SeedanceVideoClient, "_task_request", request)
+    monkeypatch.setattr(SeedanceVideoClient, "download_output", download)
+
+    store = tv_series.SeriesStore(volume=MemoryVolume())
+    series_id = tv_series.create_series(store, PREMISE, 2, 30)["seriesId"]
+    assert tv_series.check_series_script(store, series_id)
+    tv_series.set_series_photo(store, series_id, _jpeg("teal"))
+    tv_series.start_episode_script(store, series_id, 1)
+    assert tv_series.check_series_script(store, series_id, 1)
+    draft = store.read(series_id)["episodes"][0]["draft"]
+    tv_series.save_episode_shot_reference(store, series_id, 1, 2, _jpeg("red"), expected_revision=draft["revision"])
+
+    run_id = tv_series.start_episode_render(store, series_id, 1, max_calls=5, render_model="seedance25",
+                                            aspect="16:9", portrait_asset="asset-test-lead", review_opening=True)
+    active_production(run_id).result(timeout=120)
+    episode = store.read(series_id)["episodes"][0]
+    assert tv_series.episode_status(store, episode)["stopReason"] == "prediction_pending"
+    assert episode["render"]["savedCheckpoint"]
+    assert len(submissions) == 1
+    assert len(submissions[0]["content"]) == 2
+    assert submissions[0]["content"][1]["image_url"] == {"url": "asset://asset-test-lead"}
+
+    unavailable = False
+    shutil.rmtree(store.root / run_id)
+    monkeypatch.setenv("SILVER_SCREEN_VIDEO_BACKEND", "replicate")
+    assert tv_series.start_episode_render(store, series_id, 1, max_calls=5) == run_id
+    active_production(run_id).result(timeout=120)
+    episode = store.read(series_id)["episodes"][0]
+    opening = Path(tv_series.episode_status(store, episode)["opening"]["current"])
+    assert len(submissions) == 1
+    assert verify_mp4(opening)["durationSeconds"] == 6
+
+    tv_series.start_episode_render(store, series_id, 1, max_calls=5, approve_opening=True)
+    active_production(run_id).result(timeout=120)
+    assert len(submissions) == 5
+    second = submissions[1]
+    assert second["ratio"] == "16:9" and second["resolution"] == "720p" and second["generate_audio"] is False
+    assert [item["role"] for item in second["content"][1:]] == ["reference_image", "reference_image"]
+    assert "@image2" in second["content"][0]["text"]
+    assert all(len(request["content"]) == 2 for request in submissions[2:])
+    episode = store.read(series_id)["episodes"][0]
+    assert tv_series.episode_status(store, episode)["status"] == "ready"
+    assert verify_mp4(store.episode_path(series_id, 1))["durationSeconds"] == 30

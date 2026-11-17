@@ -33,6 +33,10 @@ from .screenplay_writer import (
     _SLUGLINE, _scene_array, _text, poll_writer_result, screenplay_draft, script_sync_text, submit_writer_request,
 )
 from .script_sync import estimate_speech_seconds
+from .seedance import (
+    SEEDANCE_LABEL, SeedanceRequestRejected, seedance_configured, seedance_cost_per_second, seedance_frame_size,
+    seedance_portrait_asset,
+)
 from .tv_series_checkpoint import MAX_CHECKPOINT_BYTES, REQUIRED_FILES, build_checkpoint, unpack_checkpoint
 from .tv_series_trailer import TRAILER_FORMATS, TRAILER_LENGTHS, export_trailer
 from .video_runtime import load_video_queue, save_video_queue
@@ -48,8 +52,12 @@ ARCHIVE_DIR = "tv-series"
 MAX_SERIES_BYTES = 4 * 1024 * 1024
 MAX_EPISODE_BYTES = 128 * 1024 * 1024
 GPU_BUDGET_STOP = "provider_call_budget_exhausted"
-STOPPED_RENDERS = {"shot_retry_budget_exhausted", GPU_BUDGET_STOP, "provider_prompt_rejected"}
-RENDER_MODELS = {"standard": "Standard · Wan 5B on Modal", "wan14": "Cinema · Wan 2.2 14B"}
+STOPPED_RENDERS = {
+    "shot_retry_budget_exhausted", GPU_BUDGET_STOP, "provider_prompt_rejected",
+    "provider_request_rejected", "provider_submission_unknown",
+}
+RENDER_MODELS = {"standard": "Standard · Wan 5B on Modal", "wan14": "Cinema · Wan 2.2 14B",
+                 "seedance25": f"{SEEDANCE_LABEL} · BytePlus"}
 RENDER_ASPECTS = {"auto": "Default framing", "16:9": "Widescreen · 16:9", "9:16": "Vertical · 9:16"}
 _LOCK = RLock()
 
@@ -747,6 +755,7 @@ def start_episode_render(
     store: SeriesStore, series_id: str, number: int, *, max_calls: int,
     voice_provider: str = "", restart: bool = False, render_model: str = "standard", aspect: str = "auto",
     review_opening: bool = False, approve_opening: bool = False, retake: str | None = None,
+    resolution: str = "720p", portrait_asset: str = "",
 ) -> str:
     with _LOCK:
         series = store.read(series_id)
@@ -755,9 +764,10 @@ def start_episode_render(
         if not draft or episode.get("writerJob"):
             raise SeriesError("Write and review the episode script first.")
         required = draft["seconds"] // SCREENPLAY_LENGTHS[draft["seconds"]]
-        if not required <= max_calls <= required * 3:
-            raise SeriesError(f"Choose a GPU request limit between {required} and {required * 3}.")
         current = episode.get("render") or {}
+        request_kind = "render" if (render_model == "seedance25" or current.get("model") == "seedance25") else "GPU"
+        if not required <= max_calls <= required * 3:
+            raise SeriesError(f"Choose a {request_kind} request limit between {required} and {required * 3}.")
         existing = current.get("runId")
         if existing:
             validate_run_id(existing)
@@ -805,22 +815,31 @@ def start_episode_render(
         # Preserve the episode's original photo and approved render budget on resume.
         shot_references = {}
         if not existing:
+            if render_model not in RENDER_MODELS or aspect not in RENDER_ASPECTS:
+                raise SeriesError("Choose a supported episode model and frame format.")
+            if render_model == "seedance25":
+                if not seedance_configured():
+                    raise SeriesError("Add ARK_API_KEY to Silver Screen's deployment to enable Seedance 2.5.")
+                try:
+                    seedance_frame_size(resolution, "16:9" if aspect == "auto" else aspect)
+                    portrait_asset = seedance_portrait_asset(portrait_asset)
+                except SeedanceRequestRejected as exc:
+                    raise SeriesError(str(exc)) from exc
             if episode.get("shotReferences"):
-                if not _episode_shot_references_available():
+                if render_model != "seedance25" and not _episode_shot_references_available():
                     raise SeriesError("Configure image-to-video rendering to use the saved starting frames.")
                 for shot_number in range(1, required + 1):
                     if frame := episode_shot_reference(store, series_id, episode, shot_number):
                         shot_references[shot_number] = frame
-            if render_model not in RENDER_MODELS or aspect not in RENDER_ASPECTS:
-                raise SeriesError("Choose a supported episode model and frame format.")
             if render_model == "wan14" and not (video_backend() == "comfyui" and modal_configured()):
                 raise SeriesError("Wan 2.2 14B episode rendering requires the Modal renderer.")
-            if aspect != "auto" and not episode_framing_available():
+            if render_model != "seedance25" and aspect != "auto" and not episode_framing_available():
                 raise SeriesError("The video backend needs frame size controls for this format.")
             current = {
                 "runId": run_id, "maxCalls": max_calls, "voiceProvider": voice_provider,
-                "leadReference": series.get("leadReference", ""),
+                "leadReference": "" if render_model == "seedance25" else series.get("leadReference", ""),
                 "model": render_model, "aspect": aspect, "reviewOpening": review_opening,
+                **({"resolution": resolution, "portraitAsset": portrait_asset} if render_model == "seedance25" else {}),
             }
             episode["render"] = current
             store.write(series)
@@ -832,6 +851,9 @@ def start_episode_render(
             "finishAudio": bool(current["voiceProvider"]),
             "voiceProvider": current["voiceProvider"] or "openai",
         }
+
+        if current.get("model") == "seedance25":
+            config["costPerSecondUsd"] = seedance_cost_per_second(current["resolution"])
 
         def produce() -> dict:
             try:
@@ -846,7 +868,10 @@ def start_episode_render(
                     if shot_references:
                         brief["shotDirection"]["episodeStartingFrames"] = sorted(shot_references)
                     if render_model != "standard" or aspect != "auto":
-                        brief["shotDirection"]["episodeVideo"] = {"model": render_model, "aspect": aspect}
+                        brief["shotDirection"]["episodeVideo"] = {
+                            "model": render_model, "aspect": aspect,
+                            **({"resolution": resolution, "portraitAsset": portrait_asset} if render_model == "seedance25" else {}),
+                        }
                     plan = prepare_autonomous_plan(
                         brief, target_runtime_seconds=draft["seconds"],
                         clip_duration_seconds=SCREENPLAY_LENGTHS[draft["seconds"]],

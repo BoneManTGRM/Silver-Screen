@@ -12,6 +12,7 @@ from silver_screen.modal_renderer import modal_configured, screenplay_writer_con
 from silver_screen.runtime import slugify
 from silver_screen.science import GENRES, TONES
 from silver_screen.screenplay_writer import EPISODE_LENGTHS, IDEA_LIMIT, SCREENPLAY_LENGTHS, ScreenplayStatusUnavailable
+from silver_screen.seedance import SEEDANCE_PORTRAIT_GUIDE, SEEDANCE_SIZES, seedance_configured, seedance_cost_per_second
 from silver_screen.tv_series import (
     CAST_LIMITS, GPU_BUDGET_STOP, OUTLINE_LIMITS, RENDER_ASPECTS, RENDER_MODELS, SEASON_COUNTS, STOPPED_RENDERS,
     VISUAL_DIRECTION_LIMIT, SeriesError, check_series_script, create_series, cut_season_trailer,
@@ -81,7 +82,8 @@ def video_progress(episode: dict) -> None:
     done, total = metrics.get("verifiedShots", 0), metrics.get("plannedShots", 0)
     if total:
         st.progress(done / total, text=f"{done} of {total} shots finished" if done < total else "Assembling and saving the episode")
-        st.caption(f"GPU requests used · {metrics.get('providerCalls', 0)}")
+        label = "Render" if episode.get("render", {}).get("model") == "seedance25" else "GPU"
+        st.caption(f"{label} requests used · {metrics.get('providerCalls', 0)}")
     else:
         st.info("Preparing the episode render…")
 
@@ -157,9 +159,10 @@ def resume_with_budget(series_id: str, episode: dict, *, used: int, remaining: i
     lower = max(required, used + 1)
     approved = episode["render"]["maxCalls"]
     recommended = min(upper, max(lower, approved, used + remaining))
-    st.info("The GPU request limit paused this render. Increase the total limit to continue from the saved shots.")
+    label = "render" if episode["render"].get("model") == "seedance25" else "GPU"
+    st.info(f"The {label} request limit paused this render. Increase the total limit to continue from the saved shots.")
     with st.form(f"{series_id}-episode-budget-{number}"):
-        calls = st.number_input("Total GPU request limit", min_value=lower, max_value=upper, value=recommended)
+        calls = st.number_input(f"Total {label} request limit", min_value=lower, max_value=upper, value=recommended)
         resume = st.form_submit_button("Resume saved render", type="primary", disabled=not ready)
     if resume:
         start_episode_render(store, series_id, number, max_calls=int(calls))
@@ -204,7 +207,7 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
     stage = status["status"]
     render = episode.get("render") or {}
     required = draft["seconds"] // SCREENPLAY_LENGTHS[draft["seconds"]]
-    ready = video_backend_ready()
+    ready = seedance_configured() if render.get("model") == "seedance25" else video_backend_ready()
     if stage == "rendering":
         video_progress(episode)
         return
@@ -219,6 +222,8 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
         done = metrics.get("verifiedShots", 0)
         used = metrics.get("providerCalls", 0)
         st.caption(f"Saved checkpoint · {done}/{required} shots · {used}/{render['maxCalls']} requests used")
+        if render.get("model") == "seedance25" and used:
+            st.caption(f"Estimated render usage · ${metrics.get('estimatedSpendUsd', 0):.2f} USD")
         reason = status.get("stopReason")
         if status.get("restorable") and status.get("hasOpening"):
             if st.button("Open saved opening shot", type="primary"):
@@ -238,34 +243,57 @@ def render_controls(series_id: str, episode: dict, season: dict, status: dict) -
             return
         st.warning("This episode render stopped. Its completed shots are saved in Autonomous Studio.")
     if restart:
-        st.caption("A fresh render uses a new GPU request budget.")
+        st.caption("A fresh render uses a new request budget.")
+    cinema_ready = video_backend() == "comfyui" and modal_configured()
+    models = ["standard", *(["wan14"] if cinema_ready else []), "seedance25"]
+    default_model = render.get("model", "standard")
+    model = st.selectbox("Episode render model", models, format_func=RENDER_MODELS.get,
+                         index=models.index(default_model) if default_model in models else 0,
+                         key=f"{series_id}-render-model-{number}")
+    use_seedance = model == "seedance25"
+    if model == "wan14":
+        st.caption("Cinema uses two GPU segments for each six-second shot and takes longer.")
+    ready = seedance_configured() if use_seedance else video_backend_ready()
+    resolution = st.selectbox("Seedance resolution", list(SEEDANCE_SIZES),
+                              key=f"{series_id}-seedance-resolution-{number}") if use_seedance else "720p"
+    clip_seconds = SCREENPLAY_LENGTHS[draft["seconds"]]
     with st.form(f"episode-render-{number}"):
-        calls = st.number_input("Maximum GPU requests", min_value=required, max_value=3 * required,
-                                value=required + 2)
+        label = "render" if use_seedance else "GPU"
+        calls = st.number_input(f"Maximum {label} requests", min_value=required, max_value=3 * required, value=required + 2)
         speech_available = provider_capabilities().get("openai")
         speak = st.checkbox("Add spoken dialogue", value=False) if speech_available else False
         if not speech_available:
             st.caption("Scripted dialogue will be available as subtitles.")
-        cinema_ready = video_backend() == "comfyui" and modal_configured()
-        model = st.selectbox("Episode render model", list(RENDER_MODELS), format_func=RENDER_MODELS.get) if cinema_ready else "standard"
-        if cinema_ready:
-            st.caption("Cinema uses two GPU segments for each six-second shot and takes longer.")
-        aspect = st.selectbox("Episode framing", list(RENDER_ASPECTS), format_func=RENDER_ASPECTS.get) if episode_framing_available() else "auto"
-        review = st.checkbox("Review opening shot before rendering the episode", value=True)
+        aspects = ["16:9", "9:16"] if use_seedance else list(RENDER_ASPECTS)
+        aspect = st.selectbox("Episode framing", aspects, format_func=RENDER_ASPECTS.get) if use_seedance or episode_framing_available() else "auto"
+        portrait = ""
+        if use_seedance:
+            portrait = st.text_input(
+                "ModelArk lead image asset ID (optional)", max_chars=100,
+                help="Use a verified ModelArk portrait to carry the same lead across shots.",
+            )
+            st.markdown(f"Use an authorized asset for a real-person lead. [ModelArk portrait setup]({SEEDANCE_PORTRAIT_GUIDE})")
+            if season.get("leadReference"):
+                st.caption("The saved season lead photo is used by Wan. Set a ModelArk asset ID to cast the lead with Seedance.")
+            if episode.get("shotReferences"):
+                st.caption("Seedance receives the saved starting images. Use photos without real faces. With a lead asset, the image guides composition.")
+            price = seedance_cost_per_second(resolution)
+            st.caption(f"Estimated ${price * clip_seconds:.2f} USD per {clip_seconds}s request at {resolution}. BytePlus bills for actual usage.")
         if not ready:
-            st.info(f"Configure the {video_backend()} video backend to render episodes.")
-        reference_unavailable = (season.get("leadReference") and video_backend() == "comfyui"
+            st.info("Add ARK_API_KEY in Railway to enable Seedance." if use_seedance
+                    else f"Configure the {video_backend()} video backend to render episodes.")
+        reference_unavailable = (not use_seedance and season.get("leadReference") and video_backend() == "comfyui"
                                  and not comfyui_ready("reference"))
         if reference_unavailable:
             st.info("Connect a reference workflow to use the saved lead photo.")
-        start = st.form_submit_button(
-            "Start a fresh render" if restart else "Render this episode",
-            type="primary", disabled=not ready or bool(reference_unavailable),
-        )
+        review = st.checkbox("Review opening shot before rendering the episode", value=True)
+        start = st.form_submit_button("Start a fresh render" if restart else "Render this episode",
+                                      type="primary", disabled=not ready or bool(reference_unavailable))
     if start:
         start_episode_render(store, series_id, number, max_calls=int(calls),
                              voice_provider="openai" if speak else "", restart=restart,
-                             render_model=model, aspect=aspect, review_opening=review)
+                             render_model=model, aspect=aspect, review_opening=review,
+                             resolution=resolution, portrait_asset=portrait)
         st.rerun()
 
 
