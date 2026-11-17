@@ -462,7 +462,9 @@ def _read_production_snapshot(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def load_finished_production(run_id: str, *, output_root: str = "runs") -> dict[str, Any] | None:
+def load_finished_production(
+    run_id: str, *, output_root: str = "runs", expected_duration: int | None = None,
+) -> dict[str, Any] | None:
     """Read an existing export and its evidence without queueing production work."""
     from .ai_video import VideoGenerationError
     from .direct_generation import _verified_clip
@@ -479,9 +481,8 @@ def load_finished_production(run_id: str, *, output_root: str = "runs") -> dict[
     try:
         workspace.relative(path)
         metadata = _verified_clip(path)
-        runtime = (result.get("options") or {}).get("targetRuntimeSeconds")
         duration = metadata.get("durationSeconds")
-        if runtime and (duration is None or abs(duration - float(runtime)) > 0.10):
+        if expected_duration is not None and (duration is None or abs(duration - expected_duration) > 0.10):
             return None
     except (OSError, ValueError, SubprocessError, VideoGenerationError):
         return None

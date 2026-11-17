@@ -837,7 +837,7 @@ def start_episode_render(
             try:
                 export = store.root / run_id / "media" / "episode.mp4"
                 if existing:
-                    outcome = load_finished_production(run_id)
+                    outcome = load_finished_production(run_id, expected_duration=draft["seconds"])
                     if not outcome or Path(outcome["job"]["artifacts"]["shortVideo"]).resolve() != export.resolve():
                         outcome = continue_autonomous_production(run_id, output_root="runs", saved_config=config)
                 else:
