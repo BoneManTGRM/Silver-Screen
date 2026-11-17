@@ -17,7 +17,7 @@ from typing import Any
 
 from .ai_video import VideoGenerationError, image_to_data_url, verify_mp4
 from .autonomous_studio import (
-    active_production, continue_autonomous_production, enqueue_production,
+    active_production, continue_autonomous_production, enqueue_production, load_finished_production,
     prepare_autonomous_plan, start_autonomous_production,
 )
 from .comfyui import comfyui_ready, video_backend, video_controls_ready
@@ -836,11 +836,10 @@ def start_episode_render(
         def produce() -> dict:
             try:
                 export = store.root / run_id / "media" / "episode.mp4"
-                saved_job = store.root / run_id / "autonomous_job.json"
-                if existing and export.is_file() and saved_job.is_file():
-                    outcome = {"job": json.loads(saved_job.read_text(encoding="utf-8"))}
-                elif existing:
-                    outcome = continue_autonomous_production(run_id, output_root="runs", saved_config=config)
+                if existing:
+                    outcome = load_finished_production(run_id)
+                    if not outcome or Path(outcome["job"]["artifacts"]["shortVideo"]).resolve() != export.resolve():
+                        outcome = continue_autonomous_production(run_id, output_root="runs", saved_config=config)
                 else:
                     brief = deepcopy(draft)
                     if shot_references:

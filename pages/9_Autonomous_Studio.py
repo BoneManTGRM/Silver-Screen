@@ -14,7 +14,7 @@ from silver_screen.comfyui import comfyui_ready, video_backend, video_backend_re
 
 from silver_screen.autonomous_studio import (
     QUALITY_PROFILES, active_production, continue_autonomous_production,
-    enqueue_production, prepare_autonomous_plan, start_autonomous_production,
+    enqueue_production, load_finished_production, prepare_autonomous_plan, start_autonomous_production,
 )
 from silver_screen.runtime import RUN_ID_PATTERN, create_run_id, list_resumable_runs, load_run_manifest, list_runs
 from silver_screen.science import GENRES, SCIENCE, TONES
@@ -55,9 +55,12 @@ if production_id and not draft and not render_task and not st.session_state.get(
             if (manifest.get("brief") or {}).get("screenplayWriter") not in PRODUCTION_LABELS:
                 raise ValueError("This link is for a different studio workflow.")
             if manifest.get("status") == "complete":
-                render_task = (production_id, enqueue_production(
-                    production_id, lambda: continue_autonomous_production(production_id),
-                ))
+                if finished := load_finished_production(production_id):
+                    st.session_state["autonomous_result"] = finished
+                else:
+                    render_task = (production_id, enqueue_production(
+                        production_id, lambda: continue_autonomous_production(production_id),
+                    ))
             else:
                 st.info("This production has a saved checkpoint. Continue it below to check or finish the remaining shots.")
     except (ValueError, OSError):
@@ -308,14 +311,17 @@ else:
 
 if continue_clicked:
     try:
-        run_id = str(run_map[selected_run]["runId"])
-        if (run_map[selected_run].get("brief") or {}).get("screenplayWriter"):
-            future = active_production(run_id) or enqueue_production(
-                run_id, lambda: continue_autonomous_production(run_id),
-            )
-            st.session_state["screenplay-render-task"] = (run_id, future)
+        run_id = str(saved["runId"])
+        if (saved.get("brief") or {}).get("screenplayWriter"):
+            future = active_production(run_id)
+            finished = load_finished_production(run_id) if not future and saved.get("status") == "complete" else None
+            if finished:
+                st.session_state["autonomous_result"] = finished
+            else:
+                future = future or enqueue_production(run_id, lambda: continue_autonomous_production(run_id))
+                st.session_state["screenplay-render-task"] = (run_id, future)
+                st.session_state.pop("autonomous_result", None)
             st.session_state.pop("autonomous_plan", None)
-            st.session_state.pop("autonomous_result", None)
             st.query_params["production"] = run_id
             st.rerun()
         with st.spinner("Continuing the durable production and rerunning finishing..."):

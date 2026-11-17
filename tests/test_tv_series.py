@@ -477,6 +477,12 @@ def test_two_episodes_share_reference_resume_and_reopen_from_archive(creator, mo
         assert tv_series.episode_status(store, episode)["restorable"]
         if number == 1:
             assert len(renderer.calls) == 2
+            incomplete = store.root / run_id
+            incomplete.mkdir()
+            (incomplete / "manifest.json").write_text("{}")
+        else:
+            tv_series.reopen_episode_checkpoint(store, series_id, number)
+            (store.root / run_id / "media" / "episode.mp4").write_bytes(b"truncated export")
         assert tv_series.start_episode_render(store, series_id, number, max_calls=5) == run_id
         active_production(run_id).result(timeout=120)
         episode = store.read(series_id)["episodes"][number - 1]
