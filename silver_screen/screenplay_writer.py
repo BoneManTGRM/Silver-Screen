@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import re
 import secrets
+from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from .ai_video import VideoGenerationError
+from .modal_clip_archive import MODAL_RENDER_ID
 from .modal_renderer import modal_function, screenplay_writer_configured
+from .runtime import atomic_write_json, resolve_runs_root
 from .science import GENRES, TONES
 from .script_sync import estimate_speech_seconds
 
@@ -34,6 +38,47 @@ class ScreenplayError(ValueError):
 
 class ScreenplayStatusUnavailable(ScreenplayError):
     """The existing writer job could not be reached."""
+
+
+def _checkpoint_path(call_id: str) -> Path:
+    if not MODAL_RENDER_ID.fullmatch(call_id):
+        raise ScreenplayError("This writer link is invalid.")
+    return resolve_runs_root() / "screenplay-drafts" / f"{call_id}.json"
+
+
+_CHECKPOINT_LOCK = Lock()
+
+
+def load_screenplay_checkpoint(call_id: str) -> dict[str, Any]:
+    try:
+        data = json.loads(_checkpoint_path(call_id).read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ScreenplayError("This draft is unavailable in the studio.") from exc
+    except ScreenplayError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ScreenplayError("The studio could not read this saved draft.") from exc
+    job = data.get("job") if isinstance(data, dict) else None
+    if not isinstance(job, dict) or job.get("id") != call_id:
+        raise ScreenplayError("The studio could not read this saved draft.")
+    return data
+
+
+def save_screenplay_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    call_id = checkpoint["job"]["id"]
+    try:
+        path = _checkpoint_path(call_id)
+        with _CHECKPOINT_LOCK:
+            try:
+                saved = load_screenplay_checkpoint(call_id)
+            except ScreenplayError:
+                saved = {}
+            if saved.get("draft") or (saved.get("error") and not checkpoint.get("draft")):
+                return saved
+            atomic_write_json(path, checkpoint)
+    except (OSError, ValueError) as exc:
+        raise ScreenplayError("The writer could not save this draft for reopening. Keep this page open.") from exc
+    return checkpoint
 
 
 def _object(**fields: Any) -> dict[str, Any]:
@@ -309,6 +354,8 @@ def poll_writer_result(call_id: str) -> dict[str, Any] | None:
         result = modal.FunctionCall.from_id(call_id).get(timeout=0)
     except TimeoutError:
         return None
+    except modal.exception.AuthError as exc:
+        raise ScreenplayStatusUnavailable("The writer could not authenticate to Modal. Reconnect Modal to check the same draft.") from exc
     except (modal.exception.ConnectionError, modal.exception.ServiceError) as exc:
         raise ScreenplayStatusUnavailable("Could not check Modal. The same script job will be checked again.") from exc
     except modal.exception.Error as exc:

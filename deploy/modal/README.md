@@ -25,7 +25,7 @@ Wan 14B outputs 16 fps at up to 1280 × 720 or 720 × 1280. Choose **2–20 seco
 
 Direct Create can try one more seed within its existing time limit when it detects drift. A fixed seed runs once. Flagged takes remain playable and downloadable and require a review before they can enter a custom cut. Written productions compare visible faces with the original lead photo and use their approved request limit for retries.
 
-The writer offers 20-, 30-, and 60-second ads and 30- or 60-second movie and series trailers. A 60-second cut uses ten six-second Wan 5B shots. Ads can include an optional product reference and end card. Trailers close with a title. The final MP4 appears in Autonomous Studio and can be reopened with its production link while the run remains on disk.
+The writer offers 20-, 30-, and 60-second ads and 30- or 60-second movie and series trailers. Keep the writer page's draft link to reopen a pending or finished script. The studio stores those checkpoints under `/app/runs/screenplay-drafts`, so they persist across redeploys when `/app/runs` is mounted on a volume. A 60-second cut uses ten six-second Wan 5B shots. Ads can include an optional product reference and end card. Trailers close with a title. The final MP4 appears in Autonomous Studio and can be reopened with its production link while the run remains on disk.
 
 The 48 fps clip and film export uses the generated frames and preserves their timing. It repeats frames as needed to reach 48 fps.
 

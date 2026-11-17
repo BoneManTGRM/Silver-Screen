@@ -845,13 +845,12 @@ def test_direct_create_opens_saved_clip_without_video_bytes_from_call(comfy_serv
         next(field for field in reopened.text_input if field.label == "ComfyUI prediction ID").set_value(render_id)
         next(button for button in reopened.button if button.label == "Find render").click().run()
     else:
-        next(box for box in reopened.selectbox if box.label == "Render").select(render_id).run()
         reopened.session_state["direct_create_job"] = {
             "backend": "ComfyUI", "model": "test-video",
             "prediction": {"id": pending_id, "status": "processing"},
         }
         reopened.run()
-        open_saved = next(button for button in reopened.button if button.label == "Open render")
+        open_saved = reopened.button(key=f"open-recent-render-{render_id}")
         assert not open_saved.disabled
         open_saved.click().run()
     assert not reopened.exception
@@ -907,8 +906,7 @@ def test_saved_modal_media_can_be_deleted(comfy_server, monkeypatch, image, arch
     app = AppTest.from_file(page)
     if archived:
         app.run()
-        next(box for box in app.selectbox if box.label == "Render").select(render_id).run()
-        next(button for button in app.button if button.label == "Open render").click().run()
+        app.button(key=f"open-recent-render-{render_id}").click().run()
     else:
         app.query_params["render"] = render_id
         app.run()

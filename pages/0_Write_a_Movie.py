@@ -14,19 +14,58 @@ from silver_screen.screenplay_writer import (
     ScreenplayError,
     ScreenplayStatusUnavailable,
     check_screenplay,
+    load_screenplay_checkpoint,
+    save_screenplay_checkpoint,
     screenplay_lengths,
     submit_screenplay,
 )
+
+
+def keep_writer_checkpoint(job: dict, **result) -> None:
+    checkpoint = {"job": job, **result}
+    try:
+        checkpoint = save_screenplay_checkpoint(checkpoint)
+    except ScreenplayError as exc:
+        st.session_state["screenplay-save-warning"] = str(exc)
+    else:
+        st.session_state.pop("screenplay-save-warning", None)
+    st.session_state["screenplay-writer-checkpoint"] = checkpoint
+    if checkpoint.get("draft"):
+        st.session_state.pop("screenplay-previous-draft", None)
+    if st.query_params.get("draft") != job["id"]:
+        st.query_params["draft"] = job["id"]
+
 
 st.title("Silver Screen")
 st.caption("Review a script and shot list before rendering a movie, advertisement, or trailer.")
 st.page_link("pages/0_TV_Series.py", label="Create a TV series")
 
-draft = st.session_state.get("screenplay-draft")
-job = st.session_state.get("screenplay-writer-job")
+checkpoint = st.session_state.get("screenplay-writer-checkpoint") or {}
+saved_id = (checkpoint.get("job") or {}).get("id")
+requested_id = st.query_params.get("draft")
+if requested_id and requested_id != saved_id:
+    st.session_state.pop("screenplay-previous-draft", None)
+    st.session_state.pop("screenplay-save-warning", None)
+    try:
+        checkpoint = load_screenplay_checkpoint(requested_id)
+    except ScreenplayError as exc:
+        checkpoint = {}
+        st.error(str(exc))
+    st.session_state["screenplay-writer-checkpoint"] = checkpoint
+elif saved_id and not requested_id:
+    st.query_params["draft"] = saved_id
+
+draft = checkpoint.get("draft") or st.session_state.get("screenplay-previous-draft")
+error = checkpoint.get("error")
+saved_request = checkpoint.get("job") or {}
+job = saved_request if saved_request and not checkpoint.get("draft") and not error else None
 ready = screenplay_writer_configured()
-kind = st.radio("What are you making?", list(PRODUCTION_LABELS), format_func=PRODUCTION_LABELS.get, horizontal=True)
+kinds = list(PRODUCTION_LABELS)
+saved_kind = saved_request.get("kind")
+kind = st.radio("What are you making?", kinds, index=kinds.index(saved_kind) if saved_kind in kinds else 0,
+                format_func=PRODUCTION_LABELS.get, horizontal=True)
 is_ad = kind == "ad"
+form_request = saved_request if kind == saved_kind else {}
 with st.form(f"write-{kind}"):
     label, example = {
         "ad": ("Product or campaign brief", "Show a reusable travel mug in use on a morning commute. End with Shop now."),
@@ -34,13 +73,18 @@ with st.form(f"write-{kind}"):
         "movie_trailer": ("Movie title and story", "A pilot finds a city hidden inside a storm. Tease what she risks by trying to save it."),
         "series_trailer": ("Series title and story", "Two siblings inherit a radio station that receives tomorrow’s news. Hint at mysteries across the season."),
     }[kind]
-    idea = st.text_area(label, placeholder=example, max_chars=IDEA_LIMIT, height=118)
-    seconds = st.radio("Length", screenplay_lengths(kind), horizontal=True, format_func=lambda value: f"{value} seconds")
-    lead = st.text_input("Presenter name (optional)" if is_ad else "Lead name (optional)", max_chars=LEAD_LIMIT)
+    idea = st.text_area(label, value=form_request.get("idea", ""), placeholder=example, max_chars=IDEA_LIMIT, height=118)
+    lengths = screenplay_lengths(kind)
+    saved_length = form_request.get("seconds")
+    seconds = st.radio("Length", lengths, index=lengths.index(saved_length) if saved_length in lengths else 0,
+                       horizontal=True, format_func=lambda value: f"{value} seconds")
+    lead = st.text_input("Presenter name (optional)" if is_ad else "Lead name (optional)",
+                         value=form_request.get("lead", ""), max_chars=LEAD_LIMIT)
     end_card = None
     if is_ad:
-        brand = st.text_input("Product or brand name (optional)", max_chars=36)
-        cta = st.text_input("Call to action (optional)", max_chars=64, placeholder="Shop now")
+        saved_card = form_request.get("end_card") or {}
+        brand = st.text_input("Product or brand name (optional)", value=saved_card.get("brand", ""), max_chars=36)
+        cta = st.text_input("Call to action (optional)", value=saved_card.get("cta", ""), max_chars=64, placeholder="Shop now")
         end_card = {"brand": brand, "cta": cta} if brand.strip() or cta.strip() else None
     generate = st.form_submit_button(
         "Write another version" if draft else "Write script", type="primary",
@@ -51,36 +95,44 @@ if not ready:
     st.info("Connect the Modal screenplay writer to generate drafts.")
 if generate and not job:
     try:
-        st.session_state["screenplay-writer-job"] = submit_screenplay(
-            idea, lead, seconds, kind=kind, end_card=end_card,
-        )
+        submitted = submit_screenplay(idea, lead, seconds, kind=kind, end_card=end_card)
+        if draft:
+            st.session_state["screenplay-previous-draft"] = draft
+        keep_writer_checkpoint(submitted)
         st.rerun()
     except ScreenplayError as exc:
         st.error(str(exc))
 
-if job:
+if job and ready:
     @st.fragment(run_every=5)
     def show_writer_status():
+        try:
+            saved = load_screenplay_checkpoint(job["id"])
+        except ScreenplayError:
+            saved = {}
+        if saved.get("draft") or saved.get("error"):
+            keep_writer_checkpoint(**saved)
+            st.rerun()
         try:
             result = check_screenplay(job)
         except ScreenplayStatusUnavailable as exc:
             st.warning(str(exc))
             return
         except ScreenplayError as exc:
-            st.session_state.pop("screenplay-writer-job", None)
-            st.session_state["screenplay-writer-error"] = str(exc)
+            keep_writer_checkpoint(job, error=str(exc))
             st.rerun()
         if result is None:
             st.info("Writing your script. This can take a few minutes.")
             return
-        st.session_state["screenplay-draft"] = result
-        st.session_state.pop("screenplay-writer-job", None)
+        keep_writer_checkpoint(job, draft=result)
         st.rerun()
 
     show_writer_status()
 
-if error := st.session_state.pop("screenplay-writer-error", None):
+if error:
     st.error(error)
+if warning := st.session_state.get("screenplay-save-warning"):
+    st.warning(warning)
 
 if draft:
     draft_kind = draft["kind"]

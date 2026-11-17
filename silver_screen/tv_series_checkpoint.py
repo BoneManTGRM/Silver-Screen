@@ -59,6 +59,14 @@ def unpack_checkpoint(source: Path, workspace: Path) -> None:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(entry) as payload, destination.open("wb") as output:
                     shutil.copyfileobj(payload, output)
-            restored.replace(workspace)
+            previous = Path(staging) / "previous"
+            if workspace.exists():
+                workspace.replace(previous)
+            try:
+                restored.replace(workspace)
+            except OSError:
+                if previous.exists():
+                    previous.replace(workspace)
+                raise
     except BadZipFile as exc:
         raise ValueError("The saved episode checkpoint could not be read.") from exc

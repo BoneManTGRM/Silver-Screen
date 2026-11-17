@@ -244,7 +244,8 @@ def test_tgrm_retries_only_failed_shot_and_reinforces_scar(
     assert shot["status"] == "verified"
 
 
-def test_pending_prediction_can_finish_at_call_ceiling(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shots", [1, 2, 3])
+def test_recovering_pending_video_preserves_the_new_request_budget(tmp_path, monkeypatch, shots):
     monkeypatch.setattr("silver_screen.ai_video.assemble_clips", _fake_assemble)
     monkeypatch.setenv("SILVER_SCREEN_VIDEO_BACKEND", "replicate")
 
@@ -259,17 +260,22 @@ def test_pending_prediction_can_finish_at_call_ceiling(tmp_path, monkeypatch):
 
     pending = {"checked": False}
     settings = dict(
-        target_runtime_seconds=8, max_shots=1, batch_size=1,
-        max_provider_calls=1, client_factory=PendingClient,
+        target_runtime_seconds=8 * shots, max_shots=shots, batch_size=1,
+        max_provider_calls=shots, client_factory=PendingClient,
     )
     initial = generate_ai_video(_state(), tmp_path, **settings)
     assert initial["stopReason"] == "prediction_pending"
     assert initial["queue"]["shots"][0]["status"] == "submitted"
 
     resumed = generate_ai_video(_state(), tmp_path, resume=True, **settings)
+    expected = min(shots, 2)
+    assert resumed["metrics"]["verifiedShots"] == expected
+    assert resumed["metrics"]["providerCalls"] == PendingClient.calls == expected
+    if shots == 3:
+        assert resumed["stopReason"] == "batch_checkpoint"
+        resumed = generate_ai_video(_state(), tmp_path, resume=True, **settings)
     assert resumed["status"] == "complete"
-    assert resumed["metrics"]["providerCalls"] == 1
-    assert PendingClient.calls == 1
+    assert resumed["metrics"]["providerCalls"] == PendingClient.calls == shots
 
 
 def test_provider_call_budget_blocks_before_unapproved_spend(
